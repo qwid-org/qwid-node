@@ -3,6 +3,7 @@ package oqs // import "github.com/open-quantum-safe/liboqs-go/oqs"
 
 /*
 #cgo pkg-config: liboqs
+#include <stdlib.h>
 #include <oqs/oqs.h>
 */
 import "C"
@@ -13,8 +14,12 @@ import (
 	"unsafe"
 )
 
-func init() {
-	fmt.Println(C.GoString(C.OQS_version()))
+// Note: the liboqs version is intentionally not printed at startup to avoid
+// leaking the library version to logs/stdout (CW-M5). Use OQSVersion() if needed.
+
+// OQSVersion returns the linked liboqs version string.
+func OQSVersion() string {
+	return C.GoString(C.OQS_version())
 }
 
 /**************** Misc functions ****************/
@@ -43,7 +48,9 @@ func MaxNumberKEMs() int {
 
 // IsKEMEnabled returns true if a KEM algorithm is enabled, and false otherwise.
 func IsKEMEnabled(algName string) bool {
-	result := C.OQS_KEM_alg_is_enabled(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	result := C.OQS_KEM_alg_is_enabled(cAlg)
 	return result != 0
 }
 
@@ -143,7 +150,9 @@ func (kem *KeyEncapsulation) Init(algName string, secretKey []byte) error {
 		}
 		return errors.New(`"` + algName + `" KEM is not supported by OQS`)
 	}
-	kem.kem = C.OQS_KEM_new(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	kem.kem = C.OQS_KEM_new(cAlg)
 	kem.secretKey = secretKey
 	kem.algDetails.Name = C.GoString(kem.kem.method_name)
 	kem.algDetails.Version = C.GoString(kem.kem.alg_version)
@@ -261,7 +270,9 @@ func MaxNumberSigs() int {
 // IsSigEnabled returns true if a signature algorithm is enabled, and false
 // otherwise.
 func IsSigEnabled(algName string) bool {
-	result := C.OQS_SIG_alg_is_enabled(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	result := C.OQS_SIG_alg_is_enabled(cAlg)
 	return result != 0
 }
 
@@ -363,7 +374,9 @@ func (sig *Signature) Init(algName string, secretKey []byte) error {
 			`" signature mechanism is not supported by OQS`)
 
 	}
-	sig.sig = C.OQS_SIG_new(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	sig.sig = C.OQS_SIG_new(cAlg)
 	sig.secretKey = secretKey
 	sig.algDetails.Name = C.GoString(sig.sig.method_name)
 	sig.algDetails.Version = C.GoString(sig.sig.alg_version)

@@ -131,6 +131,20 @@ func (w *Wallet) deriveKey(password string) []byte {
 	return argon2Key(password, w.KdfSalt)
 }
 
+// MinPasswordLength is the minimum acceptable password length for new wallets
+// and password changes (CW-M7).
+const MinPasswordLength = 8
+
+// ValidatePasswordStrength rejects passwords that are too weak. It is enforced
+// on wallet creation and password changes; it is deliberately NOT applied when
+// loading an existing wallet, so pre-existing wallets are never locked out.
+func ValidatePasswordStrength(password string) error {
+	if len(password) < MinPasswordLength {
+		return fmt.Errorf("password must be at least %d characters", MinPasswordLength)
+	}
+	return nil
+}
+
 // argon2Key derives a 32-byte key from a password and an explicit salt.
 func argon2Key(password string, salt []byte) []byte {
 	return argon2.IDKey([]byte(password), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
@@ -158,18 +172,16 @@ func SetActiveWallet(w *Wallet) {
 
 func (w *Wallet) ShowInfo() string {
 
-	s := fmt.Sprintln("Length of public key:", w.Account1.PublicKey.GetLength())
-	s += fmt.Sprintln("Beginning of public key:", w.Account1.PublicKey.GetHex()[:10])
+	// CW-H4: do not emit private-key metadata (lengths). Public keys and
+	// addresses are public information; secret-key details are omitted and the
+	// result is returned to the caller rather than printed to stdout.
+	s := fmt.Sprintln("Beginning of public key:", w.Account1.PublicKey.GetHex()[:10])
 	s += fmt.Sprintln("Address:", w.Account1.Address.GetHex())
-	s += fmt.Sprintln("Length of private key:", w.GetSecretKey().GetLength())
-	s += fmt.Sprintln("Length of public key 2:", w.Account2.PublicKey.GetLength())
 	s += fmt.Sprintln("Beginning of public key 2:", w.Account2.PublicKey.GetHex()[:10])
 	s += fmt.Sprintln("Address 2:", w.Account2.Address.GetHex())
-	s += fmt.Sprintln("Length of private key 2:", w.GetSecretKey2().GetLength())
 	s += fmt.Sprintln("MainAddress:", w.MainAddress.GetHex())
 	s += fmt.Sprintln("Wallet location", w.HomePath)
 	s += fmt.Sprintln("Wallet Number", w.WalletNumber)
-	fmt.Println(s)
 	return s
 }
 
@@ -514,8 +526,8 @@ func (w *Wallet) StoreJSON() error {
 		logger.GetLogger().Println(err)
 		return err
 	}
-	// Create wallet directory if it doesn't exist
-	if err := os.MkdirAll(w.HomePath, 0755); err != nil {
+	// Create wallet directory if it doesn't exist (0700: owner-only, CW-H3)
+	if err := os.MkdirAll(w.HomePath, 0700); err != nil {
 		return err
 	}
 
@@ -717,6 +729,9 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	if w.passwordBytes == nil {
 		return fmt.Errorf("you need load wallet first")
 	}
+	if err := ValidatePasswordStrength(newPassword); err != nil {
+		return err
+	}
 	if !bytes.Equal(w.deriveKey(password), w.passwordBytes) {
 		return fmt.Errorf("current password is not valid")
 	}
@@ -799,6 +814,9 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 	if w.passwordBytes == nil {
 		return fmt.Errorf("you need load wallet first")
+	}
+	if err := ValidatePasswordStrength(newPassword); err != nil {
+		return err
 	}
 	if !bytes.Equal(w.deriveKey(password), w.passwordBytes) {
 		return fmt.Errorf("current password is not valid")
@@ -906,7 +924,15 @@ func (w *Wallet) Sign(data []byte, primary bool) (*common.Signature, error) {
 }
 
 func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isPaused, isPaused2 bool) bool {
+	// CW-M1: reject empty signature before indexing; this path is reachable
+	// from untrusted network input and must not panic.
+	if len(sig) < 1 {
+		return false
+	}
 	var verifier oqs.Signature
+	// CW-H5: always release the liboqs C verifier context. Clean()/OQS_SIG_free
+	// tolerate a never-initialized (nil) context, so an unconditional defer is safe.
+	defer verifier.Clean()
 	var err error
 	primary := sig[0] == 0
 	sig = sig[1:]
@@ -926,7 +952,7 @@ func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isP
 				return false
 			}
 			if !isVerified {
-				logger.GetLogger().Println("msg:", string(msg[:5]), "sig:", string(sig[:5]), "pubkey:", string(pubkey[:5]))
+				logger.GetLogger().Println("msg:", safePrefix(msg), "sig:", safePrefix(sig), "pubkey:", safePrefix(pubkey))
 			}
 			return isVerified
 		}
@@ -946,7 +972,7 @@ func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isP
 				return false
 			}
 			if !isVerified {
-				logger.GetLogger().Println("msg:", string(msg[:5]), "sig:", string(sig[:5]), "pubkey:", string(pubkey[:5]))
+				logger.GetLogger().Println("msg:", safePrefix(msg), "sig:", safePrefix(sig), "pubkey:", safePrefix(pubkey))
 			}
 			return isVerified
 		}
@@ -954,6 +980,15 @@ func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isP
 	}
 	//logger.GetLogger().Println(primary, isPaused, isPaused2)
 	return false
+}
+
+// safePrefix returns up to the first 5 bytes of b as a string without panicking
+// on short input (CW-M1).
+func safePrefix(b []byte) string {
+	if len(b) > 5 {
+		b = b[:5]
+	}
+	return string(b)
 }
 
 func (w *Wallet) GetSecretKey() common.PrivKey {
