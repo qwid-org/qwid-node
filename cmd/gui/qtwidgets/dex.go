@@ -555,7 +555,7 @@ func MakeTransaction(sender, coinAddr common.Address, primary bool) {
 			ChainID:     ChainID,
 			Sender:      sender,
 			SendingTime: common.GetCurrentTimeStampInSecond(),
-			Nonce:       int16(rand.Intn(0xffff)),
+			Nonce:       int64(rand.Intn(0xffff)),
 		}
 		tx := transactionsDefinition.Transaction{
 			TxData:          txd,
@@ -660,7 +660,7 @@ func MakeTrade(sender, coinAddr common.Address, isBuy bool, primary bool) {
 			ChainID:     ChainID,
 			Sender:      sender,
 			SendingTime: common.GetCurrentTimeStampInSecond(),
-			Nonce:       int16(rand.Intn(0xffff)),
+			Nonce:       int64(rand.Intn(0xffff)),
 		}
 		tx := transactionsDefinition.Transaction{
 			TxData:          txd,

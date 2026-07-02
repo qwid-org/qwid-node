@@ -113,7 +113,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	accDel1.Address = addressOp1.ByteValue
 	account.Accounts.AllAccounts[addressOp1.ByteValue] = accDel1
 
-	walletNonce := int16(0)
+	walletNonce := int64(0)
 	blockTransactionsHashesBytes := [][]byte{}
 	blockTransactionsHashes := []common.Hash{}
 	genesisTxs := []transactionsDefinition.Transaction{}
@@ -271,7 +271,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	return bl
 }
 
-func GenesisTransaction(sender common.Address, recipient common.Address, genTx GenesisTransactions, walletNonce int16, timestamp int64) transactionsDefinition.Transaction {
+func GenesisTransaction(sender common.Address, recipient common.Address, genTx GenesisTransactions, walletNonce int64, timestamp int64) transactionsDefinition.Transaction {
 	pkb, err := hex.DecodeString(genTx.PubKey)
 	if err != nil {
 		logger.GetLogger().Fatal(err)

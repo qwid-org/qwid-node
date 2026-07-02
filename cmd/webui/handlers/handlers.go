@@ -562,7 +562,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       int64(rand.Intn(0xffff)),
 	}
 	if req.MultiSigTxHash != "" {
 		par.MultiSignTx = hashms
@@ -791,7 +791,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       int64(rand.Intn(0xffff)),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1337,7 +1337,7 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       int64(rand.Intn(0xffff)),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1679,7 +1679,7 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       int64(rand.Intn(0xffff)),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1793,7 +1793,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       int64(rand.Intn(0xffff)),
 	}
 
 	tx := transactionsDefinition.Transaction{

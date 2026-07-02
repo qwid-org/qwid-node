@@ -133,7 +133,7 @@ func SampleTransaction(w *wallet.Wallet) transactionsDefinition.Transaction {
 		ChainID:     common.GetChainID(),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand2.Intn(65000)),
+		Nonce:       int64(rand2.Intn(65000)),
 	}
 	t := transactionsDefinition.Transaction{
 		TxData:    txdata,

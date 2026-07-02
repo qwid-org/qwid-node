@@ -167,7 +167,7 @@ func CreateToken(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      wl.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       int64(rand.Intn(0xffff)),
 	}
 
 	tx := transactionsDefinition.Transaction{
