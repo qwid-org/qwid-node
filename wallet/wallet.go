@@ -20,7 +20,19 @@ import (
 
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/crypto/oqs"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/sha3"
+)
+
+// Argon2id key-derivation parameters (CW-C3). Tuned for interactive wallet
+// unlock: ~64 MiB memory makes GPU/ASIC brute-forcing expensive while staying
+// fast enough for a single unlock.
+const (
+	argon2Time    = 3
+	argon2Memory  = 64 * 1024 // KiB => 64 MiB
+	argon2Threads = 4
+	argon2KeyLen  = 32
+	kdfSaltLen    = 16
 )
 
 var globalMutex sync.RWMutex
@@ -35,9 +47,14 @@ type Account struct {
 
 // Wallet Structure map of Height and wallet which was change
 type Wallet struct {
-	password      string
+	// password holds the plaintext passphrase in a zeroable []byte (not an
+	// immutable string) so Wipe() can clear it from memory (CW-C4). It is
+	// retained because wallet reload (GetCurrentWallet) and legacy-format
+	// decryption re-derive keys from it.
+	password      []byte
 	passwordBytes []byte
 	Iv            []byte             `json:"iv"`
+	KdfSalt       []byte             `json:"kdf_salt"`
 	HomePath      string             `json:"home_path"`
 	WalletNumber  uint8              `json:"wallet_number"`
 	MainAddress   common.Address     `json:"main_address"`
@@ -71,7 +88,7 @@ func InitActiveWallet(walletNumber uint8, password string, sigName, sigName2 str
 func GetCurrentWallet(sigName, sigName2 string) (*Wallet, error) {
 	aw := GetActiveWallet()
 	var err error
-	w, err := LoadJSON(aw.WalletNumber, aw.password, sigName, sigName2)
+	w, err := LoadJSON(aw.WalletNumber, string(aw.password), sigName, sigName2)
 	currentWallet := w
 	if err != nil {
 		logger.GetLogger().Println("wrong password: GetCurrentWallet")
@@ -85,8 +102,46 @@ func GetCurrentWallet(sigName, sigName2 string) (*Wallet, error) {
 }
 
 func (w *Wallet) SetPassword(password string) {
-	(*w).password = password
-	(*w).passwordBytes = passwordToByte(password)
+	(*w).password = []byte(password)
+	(*w).passwordBytes = w.deriveKey(password)
+}
+
+// Wipe zeroes the plaintext password and derived key in memory. Call it when a
+// wallet is no longer needed (e.g. session end) to limit exposure in core dumps
+// or swap (CW-C4, CW-H2).
+func (w *Wallet) Wipe() {
+	for i := range w.password {
+		w.password[i] = 0
+	}
+	for i := range w.passwordBytes {
+		w.passwordBytes[i] = 0
+	}
+	w.password = nil
+	w.passwordBytes = nil
+}
+
+// deriveKey derives the AES-256 key from the password using Argon2id and the
+// wallet's stored salt (CW-C3). If the wallet has no salt yet (new wallet or a
+// legacy wallet being migrated), a fresh random salt is generated and stored so
+// the next StoreJSON persists it.
+func (w *Wallet) deriveKey(password string) []byte {
+	if len(w.KdfSalt) == 0 {
+		w.KdfSalt = newKdfSalt()
+	}
+	return argon2Key(password, w.KdfSalt)
+}
+
+// argon2Key derives a 32-byte key from a password and an explicit salt.
+func argon2Key(password string, salt []byte) []byte {
+	return argon2.IDKey([]byte(password), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+}
+
+func newKdfSalt() []byte {
+	salt := make([]byte, kdfSaltLen)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		panic(err)
+	}
+	return salt
 }
 
 func GetActiveWallet() *Wallet {
@@ -118,7 +173,10 @@ func (w *Wallet) ShowInfo() string {
 	return s
 }
 
-func passwordToByte(password string) []byte {
+// legacyPasswordToByte derives the AES key the way pre-security-fix wallets did
+// (a single SHAKE-256 pass, no KDF). Used only by the legacy AES-CTR read path so
+// old wallet files still decrypt; never use it for new encryption.
+func legacyPasswordToByte(password string) []byte {
 	sh := make([]byte, 32)
 	sha3.ShakeSum256(sh, []byte(password))
 	return sh
@@ -139,7 +197,7 @@ func EmptyWallet(walletNumber uint8, sigName, sigName2 string) Wallet {
 	}
 
 	return Wallet{
-		password:      "",
+		password:      nil,
 		passwordBytes: nil,
 		Iv:            nil,
 		Account1:      EmptyAccount(),
@@ -262,30 +320,70 @@ func GenerateNewIv() []byte {
 	return iv
 }
 
+// encrypt encrypts v with AES-256-GCM. GCM is an authenticated (AEAD) mode, so
+// ciphertext tampering is detected on decryption (fixes CW-C1). A fresh random
+// nonce is generated for every call and prepended to the output, so no two
+// encryptions ever reuse a nonce (fixes CW-C2). Output layout: nonce || ciphertext+tag.
 func (w *Wallet) encrypt(v []byte) ([]byte, error) {
 	cb, err := aes.NewCipher(w.passwordBytes)
 	if err != nil {
 		logger.GetLogger().Println("Can not create AES function")
 		return []byte{}, err
 	}
-	v = append([]byte("validationTag"), v...)
-	ciphertext := make([]byte, aes.BlockSize+len(v))
-	stream := cipher.NewCTR(cb, w.Iv)
-	stream.XORKeyStream(ciphertext[aes.BlockSize:], v)
-	return ciphertext, nil
+	gcm, err := cipher.NewGCM(cb)
+	if err != nil {
+		logger.GetLogger().Println("Can not create GCM function")
+		return []byte{}, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return []byte{}, err
+	}
+	// Seal appends the ciphertext (including the auth tag) to nonce, so the
+	// returned slice is nonce || ciphertext+tag.
+	return gcm.Seal(nonce, nonce, v, nil), nil
 }
 
+// decrypt reverses encrypt. New wallets are AES-256-GCM; if GCM authentication
+// fails it falls back to the legacy AES-CTR format so wallet files written before
+// this security fix still load. A wrong password fails both paths.
 func (w *Wallet) decrypt(v []byte) ([]byte, error) {
 	cb, err := aes.NewCipher(w.passwordBytes)
 	if err != nil {
 		logger.GetLogger().Println("Can not create AES function")
 		return []byte{}, err
 	}
+	gcm, err := cipher.NewGCM(cb)
+	if err != nil {
+		logger.GetLogger().Println("Can not create GCM function")
+		return []byte{}, err
+	}
+	ns := gcm.NonceSize()
+	if len(v) >= ns {
+		if plaintext, err := gcm.Open(nil, v[:ns], v[ns:], nil); err == nil {
+			return plaintext, nil
+		}
+	}
+	// Legacy fallback: wallets encrypted with the old AES-CTR scheme.
+	return w.decryptLegacyCTR(v)
+}
 
-	plaintext := make([]byte, aes.BlockSize+len(v))
+// decryptLegacyCTR decrypts wallet secret keys written with the pre-security-fix
+// AES-CTR format (static wallet IV, "validationTag" prefix, dead 16-byte block).
+// Kept only so existing wallets migrate transparently; new writes use GCM.
+func (w *Wallet) decryptLegacyCTR(v []byte) ([]byte, error) {
+	if len(v) < aes.BlockSize || len(w.Iv) == 0 {
+		return nil, fmt.Errorf("wrong password")
+	}
+	cb, err := aes.NewCipher(legacyPasswordToByte(string(w.password)))
+	if err != nil {
+		return nil, err
+	}
+	plaintext := make([]byte, len(v)-aes.BlockSize)
 	stream := cipher.NewCTR(cb, w.Iv)
 	stream.XORKeyStream(plaintext, v[aes.BlockSize:])
-	if !bytes.Equal(plaintext[:len(common.ValidationTag)], []byte(common.ValidationTag)) {
+	if len(plaintext) < len(common.ValidationTag) ||
+		!bytes.Equal(plaintext[:len(common.ValidationTag)], []byte(common.ValidationTag)) {
 		return nil, fmt.Errorf("wrong password")
 	}
 	return plaintext[len(common.ValidationTag):], nil
@@ -619,7 +717,7 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	if w.passwordBytes == nil {
 		return fmt.Errorf("you need load wallet first")
 	}
-	if !bytes.Equal(passwordToByte(password), w.passwordBytes) {
+	if !bytes.Equal(w.deriveKey(password), w.passwordBytes) {
 		return fmt.Errorf("current password is not valid")
 	}
 
@@ -627,18 +725,19 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	defer globalMutex.Unlock()
 
 	w2 := Wallet{
-		password:      newPassword,
-		passwordBytes: passwordToByte(newPassword),
-		Iv:            w.Iv,
-		HomePath:      w.HomePath,
-		WalletNumber:  w.WalletNumber,
-		MainAddress:   w.MainAddress,
-		SigName:       w.SigName,
-		SigName2:      w.SigName2,
-		Account1:      w.Account1,
-		Account2:      w.Account2,
-		Accounts:      w.Accounts,
+		Iv:           w.Iv,
+		HomePath:     w.HomePath,
+		WalletNumber: w.WalletNumber,
+		MainAddress:  w.MainAddress,
+		SigName:      w.SigName,
+		SigName2:     w.SigName2,
+		Account1:     w.Account1,
+		Account2:     w.Account2,
+		Accounts:     w.Accounts,
 	}
+	// Fresh Argon2id salt + key for the new password (KdfSalt left nil so
+	// SetPassword generates one).
+	w2.SetPassword(newPassword)
 
 	for k, v := range w.Accounts {
 		ds, err := w.decrypt(v.EncryptedSecretKey)
@@ -689,6 +788,7 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	w.password = loaded.password
 	w.passwordBytes = loaded.passwordBytes
 	w.Iv = loaded.Iv
+	w.KdfSalt = loaded.KdfSalt
 	w.Accounts = loaded.Accounts
 	return nil
 }
@@ -700,15 +800,18 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 	if w.passwordBytes == nil {
 		return fmt.Errorf("you need load wallet first")
 	}
-	if !bytes.Equal(passwordToByte(password), w.passwordBytes) {
+	if !bytes.Equal(w.deriveKey(password), w.passwordBytes) {
 		return fmt.Errorf("current password is not valid")
 	}
 
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
 
+	// Fresh Argon2id salt for the new password; applied to w only after all
+	// blobs are re-encrypted (below), so decryption of old blobs still works.
+	newSalt := newKdfSalt()
 	oldPasswordBytes := w.passwordBytes
-	newPasswordBytes := passwordToByte(newPassword)
+	newPasswordBytes := argon2Key(newPassword, newSalt)
 
 	// Temporarily keep old password for decryption
 	for k, v := range w.Accounts {
@@ -759,8 +862,9 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 	}
 
 	// Now update to new password
-	w.password = newPassword
+	w.password = []byte(newPassword)
 	w.passwordBytes = newPasswordBytes
+	w.KdfSalt = newSalt
 
 	err := w.StoreJSON()
 	if err != nil {
