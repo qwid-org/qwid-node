@@ -251,6 +251,13 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 	// Nonce transactions (delegated account recipient with zero amount) and genesis transactions are exempt from gas fees
 	isNonceTx := err == nil && n > 0 && n < 256 && tx.GetData().Amount == 0
 	isGenesisTx := tx.Height == 0
+	// AC-H3: reject transactions carrying a foreign chain ID to prevent
+	// cross-chain replay (e.g. testnet txs replayed on mainnet). Genesis txs are
+	// exempt, matching the fee-exemption handling below.
+	if !isGenesisTx && tx.TxParam.ChainID != common.GetChainID() {
+		logger.GetLogger().Println("transaction chain ID mismatch: expected", common.GetChainID(), "got", tx.TxParam.ChainID)
+		return false
+	}
 	if !isNonceTx && !isGenesisTx {
 		if tx.GasPrice <= 0 {
 			logger.GetLogger().Println("transaction gas price must be greater than 0")

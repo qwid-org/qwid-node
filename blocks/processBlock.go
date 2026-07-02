@@ -79,14 +79,15 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 		return nil, fmt.Errorf("root merkleTrie hash check fails")
 	}
 	totalStaked := account.GetStakedInAllDelegatedAccounts()
-	if !common.IsSyncing.Load() {
-
-		if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
-			return nil, fmt.Errorf("price oracle check fails")
-		}
-		if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
-			return nil, fmt.Errorf("rand oracle check fails")
-		}
+	// AC-C4 (CONSENSUS): verify oracles even while syncing. The checks are
+	// deterministic in the block's own oracle data and the replay-reconstructed
+	// staked total, so legitimately produced blocks still pass, while a malicious
+	// sync peer can no longer inject blocks with fabricated oracle values.
+	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
+		return nil, fmt.Errorf("price oracle check fails")
+	}
+	if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
+		return nil, fmt.Errorf("rand oracle check fails")
 	}
 	if len(newBlock.BaseBlock.BaseHeader.Encryption1[:]) == 0 || len(newBlock.BaseBlock.BaseHeader.Encryption2[:]) == 0 {
 		return nil, fmt.Errorf("encryption opt data should be always present in block")
