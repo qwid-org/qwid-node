@@ -43,6 +43,22 @@ func (mt *Transaction) GetGasUsage() int64 {
 	return 2100
 }
 
+// CalcFee returns GasPrice*GasUsage with overflow and sign checking (AC-C2).
+// The prior `GasPrice * GasUsage` could overflow int64 and wrap to a negative
+// value, bypassing fee checks. Callers must treat a non-nil error as an invalid
+// transaction.
+func (mt *Transaction) CalcFee() (int64, error) {
+	if mt.GasPrice < 0 || mt.GasUsage < 0 {
+		return 0, fmt.Errorf("negative gas price (%d) or usage (%d)", mt.GasPrice, mt.GasUsage)
+	}
+	fee := mt.GasPrice * mt.GasUsage
+	// Detect overflow: if either operand is non-zero, dividing back must recover it.
+	if mt.GasPrice != 0 && fee/mt.GasPrice != mt.GasUsage {
+		return 0, fmt.Errorf("fee overflow: GasPrice=%d GasUsage=%d", mt.GasPrice, mt.GasUsage)
+	}
+	return fee, nil
+}
+
 func (mt *Transaction) GetSignature() common.Signature {
 	return mt.Signature
 }

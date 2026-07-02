@@ -239,7 +239,10 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			return 0, 0, err
 		}
 
-		fee := poolTx.GasPrice * poolTx.GasUsage
+		fee, feeErr := poolTx.CalcFee()
+		if feeErr != nil {
+			return 0, 0, feeErr
+		}
 		totalFee += fee
 		amount := poolTx.TxData.Amount
 		total_amount := fee + amount

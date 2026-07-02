@@ -15,7 +15,11 @@ import (
 var ZerosHash = make([]byte, common.HashLength)
 
 func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount int64, sumFee int64, block Block) bool {
-	fee := tx.GasPrice * tx.GasUsage
+	fee, err := tx.CalcFee()
+	if err != nil {
+		logger.GetLogger().Println("invalid fee: CheckStakingTransaction:", err)
+		return false
+	}
 	amount := tx.TxData.Amount
 	address := tx.GetSenderAddress()
 	opacc := block.BaseBlock.BaseHeader.OperatorAccount
@@ -38,7 +42,6 @@ func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount in
 		return false
 	}
 	addressRecipient := tx.TxData.Recipient
-	var err error
 	var n int
 	if tx.GetLockedAmount() > 0 {
 		n, err = account.IntDelegatedAccountFromAddress(tx.TxData.DelegatedAccountForLocking)
@@ -182,14 +185,16 @@ func ProcessMultiSignAndEscrow(tx transactionsDefinition.Transaction) error {
 }
 
 func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) error {
-	fee := tx.GasPrice * tx.GasUsage
+	fee, err := tx.CalcFee()
+	if err != nil {
+		return err
+	}
 	amount := tx.TxData.Amount
 	operational := len(tx.TxData.OptData) > 0
 	address := tx.GetSenderAddress()
 	account.AddTransactionsSender(address.ByteValue, tx.GetHash())
 	addressRecipient := tx.TxData.Recipient
 	account.AddTransactionsRecipient(addressRecipient.ByteValue, tx.GetHash())
-	var err error
 	var n int
 	if tx.GetLockedAmount() > 0 {
 		n, err = account.IntDelegatedAccountFromAddress(tx.TxData.DelegatedAccountForLocking)
