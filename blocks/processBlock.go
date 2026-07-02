@@ -3,6 +3,7 @@ package blocks
 import (
 	"bytes"
 	"fmt"
+	"math/big"
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
@@ -366,7 +367,10 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 	if rewardPerc > 500 {
 		return fmt.Errorf("reward has to be smaller than 50")
 	}
-	rewardOper := int64(float64(reward) * float64(rewardPerc) / 1000.0)
+	// AC-H5/AC-M9: distribute rewards with exact integer arithmetic. Floating
+	// point lost precision above 2^53 and was non-deterministic risk; big.Int
+	// also prevents reward*balance from overflowing int64 before the divide.
+	rewardOper := reward * int64(rewardPerc) / 1000
 
 	err = account.Reward(addr[:], rewardOper, block.GetHeader().Height, n)
 	if err != nil {
@@ -375,9 +379,15 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 
 	reward -= rewardOper
 	rest := reward
+	bigReward := big.NewInt(reward)
+	bigSum := big.NewInt(sum)
 	for _, acc := range staked {
 		if acc.Balance > 0 {
-			userReward := int64(float64(reward) * float64(acc.Balance) / sum)
+			// userReward = reward * acc.Balance / sum, computed without overflow.
+			userReward := new(big.Int).Div(
+				new(big.Int).Mul(bigReward, big.NewInt(acc.Balance)),
+				bigSum,
+			).Int64()
 			rest -= userReward // in the case when rounding lose some fraction of coins
 			err := account.Reward(acc.Address[:], userReward, block.GetHeader().Height, n)
 			if err != nil {

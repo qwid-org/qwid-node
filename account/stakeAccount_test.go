@@ -360,7 +360,7 @@ func TestGetStakedInDelegatedAccount(t *testing.T) {
 	t.Run("empty delegated account", func(t *testing.T) {
 		accs, sum, opAcc := GetStakedInDelegatedAccount(50)
 		assert.Empty(t, accs)
-		assert.Equal(t, float64(0), sum)
+		assert.Equal(t, int64(0), sum)
 		assert.Equal(t, int64(0), opAcc.Balance)
 	})
 
@@ -373,7 +373,7 @@ func TestGetStakedInDelegatedAccount(t *testing.T) {
 
 		accs, sum, opAcc := GetStakedInDelegatedAccount(51)
 		assert.Equal(t, 2, len(accs))
-		assert.Equal(t, float64(3000000), sum)
+		assert.Equal(t, int64(3000000), sum)
 		assert.Equal(t, int64(1000000), opAcc.Balance) // Operational account has 1000000
 	})
 }

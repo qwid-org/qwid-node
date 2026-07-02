@@ -365,7 +365,10 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 	return nil
 }
 
-func GetStakedInDelegatedAccount(n int) ([]Account, float64, Account) {
+// GetStakedInDelegatedAccount returns the staking accounts, the total staked
+// balance (exact int64, previously float64 which lost precision above 2^53 in
+// reward math — AC-H5/AC-M9), and the operational account.
+func GetStakedInDelegatedAccount(n int) ([]Account, int64, Account) {
 	StakingRWMutex.RLock()
 	defer StakingRWMutex.RUnlock()
 	sum := int64(0)
@@ -397,5 +400,5 @@ func GetStakedInDelegatedAccount(n int) ([]Account, float64, Account) {
 		sum += sa.StakedBalance
 		accs = append(accs, acc)
 	}
-	return accs, float64(sum), intAcc
+	return accs, sum, intAcc
 }
