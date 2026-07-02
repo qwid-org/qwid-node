@@ -155,6 +155,64 @@ func TestStake(t *testing.T) {
 	})
 }
 
+// TestStakingDetailsHistoryPreserved verifies AC-C3: staking at successive
+// heights accumulates history instead of erasing the map on each new height.
+func TestStakingDetailsHistoryPreserved(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+	initTestStakingAccounts()
+
+	addr := []byte{40, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+	// Stake at three heights spaced beyond MinNumberOfBlocksInStake apart.
+	h1 := int64(100)
+	h2 := h1 + common.MinNumberOfBlocksInStake + 1
+	h3 := h2 + common.MinNumberOfBlocksInStake + 1
+	assert.NoError(t, Stake(addr, 1000, h1, 20, true, 0, 0))
+	assert.NoError(t, Stake(addr, 1000, h2, 20, true, 0, 0))
+	assert.NoError(t, Stake(addr, 1000, h3, 20, true, 0, 0))
+
+	sa := GetStakingAccountByAddressBytes(addr, 20)
+	assert.Equal(t, 3, len(sa.StakingDetails), "all three heights must be retained")
+	assert.Contains(t, sa.StakingDetails, h1)
+	assert.Contains(t, sa.StakingDetails, h2)
+	assert.Contains(t, sa.StakingDetails, h3)
+}
+
+// TestUnstakeLockedRemovalIndices verifies AC-H1: when several locked entries
+// fully release at once, exactly those entries are removed and the remaining
+// parallel slices stay aligned.
+func TestUnstakeLockedRemovalIndices(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+	initTestStakingAccounts()
+
+	addr := [20]byte{41, 1, 2, 3}
+	// Three locked entries: two release quickly, one large/slow entry survives.
+	sa := StakingAccount{
+		StakedBalance:   1000,
+		LockedAmount:    []int64{10, 10, 900},
+		ReleasePerBlock: []int64{10, 10, 1},
+		LockedInitBlock: []int64{0, 0, 0},
+		StakingDetails:  map[int64][]StakingDetail{},
+	}
+	copy(sa.Address[:], addr[:])
+	StakingRWMutex.Lock()
+	StakingAccounts[21].AllStakingAccounts[addr] = sa
+	StakingRWMutex.Unlock()
+
+	// At height 5, entries 0 and 1 have fully released (10 - 5*10 <= 0); entry 2
+	// still locks 900 - 5*1 = 895.
+	err := Unstake(addr[:], -10, common.MinNumberOfBlocksInStake+5, 21)
+	assert.NoError(t, err)
+
+	res := GetStakingAccountByAddressBytes(addr[:], 21)
+	assert.Equal(t, 1, len(res.LockedAmount), "only the surviving entry remains")
+	assert.Equal(t, int64(900), res.LockedAmount[0])
+	assert.Equal(t, int64(1), res.ReleasePerBlock[0])
+	assert.Equal(t, len(res.LockedAmount), len(res.ReleasePerBlock))
+	assert.Equal(t, len(res.LockedAmount), len(res.LockedInitBlock))
+}
+
 func TestUnstake(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()

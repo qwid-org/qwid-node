@@ -98,8 +98,12 @@ func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operat
 		Reward:      0,
 		LastUpdated: time.Now().Unix(),
 	}
-	if _, ok := acc.StakingDetails[height]; !ok {
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
 		acc.StakingDetails = map[int64][]StakingDetail{}
+	}
+	if _, ok := acc.StakingDetails[height]; !ok {
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
@@ -144,10 +148,29 @@ func Unstake(accb []byte, amount int64, height int64, delegatedAccount int) erro
 	if acc.StakedBalance-locked+amount < 0 {
 		return fmt.Errorf("insufficient staked balance after locking")
 	}
-	for _, ind := range toRemoveLockedInd {
-		acc.LockedAmount = append(acc.LockedAmount[:ind], acc.LockedAmount[ind+1:]...)
-		acc.ReleasePerBlock = append(acc.ReleasePerBlock[:ind], acc.ReleasePerBlock[ind+1:]...)
-		acc.LockedInitBlock = append(acc.LockedInitBlock[:ind], acc.LockedInitBlock[ind+1:]...)
+	// AC-H1: rebuild the three parallel slices excluding the marked indices.
+	// The previous code removed by original index in a loop, but each removal
+	// shifts later elements, so subsequent indices were wrong (dropping the
+	// wrong entry or panicking).
+	if len(toRemoveLockedInd) > 0 {
+		remove := make(map[int]bool, len(toRemoveLockedInd))
+		for _, ind := range toRemoveLockedInd {
+			remove[ind] = true
+		}
+		newAmount := make([]int64, 0, numLocked)
+		newRelease := make([]int64, 0, numLocked)
+		newInit := make([]int64, 0, numLocked)
+		for i := 0; i < numLocked; i++ {
+			if remove[i] {
+				continue
+			}
+			newAmount = append(newAmount, acc.LockedAmount[i])
+			newRelease = append(newRelease, acc.ReleasePerBlock[i])
+			newInit = append(newInit, acc.LockedInitBlock[i])
+		}
+		acc.LockedAmount = newAmount
+		acc.ReleasePerBlock = newRelease
+		acc.LockedInitBlock = newInit
 	}
 	acc.StakedBalance += amount
 	acc.LastStakeHeight = height
@@ -158,8 +181,12 @@ func Unstake(accb []byte, amount int64, height int64, delegatedAccount int) erro
 		Amount:      amount,
 		LastUpdated: time.Now().Unix(),
 	}
-	if _, ok := acc.StakingDetails[height]; !ok {
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
 		acc.StakingDetails = map[int64][]StakingDetail{}
+	}
+	if _, ok := acc.StakingDetails[height]; !ok {
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
@@ -188,8 +215,12 @@ func Reward(accb []byte, reward int64, height int64, delegatedAccount int) error
 		Reward:      reward,
 		LastUpdated: time.Now().Unix(),
 	}
-	if _, ok := acc.StakingDetails[height]; !ok {
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
 		acc.StakingDetails = map[int64][]StakingDetail{}
+	}
+	if _, ok := acc.StakingDetails[height]; !ok {
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
@@ -220,8 +251,12 @@ func WithdrawReward(accb []byte, amount int64, height int64, delegatedAccount in
 		Reward:      amount,
 		LastUpdated: time.Now().Unix(),
 	}
-	if _, ok := acc.StakingDetails[height]; !ok {
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
 		acc.StakingDetails = map[int64][]StakingDetail{}
+	}
+	if _, ok := acc.StakingDetails[height]; !ok {
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
