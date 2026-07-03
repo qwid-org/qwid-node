@@ -3,6 +3,7 @@ package stateDB
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
@@ -10,42 +11,28 @@ import (
 	"github.com/wonabru/qwid-node/logger"
 )
 
-// persistedState is the subset of StateAccount written to disk. Transient
-// snapshot/journal fields are intentionally excluded — they are execution-scoped
-// and meaningless across a restart.
-type persistedState struct {
-	Accounts     map[[common.AddressLength]byte]account.Account                      `json:"accounts"`
-	Codes        map[[common.AddressLength]byte][]byte                               `json:"codes"`
-	CodeHashes   map[[common.AddressLength]byte]common.Hash                          `json:"codeHashes"`
-	StatesHashes map[[common.AddressLength]byte]map[common.Hash]common.Hash          `json:"statesHashes"`
-	Nonces       map[[common.AddressLength]byte]uint64                               `json:"nonces"`
-	States       map[common.Hash][]byte                                              `json:"states"`
-	Balances     map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64 `json:"balances"`
-	Tokens       map[[common.AddressLength]byte]TokenInfo                            `json:"tokens"`
-}
-
 // persistedStateJSON is the JSON-serializable representation with string keys.
 type persistedStateJSON struct {
-	Accounts     map[string]account.Account           `json:"accounts"`
-	Codes        map[string][]byte                    `json:"codes"`
-	CodeHashes   map[string]string                    `json:"codeHashes"`
-	StatesHashes map[string]map[string]string         `json:"statesHashes"`
-	Nonces       map[string]uint64                    `json:"nonces"`
-	States       map[string][]byte                    `json:"states"`
-	Balances     map[string]map[string]int64          `json:"balances"`
-	Tokens       map[string]TokenInfo                 `json:"tokens"`
+	Accounts     map[string]account.Account   `json:"accounts"`
+	Codes        map[string][]byte            `json:"codes"`
+	CodeHashes   map[string]string            `json:"codeHashes"`
+	StatesHashes map[string]map[string]string `json:"statesHashes"`
+	Nonces       map[string]uint64            `json:"nonces"`
+	States       map[string][]byte            `json:"states"`
+	Balances     map[string]map[string]int64  `json:"balances"`
+	Tokens       map[string]TokenInfo         `json:"tokens"`
 }
 
 func (sa *StateAccount) Marshal() ([]byte, error) {
 	psj := persistedStateJSON{
-		Accounts:     convertAccountsToJSON(sa.Accounts),
-		Codes:        convertCodesToJSON(sa.Codes),
-		CodeHashes:   convertHashesToJSON(sa.CodeHashes),
-		StatesHashes: convertStorageToJSON(sa.StatesHashes),
-		Nonces:       convertNoncesToJSON(sa.Nonces),
-		States:       convertStatesToJSON(sa.States),
-		Balances:     convertBalancesToJSON(sa.Balances),
-		Tokens:       convertTokensToJSON(sa.Tokens),
+		Accounts:     hexAddrKeyMap(sa.Accounts),
+		Codes:        hexAddrKeyMap(sa.Codes),
+		CodeHashes:   hexAddrKeyHashValMap(sa.CodeHashes),
+		StatesHashes: hexAddrKeyedStorageToJSON(sa.StatesHashes),
+		Nonces:       hexAddrKeyMap(sa.Nonces),
+		States:       hexHashKeyMap(sa.States),
+		Balances:     hexAddrKeyAddrValMap(sa.Balances),
+		Tokens:       hexAddrKeyMap(sa.Tokens),
 	}
 	return json.Marshal(psj)
 }
@@ -55,196 +42,221 @@ func (sa *StateAccount) Unmarshal(b []byte) error {
 	if err := json.Unmarshal(b, &psj); err != nil {
 		return err
 	}
-	sa.Accounts = convertAccountsFromJSON(psj.Accounts)
-	sa.Codes = convertCodesFromJSON(psj.Codes)
-	sa.CodeHashes = convertHashesFromJSON(psj.CodeHashes)
-	sa.StatesHashes = convertStorageFromJSON(psj.StatesHashes)
-	sa.Nonces = convertNoncesFromJSON(psj.Nonces)
-	sa.States = convertStatesFromJSON(psj.States)
-	sa.Balances = convertBalancesFromJSON(psj.Balances)
-	sa.Tokens = convertTokensFromJSON(psj.Tokens)
+
+	var err error
+	if sa.Accounts, err = addrKeyMapFromHex(psj.Accounts); err != nil {
+		return fmt.Errorf("decode accounts: %w", err)
+	}
+	if sa.Codes, err = addrKeyMapFromHex(psj.Codes); err != nil {
+		return fmt.Errorf("decode codes: %w", err)
+	}
+	if sa.CodeHashes, err = addrKeyHashValMapFromHex(psj.CodeHashes); err != nil {
+		return fmt.Errorf("decode codeHashes: %w", err)
+	}
+	if sa.StatesHashes, err = addrKeyMapFromJSON(psj.StatesHashes); err != nil {
+		return fmt.Errorf("decode statesHashes: %w", err)
+	}
+	if sa.Nonces, err = addrKeyMapFromHex(psj.Nonces); err != nil {
+		return fmt.Errorf("decode nonces: %w", err)
+	}
+	if sa.States, err = hashKeyMapFromHex(psj.States); err != nil {
+		return fmt.Errorf("decode states: %w", err)
+	}
+	if sa.Balances, err = addrKeyAddrValMapFromHex(psj.Balances); err != nil {
+		return fmt.Errorf("decode balances: %w", err)
+	}
+	if sa.Tokens, err = addrKeyMapFromHex(psj.Tokens); err != nil {
+		return fmt.Errorf("decode tokens: %w", err)
+	}
 	return nil
 }
 
-// Conversion functions: array keys to string keys (for JSON marshaling)
-func convertAccountsToJSON(m map[[common.AddressLength]byte]account.Account) map[string]account.Account {
-	result := make(map[string]account.Account)
+// decodeAddress hex-decodes an address key, validating both the hex encoding
+// and the decoded length.
+func decodeAddress(k string) ([common.AddressLength]byte, error) {
+	var addr [common.AddressLength]byte
+	b, err := hex.DecodeString(k)
+	if err != nil {
+		return addr, fmt.Errorf("invalid address hex %q: %w", k, err)
+	}
+	if len(b) != common.AddressLength {
+		return addr, fmt.Errorf("invalid address length for %q: got %d want %d", k, len(b), common.AddressLength)
+	}
+	copy(addr[:], b)
+	return addr, nil
+}
+
+// decodeHash hex-decodes a hash key, validating both the hex encoding and the
+// decoded length.
+func decodeHash(k string) (common.Hash, error) {
+	var h common.Hash
+	b, err := hex.DecodeString(k)
+	if err != nil {
+		return h, fmt.Errorf("invalid hash hex %q: %w", k, err)
+	}
+	if len(b) != common.HashLength {
+		return h, fmt.Errorf("invalid hash length for %q: got %d want %d", k, len(b), common.HashLength)
+	}
+	copy(h[:], b)
+	return h, nil
+}
+
+// hexAddrKeyMap hex-encodes an address-keyed map's keys for JSON marshaling.
+func hexAddrKeyMap[V any](m map[[common.AddressLength]byte]V) map[string]V {
+	result := make(map[string]V, len(m))
 	for k, v := range m {
 		result[hex.EncodeToString(k[:])] = v
 	}
 	return result
 }
 
-func convertCodesToJSON(m map[[common.AddressLength]byte][]byte) map[string][]byte {
-	result := make(map[string][]byte)
+// addrKeyMapFromHex hex-decodes an address-keyed map's keys, propagating any
+// decode error.
+func addrKeyMapFromHex[V any](m map[string]V) (map[[common.AddressLength]byte]V, error) {
+	result := make(map[[common.AddressLength]byte]V, len(m))
+	for k, v := range m {
+		addr, err := decodeAddress(k)
+		if err != nil {
+			return nil, err
+		}
+		result[addr] = v
+	}
+	return result, nil
+}
+
+// hexHashKeyMap hex-encodes a Hash-keyed map's keys for JSON marshaling.
+func hexHashKeyMap[V any](m map[common.Hash]V) map[string]V {
+	result := make(map[string]V, len(m))
 	for k, v := range m {
 		result[hex.EncodeToString(k[:])] = v
 	}
 	return result
 }
 
-func convertHashesToJSON(m map[[common.AddressLength]byte]common.Hash) map[string]string {
-	result := make(map[string]string)
+// hashKeyMapFromHex hex-decodes a Hash-keyed map's keys, propagating any
+// decode error.
+func hashKeyMapFromHex[V any](m map[string]V) (map[common.Hash]V, error) {
+	result := make(map[common.Hash]V, len(m))
+	for k, v := range m {
+		h, err := decodeHash(k)
+		if err != nil {
+			return nil, err
+		}
+		result[h] = v
+	}
+	return result, nil
+}
+
+// hexAddrKeyHashValMap hex-encodes both the address keys and Hash values of a
+// map for JSON marshaling.
+func hexAddrKeyHashValMap(m map[[common.AddressLength]byte]common.Hash) map[string]string {
+	result := make(map[string]string, len(m))
 	for k, v := range m {
 		result[hex.EncodeToString(k[:])] = hex.EncodeToString(v[:])
 	}
 	return result
 }
 
-func convertStorageToJSON(m map[[common.AddressLength]byte]map[common.Hash]common.Hash) map[string]map[string]string {
-	result := make(map[string]map[string]string)
-	for k, innerMap := range m {
-		innerResult := make(map[string]string)
-		for hashKey, hashVal := range innerMap {
-			innerResult[hex.EncodeToString(hashKey[:])] = hex.EncodeToString(hashVal[:])
+// addrKeyHashValMapFromHex hex-decodes both the address keys and Hash values
+// of a map, propagating any decode error.
+func addrKeyHashValMapFromHex(m map[string]string) (map[[common.AddressLength]byte]common.Hash, error) {
+	result := make(map[[common.AddressLength]byte]common.Hash, len(m))
+	for k, v := range m {
+		addr, err := decodeAddress(k)
+		if err != nil {
+			return nil, err
 		}
-		result[hex.EncodeToString(k[:])] = innerResult
-	}
-	return result
-}
-
-func convertNoncesToJSON(m map[[common.AddressLength]byte]uint64) map[string]uint64 {
-	result := make(map[string]uint64)
-	for k, v := range m {
-		result[hex.EncodeToString(k[:])] = v
-	}
-	return result
-}
-
-func convertStatesToJSON(m map[common.Hash][]byte) map[string][]byte {
-	result := make(map[string][]byte)
-	for k, v := range m {
-		result[hex.EncodeToString(k[:])] = v
-	}
-	return result
-}
-
-func convertBalancesToJSON(m map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64) map[string]map[string]int64 {
-	result := make(map[string]map[string]int64)
-	for k, innerMap := range m {
-		innerResult := make(map[string]int64)
-		for innerK, v := range innerMap {
-			innerResult[hex.EncodeToString(innerK[:])] = v
+		h, err := decodeHash(v)
+		if err != nil {
+			return nil, err
 		}
-		result[hex.EncodeToString(k[:])] = innerResult
+		result[addr] = h
 	}
-	return result
+	return result, nil
 }
 
-func convertTokensToJSON(m map[[common.AddressLength]byte]TokenInfo) map[string]TokenInfo {
-	result := make(map[string]TokenInfo)
+// hexHashKeyHashValMap hex-encodes both the keys and values of a
+// Hash-to-Hash map for JSON marshaling.
+func hexHashKeyHashValMap(m map[common.Hash]common.Hash) map[string]string {
+	result := make(map[string]string, len(m))
 	for k, v := range m {
-		result[hex.EncodeToString(k[:])] = v
+		result[hex.EncodeToString(k[:])] = hex.EncodeToString(v[:])
 	}
 	return result
 }
 
-// Conversion functions: string keys to array keys (for JSON unmarshaling)
-func convertAccountsFromJSON(m map[string]account.Account) map[[common.AddressLength]byte]account.Account {
-	result := make(map[[common.AddressLength]byte]account.Account)
+// hashKeyHashValMapFromHex hex-decodes both the keys and values of a
+// Hash-to-Hash map, propagating any decode error.
+func hashKeyHashValMapFromHex(m map[string]string) (map[common.Hash]common.Hash, error) {
+	result := make(map[common.Hash]common.Hash, len(m))
 	for k, v := range m {
-		b, _ := hex.DecodeString(k)
-		var addr [common.AddressLength]byte
-		copy(addr[:], b)
-		result[addr] = v
+		key, err := decodeHash(k)
+		if err != nil {
+			return nil, err
+		}
+		val, err := decodeHash(v)
+		if err != nil {
+			return nil, err
+		}
+		result[key] = val
 	}
-	return result
+	return result, nil
 }
 
-func convertCodesFromJSON(m map[string][]byte) map[[common.AddressLength]byte][]byte {
-	result := make(map[[common.AddressLength]byte][]byte)
-	for k, v := range m {
-		b, _ := hex.DecodeString(k)
-		var addr [common.AddressLength]byte
-		copy(addr[:], b)
-		result[addr] = v
-	}
-	return result
-}
-
-func convertHashesFromJSON(m map[string]string) map[[common.AddressLength]byte]common.Hash {
-	result := make(map[[common.AddressLength]byte]common.Hash)
-	for k, v := range m {
-		b, _ := hex.DecodeString(k)
-		var addr [common.AddressLength]byte
-		copy(addr[:], b)
-		hashB, _ := hex.DecodeString(v)
-		var hash common.Hash
-		copy(hash[:], hashB)
-		result[addr] = hash
-	}
-	return result
-}
-
-func convertStorageFromJSON(m map[string]map[string]string) map[[common.AddressLength]byte]map[common.Hash]common.Hash {
-	result := make(map[[common.AddressLength]byte]map[common.Hash]common.Hash)
+// hexAddrKeyedStorageToJSON hex-encodes the address->(Hash->Hash) nested
+// storage map for JSON marshaling.
+func hexAddrKeyedStorageToJSON(m map[[common.AddressLength]byte]map[common.Hash]common.Hash) map[string]map[string]string {
+	result := make(map[string]map[string]string, len(m))
 	for k, innerMap := range m {
-		b, _ := hex.DecodeString(k)
-		var addr [common.AddressLength]byte
-		copy(addr[:], b)
-		innerResult := make(map[common.Hash]common.Hash)
-		for hashKey, hashVal := range innerMap {
-			keyB, _ := hex.DecodeString(hashKey)
-			valB, _ := hex.DecodeString(hashVal)
-			var keyHash, valHash common.Hash
-			copy(keyHash[:], keyB)
-			copy(valHash[:], valB)
-			innerResult[keyHash] = valHash
+		result[hex.EncodeToString(k[:])] = hexHashKeyHashValMap(innerMap)
+	}
+	return result
+}
+
+// addrKeyMapFromJSON hex-decodes the address->(Hash->Hash) nested storage
+// map, propagating any decode error.
+func addrKeyMapFromJSON(m map[string]map[string]string) (map[[common.AddressLength]byte]map[common.Hash]common.Hash, error) {
+	result := make(map[[common.AddressLength]byte]map[common.Hash]common.Hash, len(m))
+	for k, innerMap := range m {
+		addr, err := decodeAddress(k)
+		if err != nil {
+			return nil, err
+		}
+		innerResult, err := hashKeyHashValMapFromHex(innerMap)
+		if err != nil {
+			return nil, err
 		}
 		result[addr] = innerResult
 	}
-	return result
+	return result, nil
 }
 
-func convertNoncesFromJSON(m map[string]uint64) map[[common.AddressLength]byte]uint64 {
-	result := make(map[[common.AddressLength]byte]uint64)
-	for k, v := range m {
-		b, _ := hex.DecodeString(k)
-		var addr [common.AddressLength]byte
-		copy(addr[:], b)
-		result[addr] = v
-	}
-	return result
-}
-
-func convertStatesFromJSON(m map[string][]byte) map[common.Hash][]byte {
-	result := make(map[common.Hash][]byte)
-	for k, v := range m {
-		b, _ := hex.DecodeString(k)
-		var hash common.Hash
-		copy(hash[:], b)
-		result[hash] = v
-	}
-	return result
-}
-
-func convertBalancesFromJSON(m map[string]map[string]int64) map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64 {
-	result := make(map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64)
+// hexAddrKeyAddrValMap hex-encodes the address->(address->int64) nested
+// balances map for JSON marshaling.
+func hexAddrKeyAddrValMap(m map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64) map[string]map[string]int64 {
+	result := make(map[string]map[string]int64, len(m))
 	for k, innerMap := range m {
-		b, _ := hex.DecodeString(k)
-		var addr [common.AddressLength]byte
-		copy(addr[:], b)
-		innerResult := make(map[[common.AddressLength]byte]int64)
-		for innerK, v := range innerMap {
-			innerB, _ := hex.DecodeString(innerK)
-			var innerAddr [common.AddressLength]byte
-			copy(innerAddr[:], innerB)
-			innerResult[innerAddr] = v
+		result[hex.EncodeToString(k[:])] = hexAddrKeyMap(innerMap)
+	}
+	return result
+}
+
+// addrKeyAddrValMapFromHex hex-decodes the address->(address->int64) nested
+// balances map, propagating any decode error.
+func addrKeyAddrValMapFromHex(m map[string]map[string]int64) (map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64, error) {
+	result := make(map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64, len(m))
+	for k, innerMap := range m {
+		addr, err := decodeAddress(k)
+		if err != nil {
+			return nil, err
+		}
+		innerResult, err := addrKeyMapFromHex(innerMap)
+		if err != nil {
+			return nil, err
 		}
 		result[addr] = innerResult
 	}
-	return result
-}
-
-func convertTokensFromJSON(m map[string]TokenInfo) map[[common.AddressLength]byte]TokenInfo {
-	result := make(map[[common.AddressLength]byte]TokenInfo)
-	for k, v := range m {
-		b, _ := hex.DecodeString(k)
-		var addr [common.AddressLength]byte
-		copy(addr[:], b)
-		result[addr] = v
-	}
-	return result
+	return result, nil
 }
 
 // Store/Load are added in Task 2 (they use database + logger, imported above).
