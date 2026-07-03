@@ -75,7 +75,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	if req.Action == "stake" && am < common.MinStakingUser {
 		JsonError(w, fmt.Sprintf("Minimum staking amount is %f", float64(common.MinStakingUser)/1e8), http.StatusBadRequest)

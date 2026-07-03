@@ -262,7 +262,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	pk := common.PubKey{}
 	primary := req.UsePrimaryEncryption

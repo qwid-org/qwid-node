@@ -86,6 +86,40 @@ func (rl *rateLimiter) isLockedOut(username string) bool {
 	return len(valid) >= maxFailedLogins
 }
 
+// cleanup drops keys whose timestamps are all older than maxAge, so the map does
+// not grow unboundedly with one entry per IP/username ever seen (WH-M8).
+func (rl *rateLimiter) cleanup(maxAge time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for k, times := range rl.entries {
+		var valid []time.Time
+		for _, t := range times {
+			if t.After(cutoff) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.entries, k)
+		} else {
+			rl.entries[k] = valid
+		}
+	}
+}
+
+func init() {
+	// WH-M8: periodically purge stale rate-limiter/lockout entries.
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			for _, rl := range []*rateLimiter{registerLimiter, loginLimiter, loginLockout, financialLimiter, welcomeLimiter} {
+				rl.cleanup(time.Hour)
+			}
+		}
+	}()
+}
+
 func (rl *rateLimiter) allow(ip string, maxCount int, window time.Duration) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()

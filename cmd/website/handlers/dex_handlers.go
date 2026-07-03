@@ -124,7 +124,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	sender := common.Address{}
 	sender.Init(append([]byte{0}, wl.MainAddress.GetBytes()...))
@@ -249,8 +249,8 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenAm := int64(req.TokenAmount * 1e8)
-	qwdAm := int64(req.QwdAmount * 1e8)
+	tokenAm := common.CoinToBaseUnits(req.TokenAmount)
+	qwdAm := common.CoinToBaseUnits(req.QwdAmount)
 
 	sender := common.Address{}
 	sender.Init(append([]byte{0}, wl.MainAddress.GetBytes()...))
