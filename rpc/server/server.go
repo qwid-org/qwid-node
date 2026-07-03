@@ -344,7 +344,11 @@ func handleLTKN(line []byte, reply *[]byte) {
 }
 
 func handleADEX(byt []byte, reply *[]byte) {
-
+	// NP-H8: validate length before slicing (unauthenticated, network-reachable).
+	if len(byt) < common.AddressLength {
+		*reply = []byte("invalid ADEX request length")
+		return
+	}
 	dexAcc := account.GetDexAccountByAddressBytes(byt[:common.AddressLength])
 	marshal := dexAcc.Marshal()
 	*reply = marshal
@@ -443,7 +447,11 @@ func handleDETS(line []byte, reply *[]byte) {
 }
 
 func handleACCT(line []byte, reply *[]byte) {
-
+	// NP-M8: validate length before slicing (network-reachable).
+	if len(line) < common.AddressLength {
+		*reply = []byte("invalid ACCT request length")
+		return
+	}
 	byt := [common.AddressLength]byte{}
 	copy(byt[:], line[:common.AddressLength])
 	account.AccountsRWMutex.RLock()
@@ -462,7 +470,13 @@ func handleACCT(line []byte, reply *[]byte) {
 }
 
 func handleSTAK(line []byte, reply *[]byte) {
-
+	// NP-H7: need the address plus the 1-byte delegated-account index
+	// (unauthenticated, network-reachable). n is a byte, so it always indexes
+	// StakingAccounts (len 256) safely.
+	if len(line) < common.AddressLength+1 {
+		*reply = []byte("invalid STAK request length")
+		return
+	}
 	byt := [common.AddressLength]byte{}
 	copy(byt[:], line[:common.AddressLength])
 	n := int(line[common.AddressLength])
