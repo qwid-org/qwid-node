@@ -61,7 +61,7 @@ func TestGenerateNewWallet(t *testing.T) {
 	w.Account2 = acc2
 
 	assert.NotNil(t, w)
-	assert.Equal(t, password, w.password)
+	assert.Equal(t, password, string(w.password))
 	assert.NotNil(t, w.passwordBytes)
 	assert.NotNil(t, w.Iv)
 	assert.NotNil(t, w.Account1.secretKey)
