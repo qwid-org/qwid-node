@@ -839,6 +839,7 @@ func opSelfdestruct(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext
 	beneficiary := scope.Stack.pop()
 	balance := interpreter.evm.StateDB.GetBalance(scope.Contract.Address())
 	interpreter.evm.StateDB.AddBalance(common.SetByteAddress(beneficiary.Bytes20()), balance)
+	interpreter.evm.StateDB.SubBalance(scope.Contract.Address(), balance) // supply-neutral (DB-C1)
 	interpreter.evm.StateDB.Suicide(scope.Contract.Address())
 	if interpreter.cfg.Debug {
 		interpreter.cfg.Tracer.CaptureEnter(SELFDESTRUCT, scope.Contract.Address(), common.SetByteAddress(beneficiary.Bytes20()), []byte{}, 0, balance)
