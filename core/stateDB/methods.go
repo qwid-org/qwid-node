@@ -1,11 +1,14 @@
 package stateDB
 
 import (
+	"math"
+	"math/big"
+
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/core/types"
 	"github.com/wonabru/qwid-node/crypto"
-	"math/big"
+	"github.com/wonabru/qwid-node/logger"
 )
 
 type TokenInfo struct {
@@ -107,11 +110,53 @@ func (sa *StateAccount) RegisterNewToken(a common.Address, name string, symbol s
 	(*sa).Tokens[a.ByteValue] = ti
 }
 
-func (sa *StateAccount) SubBalance(common.Address, *big.Int) {
-
+// bigToBaseUnits converts an EVM *big.Int amount (base units, 1:1 with native
+// QWD) to int64. ok is false when the amount is outside int64 range; callers
+// saturate rather than wrap (unreachable with valid balances).
+func bigToBaseUnits(amount *big.Int) (v int64, ok bool) {
+	if amount == nil {
+		return 0, true
+	}
+	if !amount.IsInt64() {
+		return 0, false
+	}
+	return amount.Int64(), true
 }
-func (sa *StateAccount) AddBalance(common.Address, *big.Int) {
 
+func (sa *StateAccount) AddBalance(a common.Address, amount *big.Int) {
+	amt, ok := bigToBaseUnits(amount)
+	if !ok {
+		logger.GetLogger().Println("EVM AddBalance: amount exceeds int64 range, saturating", a.GetHex())
+		amt = math.MaxInt64
+	}
+	prev := account.GetBalance(a.ByteValue)
+	next := prev + amt
+	if next < prev { // int64 overflow => saturate
+		next = math.MaxInt64
+	}
+	sa.journal = append(sa.journal, balanceChange{addr: a.ByteValue, prev: prev})
+	sa.SnapShotNum = len(sa.journal)
+	account.SetBalance(a.ByteValue, next)
+}
+
+func (sa *StateAccount) SubBalance(a common.Address, amount *big.Int) {
+	amt, ok := bigToBaseUnits(amount)
+	if !ok {
+		logger.GetLogger().Println("EVM SubBalance: amount exceeds int64 range, saturating", a.GetHex())
+		amt = math.MaxInt64
+	}
+	prev := account.GetBalance(a.ByteValue)
+	// amt is non-negative (EVM balances are uint256-derived) and both operands
+	// are in [0, MaxInt64], so prev-amt cannot int64-underflow; a negative
+	// result just means "insufficient balance" => floor at 0 (a native balance
+	// must never go negative).
+	next := prev - amt
+	if next < 0 {
+		next = 0
+	}
+	sa.journal = append(sa.journal, balanceChange{addr: a.ByteValue, prev: prev})
+	sa.SnapShotNum = len(sa.journal)
+	account.SetBalance(a.ByteValue, next)
 }
 func (sa *StateAccount) GetBalance(a common.Address) *big.Int {
 	return new(big.Int).SetInt64(account.GetBalance(a.ByteValue))

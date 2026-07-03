@@ -1,6 +1,7 @@
 package stateDB
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/wonabru/qwid-node/account"
@@ -240,5 +241,38 @@ func TestEmptyConsidersBalance(t *testing.T) {
 	account.SetBalance(a.ByteValue, 0)
 	if !sa.Empty(a) {
 		t.Fatal("zero nonce/code/balance account not reported Empty")
+	}
+}
+
+func TestAddSubBalanceMutatesNativeAndReverts(t *testing.T) {
+	initNativeAccounts()
+	sa := CreateStateDB()
+	a := addr(0x20)
+	account.SetBalance(a.ByteValue, 1000)
+
+	snap := sa.Snapshot()
+	sa.AddBalance(a, big.NewInt(500))
+	if account.GetBalance(a.ByteValue) != 1500 {
+		t.Fatalf("after AddBalance native = %d, want 1500", account.GetBalance(a.ByteValue))
+	}
+	sa.SubBalance(a, big.NewInt(200))
+	if account.GetBalance(a.ByteValue) != 1300 {
+		t.Fatalf("after SubBalance native = %d, want 1300", account.GetBalance(a.ByteValue))
+	}
+
+	sa.RevertToSnapshot(snap)
+	if account.GetBalance(a.ByteValue) != 1000 {
+		t.Fatalf("after revert native = %d, want 1000 (restored)", account.GetBalance(a.ByteValue))
+	}
+}
+
+func TestSubBalanceFloorsAtZero(t *testing.T) {
+	initNativeAccounts()
+	sa := CreateStateDB()
+	a := addr(0x21)
+	account.SetBalance(a.ByteValue, 50)
+	sa.SubBalance(a, big.NewInt(9999)) // would go negative
+	if account.GetBalance(a.ByteValue) != 0 {
+		t.Fatalf("SubBalance did not floor at 0: got %d", account.GetBalance(a.ByteValue))
 	}
 }

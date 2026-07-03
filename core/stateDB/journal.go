@@ -1,6 +1,9 @@
 package stateDB
 
-import "github.com/wonabru/qwid-node/common"
+import (
+	"github.com/wonabru/qwid-node/account"
+	"github.com/wonabru/qwid-node/common"
+)
 
 // changeEntry is one reversible mutation recorded during execution.
 type changeEntry interface {
@@ -61,4 +64,14 @@ func (c accessSlotChange) revert(sa *StateAccount) {
 	if m, ok := sa.accessSlots[c.addr]; ok {
 		delete(m, c.slot)
 	}
+}
+
+// balanceChange restores a native account balance to its prior value on revert.
+type balanceChange struct {
+	addr [common.AddressLength]byte
+	prev int64
+}
+
+func (c balanceChange) revert(sa *StateAccount) {
+	account.SetBalance(c.addr, c.prev)
 }
