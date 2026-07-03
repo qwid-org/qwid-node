@@ -216,6 +216,9 @@ func (sa *StateAccount) RevertToSnapshot(sn int) {
 	if sn < 0 {
 		sn = 0
 	}
+	if sn > len(sa.journal) {
+		sn = len(sa.journal)
+	}
 	for i := len(sa.journal) - 1; i >= sn; i-- {
 		sa.journal[i].revert(sa)
 	}
