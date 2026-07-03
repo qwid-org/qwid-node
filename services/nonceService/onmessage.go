@@ -268,6 +268,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				sm := statistics.GetStatsManager()
 				sm.UpdateStatistics(newBlock, lastBlock)
 				logger.GetLogger().Println("TPS: ", sm.Stats.Tps)
+				// NP-M11: release this iteration's merkle tree promptly instead of
+				// letting deferred Destroy calls accumulate until the function
+				// returns. Destroy is idempotent, so the defer above is harmless.
+				merkleTrie.Destroy()
 			}
 		}
 	default:

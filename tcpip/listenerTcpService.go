@@ -259,7 +259,9 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			if ok {
 				r = append(rt, r...)
 			}
-			if !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
+			// NP-M3: guard the trailing-marker check so a fragment shorter than
+			// the 7-byte "<-END->" marker cannot panic on r[len(r)-7:].
+			if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
 				rTopic[topic] = r
 			} else {
 				rTopic[topic] = []byte{}
