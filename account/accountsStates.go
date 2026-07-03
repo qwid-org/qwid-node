@@ -64,6 +64,7 @@ func SetBalance(address [common.AddressLength]byte, balance int64) {
 	defer AccountsRWMutex.Unlock()
 	acc := Accounts.AllAccounts[address]
 	acc.Balance = balance
+	acc.Address = address
 	Accounts.AllAccounts[address] = acc
 }
 

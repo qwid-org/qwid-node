@@ -98,6 +98,29 @@ func TestSetBalance(t *testing.T) {
 	})
 }
 
+func TestSetBalanceSetsAddressForNewAccount(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+
+	// Reset the map
+	AccountsRWMutex.Lock()
+	Accounts.AllAccounts = make(map[[common.AddressLength]byte]Account)
+	AccountsRWMutex.Unlock()
+
+	var a [common.AddressLength]byte
+	a[0] = 0x77
+
+	SetBalance(a, 123)
+
+	assert.Equal(t, int64(123), GetBalance(a))
+
+	AccountsRWMutex.RLock()
+	storedAddr := Accounts.AllAccounts[a].Address
+	AccountsRWMutex.RUnlock()
+
+	assert.Equal(t, a, storedAddr)
+}
+
 func TestGetBalance(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
