@@ -27,3 +27,21 @@ func (c slotChange) revert(sa *StateAccount) {
 	}
 	m[c.key] = c.prev
 }
+
+// logChange removes the last-added log on revert.
+type logChange struct{}
+
+func (logChange) revert(sa *StateAccount) {
+	if n := len(sa.logs); n > 0 {
+		sa.logs = sa.logs[:n-1]
+	}
+}
+
+// suicideChange unmarks a suicide on revert.
+type suicideChange struct {
+	addr [common.AddressLength]byte
+}
+
+func (c suicideChange) revert(sa *StateAccount) {
+	delete(sa.suicided, c.addr)
+}

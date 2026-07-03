@@ -25,6 +25,8 @@ type StateAccount struct {
 	Tokens              map[[common.AddressLength]byte]TokenInfo                            `json:"tokens"`
 	SnapShotNum         int                                                                 `json:"snapShotNum"`
 	journal             []changeEntry
+	logs                []*types.Log                           // transient
+	suicided            map[[common.AddressLength]byte]bool    // transient
 	HeightToSnapShotNum map[int64]int                          `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
 	ContractsByHeight   map[int64][][common.AddressLength]byte `json:"contractsByHeight"`
 }
@@ -41,6 +43,7 @@ func CreateStateDB() StateAccount {
 	sa.Tokens = map[[common.AddressLength]byte]TokenInfo{}
 	sa.SnapShotNum = 0
 	sa.journal = nil
+	sa.suicided = map[[common.AddressLength]byte]bool{}
 	sa.HeightToSnapShotNum = map[int64]int{}
 	sa.ContractsByHeight = map[int64][][common.AddressLength]byte{}
 	return sa
@@ -170,11 +173,23 @@ func (sa *StateAccount) SetState(a common.Address, h common.Hash, h2 common.Hash
 	m[h] = h2
 }
 
-func (sa *StateAccount) Suicide(common.Address) bool {
-	return false
+func (sa *StateAccount) Suicide(a common.Address) bool {
+	if _, ok := sa.Accounts[a.ByteValue]; !ok {
+		return false
+	}
+	if sa.suicided == nil {
+		sa.suicided = map[[common.AddressLength]byte]bool{}
+	}
+	if !sa.suicided[a.ByteValue] {
+		sa.journal = append(sa.journal, suicideChange{addr: a.ByteValue})
+		sa.SnapShotNum = len(sa.journal)
+		sa.suicided[a.ByteValue] = true
+	}
+	return true
 }
-func (sa *StateAccount) HasSuicided(common.Address) bool {
-	return false
+
+func (sa *StateAccount) HasSuicided(a common.Address) bool {
+	return sa.suicided[a.ByteValue]
 }
 
 // Exist reports whether the given account exists in state.
@@ -230,9 +245,17 @@ func (sa *StateAccount) Snapshot() int {
 	return len(sa.journal)
 }
 
-func (sa *StateAccount) AddLog(*types.Log) {
-
+func (sa *StateAccount) AddLog(l *types.Log) {
+	sa.journal = append(sa.journal, logChange{})
+	sa.SnapShotNum = len(sa.journal)
+	sa.logs = append(sa.logs, l)
 }
+
+// GetLogs returns the logs accumulated during the current execution.
+func (sa *StateAccount) GetLogs() []*types.Log { return sa.logs }
+
+// ClearLogs resets the per-execution log buffer (call before running a tx).
+func (sa *StateAccount) ClearLogs() { sa.logs = nil }
 func (sa *StateAccount) AddPreimage(h common.Hash, b []byte) {
 	(*sa).States[h] = b
 }

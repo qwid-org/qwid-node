@@ -3,11 +3,13 @@ package blocks
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
 	vm "github.com/wonabru/qwid-node/core/evm"
 	"github.com/wonabru/qwid-node/core/stateDB"
+	"github.com/wonabru/qwid-node/core/types"
 	loggerMain "github.com/wonabru/qwid-node/logger"
 	"github.com/wonabru/qwid-node/params"
 	"github.com/wonabru/qwid-node/transactionsDefinition"
@@ -406,23 +408,46 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	VM.GasPrice = new(big.Int).SetInt64(0)
 	nonce := uint64(tx.TxParam.Nonce)
 
+	// Reset the per-execution log buffer so LOG-opcode events (StateDB.AddLog,
+	// invoked by the interpreter for LOG0-LOG4) captured during this tx don't
+	// leak into the next one.
+	State.ClearLogs()
+
 	if tx.TxData.Recipient == common.EmptyAddress() {
 		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0), nonce)
 
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
-			return logger.ToString(), ret, address, leftOverGas, err
+			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err
 		}
 	} else {
 		address = tx.TxData.Recipient
 		ret, leftOverGas, err = VM.Call(vm.AccountRef(origin), address, code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0))
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
-			return logger.ToString(), ret, address, leftOverGas, err
+			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err
 		}
 	}
 
-	return logger.ToString(), ret, address, uint64(float64(leftOverGas) / gasMult), nil
+	return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, uint64(float64(leftOverGas) / gasMult), nil
+}
+
+// formatEVMLogs renders the LOG-opcode events collected via StateDB.AddLog
+// during this execution as a JSON block appended to the tracer output. This
+// is additive: it does not replace the existing tracer-based OutputLogs
+// content, it feeds the same persistence path (t.OutputLogs) with the
+// consensus-relevant contract event logs that were previously discarded
+// because AddLog was a no-op.
+func formatEVMLogs(evmLogs []*types.Log) string {
+	if len(evmLogs) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(evmLogs)
+	if err != nil {
+		loggerMain.GetLogger().Println(err)
+		return ""
+	}
+	return "\nEVM Logs:\n" + string(b)
 }
 
 func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData []byte, tx transactionsDefinition.Transaction, bl Block) (logs string, ret []byte, address common.Address, leftOverGas uint64, err error) {

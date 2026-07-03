@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/wonabru/qwid-node/common"
+	"github.com/wonabru/qwid-node/core/types"
 )
 
 func addr(b byte) common.Address {
@@ -71,5 +72,34 @@ func TestRevertToSnapshotOutOfRange(t *testing.T) {
 	sa.RevertToSnapshot(snap)
 	if sa.GetState(a, key) != (common.Hash{0x11}) {
 		t.Fatalf("revert to snap did not restore original value, got %v", sa.GetState(a, key))
+	}
+}
+
+func TestAddLogAndRevert(t *testing.T) {
+	sa := CreateStateDB()
+	sa.ClearLogs()
+	snap := sa.Snapshot()
+	sa.AddLog(&types.Log{Address: addr(0x03)})
+	if len(sa.GetLogs()) != 1 {
+		t.Fatalf("log not captured: %d", len(sa.GetLogs()))
+	}
+	sa.RevertToSnapshot(snap)
+	if len(sa.GetLogs()) != 0 {
+		t.Fatalf("log not reverted: %d", len(sa.GetLogs()))
+	}
+}
+
+func TestSuicide(t *testing.T) {
+	sa := CreateStateDB()
+	a := addr(0x04)
+	sa.CreateAccount(a)
+	if sa.HasSuicided(a) {
+		t.Fatal("fresh account reported suicided")
+	}
+	if !sa.Suicide(a) {
+		t.Fatal("Suicide returned false for existing account")
+	}
+	if !sa.HasSuicided(a) {
+		t.Fatal("HasSuicided false after Suicide")
 	}
 }
