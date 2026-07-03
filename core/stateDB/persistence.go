@@ -7,6 +7,7 @@ import (
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
+	"github.com/wonabru/qwid-node/core/types"
 	"github.com/wonabru/qwid-node/database"
 	"github.com/wonabru/qwid-node/logger"
 )
@@ -67,6 +68,29 @@ func (sa *StateAccount) Unmarshal(b []byte) error {
 	}
 	if sa.Tokens, err = addrKeyMapFromHex(psj.Tokens); err != nil {
 		return fmt.Errorf("decode tokens: %w", err)
+	}
+
+	// The journal (and derived SnapShotNum) is per-transaction transient
+	// state and is never part of the persisted JSON. A freshly-loaded state
+	// must start with a clean journal, otherwise stale journal entries from
+	// before the Load() could be reverted against the newly-restored maps.
+	sa.journal = nil
+	sa.SnapShotNum = 0
+	// Defensively ensure the remaining transient fields are non-nil empty
+	// maps/slices rather than nil (a nil slice/map behaves fine for reads
+	// and appends, but this keeps the post-Load state's invariants explicit
+	// and consistent with ResetTransient/ClearSuicided/ClearAccessList).
+	if sa.logs == nil {
+		sa.logs = []*types.Log{}
+	}
+	if sa.suicided == nil {
+		sa.suicided = map[[common.AddressLength]byte]bool{}
+	}
+	if sa.accessAddrs == nil {
+		sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	}
+	if sa.accessSlots == nil {
+		sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
 	}
 	return nil
 }

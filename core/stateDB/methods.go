@@ -323,6 +323,19 @@ func (sa *StateAccount) ClearAccessList() {
 	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
 	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
 }
+
+// ResetTransient clears all per-transaction execution state (journal, snapshot
+// counter, logs, suicides, access list). Call it before each top-level VM
+// invocation so transient state never leaks across transactions on the shared
+// singleton StateAccount.
+func (sa *StateAccount) ResetTransient() {
+	sa.journal = nil
+	sa.SnapShotNum = 0
+	sa.logs = nil
+	sa.suicided = map[[common.AddressLength]byte]bool{}
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+}
 func (sa *StateAccount) AddPreimage(h common.Hash, b []byte) {
 	(*sa).States[h] = b
 }

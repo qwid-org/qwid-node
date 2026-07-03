@@ -408,16 +408,11 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	VM.GasPrice = new(big.Int).SetInt64(0)
 	nonce := uint64(tx.TxParam.Nonce)
 
-	// Reset the per-execution log buffer so LOG-opcode events (StateDB.AddLog,
-	// invoked by the interpreter for LOG0-LOG4) captured during this tx don't
-	// leak into the next one.
-	State.ClearLogs()
-	// Reset the per-execution suicide set so a SELFDESTRUCT in this tx doesn't
-	// permanently mark the address as suicided for all future txs/blocks.
-	State.ClearSuicided()
-	// Reset the per-execution EIP-2929 access list so warm addresses/slots
-	// from this tx don't leak into the next one.
-	State.ClearAccessList()
+	// Reset all per-transaction transient execution state (journal, snapshot
+	// counter, logs, suicides, EIP-2929 access list) so nothing captured
+	// during a previous tx (LOG-opcode events, SELFDESTRUCT marks, warm
+	// addresses/slots, or an unbounded journal) leaks into this one.
+	State.ResetTransient()
 
 	if tx.TxData.Recipient == common.EmptyAddress() {
 		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0), nonce)
@@ -501,6 +496,11 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	VM.Origin = sender
 	VM.GasPrice = new(big.Int).SetInt64(0)
 
+	// Reset all per-transaction transient execution state before invoking the
+	// VM so warm access-list entries / suicide marks / journal from a prior
+	// EvaluateSC or EvaluateSCDex call don't bleed into this DEX execution.
+	State.ResetTransient()
+
 	ret, leftOverGas, err = VM.Call(vm.AccountRef(sender), tokenAddress, optData, uint64(210000), new(big.Int).SetInt64(0))
 	if err != nil {
 		return logger.ToString(), ret, tokenAddress, leftOverGas, err
@@ -550,6 +550,12 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 
 	VM.Origin = origin
 	VM.GasPrice = new(big.Int).SetInt64(0)
+
+	// Reset all per-transaction transient execution state before invoking the
+	// VM so warm access-list entries / suicide marks / journal from a prior
+	// EvaluateSC or EvaluateSCDex call don't bleed into this view execution.
+	State.ResetTransient()
+
 	ret, leftOverGas, err = VM.StaticCall(vm.AccountRef(origin), contractAddr, input, uint64(common.MaxGasUsage))
 	// Konwersja hex do bajtów
 	dataBytes, err := hex.DecodeString(logger.Output)
