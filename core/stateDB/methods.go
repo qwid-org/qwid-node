@@ -134,6 +134,9 @@ func (sa *StateAccount) AddBalance(a common.Address, amount *big.Int) {
 	if next < prev { // int64 overflow => saturate
 		next = math.MaxInt64
 	}
+	if next == prev {
+		return
+	}
 	sa.journal = append(sa.journal, balanceChange{addr: a.ByteValue, prev: prev})
 	sa.SnapShotNum = len(sa.journal)
 	account.SetBalance(a.ByteValue, next)
@@ -153,6 +156,9 @@ func (sa *StateAccount) SubBalance(a common.Address, amount *big.Int) {
 	next := prev - amt
 	if next < 0 {
 		next = 0
+	}
+	if next == prev {
+		return
 	}
 	sa.journal = append(sa.journal, balanceChange{addr: a.ByteValue, prev: prev})
 	sa.SnapShotNum = len(sa.journal)

@@ -1,6 +1,7 @@
 package stateDB
 
 import (
+	"math"
 	"math/big"
 	"testing"
 
@@ -274,5 +275,26 @@ func TestSubBalanceFloorsAtZero(t *testing.T) {
 	sa.SubBalance(a, big.NewInt(9999)) // would go negative
 	if account.GetBalance(a.ByteValue) != 0 {
 		t.Fatalf("SubBalance did not floor at 0: got %d", account.GetBalance(a.ByteValue))
+	}
+}
+
+func TestBalanceSaturates(t *testing.T) {
+	initNativeAccounts()
+	sa := CreateStateDB()
+	a := addr(0x22)
+	// Start near the top of int64 so a further add overflows and saturates.
+	account.SetBalance(a.ByteValue, math.MaxInt64-5)
+	sa.AddBalance(a, big.NewInt(100)) // would overflow int64
+	if account.GetBalance(a.ByteValue) != math.MaxInt64 {
+		t.Fatalf("Add overflow did not saturate to MaxInt64: got %d", account.GetBalance(a.ByteValue))
+	}
+
+	// An amount larger than int64 range must saturate, not wrap.
+	b := addr(0x23)
+	account.SetBalance(b.ByteValue, 10)
+	huge := new(big.Int).Lsh(big.NewInt(1), 70) // 2^70, far beyond int64
+	sa.AddBalance(b, huge)
+	if account.GetBalance(b.ByteValue) != math.MaxInt64 {
+		t.Fatalf("out-of-int64 amount did not saturate: got %d", account.GetBalance(b.ByteValue))
 	}
 }
