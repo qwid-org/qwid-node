@@ -204,6 +204,10 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 
 ## 5. Database & Core/EVM
 
+> **EVM Phase 1 remediation (2026-07-03, branch `security-fixes`, commits OB-91…OB-99):**
+> The EVM `StateAccount` is now persisted to RocksDB (mirroring native account persistence), and the following correctness findings are **FIXED**: **DB-C3** (ecrecover fails loud — secp256k1 is meaningless on this post-quantum chain), **DB-C5** (real EIP-2929 access list), **DB-C6** (AddLog implemented), **DB-H2** (Suicide/HasSuicided, scoped within-tx), **DB-H3** (RevertToSnapshot storage-key corruption fixed via a change journal), **DB-H7/H8** (memory bounds/panic guards, overflow-safe), **DB-M2** (opCreate real nonce), **DB-M5** (dataCopy returns a copy), **DB-M6/M7** (ABI Pack/Unpack panics recovered into errors). **DB-H1** is addressed by the external `StateMutex` contract + persistence-entry locking.
+> **Still open — deferred to Phase 2/3** (require the value/gas model): **DB-C1** (balance bridge to native accounts), **DB-C2** (value transfer re-enable), **DB-C4** (gas refunds). Also deferred: wiring `PrepareAccessList` at tx-start (gas-cosmetic until Phase 3). See `docs/superpowers/specs/2026-07-03-evm-phase1-persistence-correctness-design.md`.
+
 ### CRITICAL
 
 | ID | Finding | File:Lines |
