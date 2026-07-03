@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1470,6 +1471,21 @@ func CallSmartContract(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// solImportRE matches a Solidity import statement (WH-C1).
+var solImportRE = regexp.MustCompile(`(?m)^\s*import\b`)
+
+// sanitizeSolcError strips the temp directory path from compiler output so
+// filesystem structure and any included file contents are not leaked (WH-H1).
+func sanitizeSolcError(s, tmpDir string) string {
+	s = strings.ReplaceAll(s, tmpDir+string(filepath.Separator), "")
+	s = strings.ReplaceAll(s, tmpDir, "")
+	const maxLen = 2000
+	if len(s) > maxLen {
+		s = s[:maxLen] + "…(truncated)"
+	}
+	return s
+}
+
 func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		jsonError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1493,31 +1509,45 @@ func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Contract code too large (max 512 KB)", http.StatusBadRequest)
 		return
 	}
+	// WH-C1: reject imports. Solidity `import` is the only way user code can pull
+	// in external files (e.g. import "/etc/passwd"), so disallow it entirely. The
+	// --base-path/--allow-paths confinement below is the defense-in-depth backstop.
+	if solImportRE.MatchString(req.Code) {
+		jsonError(w, "import statements are not allowed", http.StatusBadRequest)
+		return
+	}
 
-	tmpFile, err := os.CreateTemp("", "contract-*.sol")
+	// Isolate the contract in its own directory so solc's base path can be
+	// confined to it (WH-C1).
+	tmpDir, err := os.MkdirTemp("", "qwid-solc-")
 	if err != nil {
-		jsonError(w, "Failed to create temp file: "+err.Error(), http.StatusInternalServerError)
+		jsonError(w, "Failed to create temp dir", http.StatusInternalServerError)
 		return
 	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer os.RemoveAll(tmpDir)
+	tmpPath := filepath.Join(tmpDir, "contract.sol")
+	if err = os.WriteFile(tmpPath, []byte(req.Code), 0600); err != nil {
+		jsonError(w, "Failed to write contract file", http.StatusInternalServerError)
+		return
+	}
 
-	if _, err = tmpFile.WriteString(req.Code); err != nil {
-		tmpFile.Close()
-		jsonError(w, "Failed to write contract file: "+err.Error(), http.StatusInternalServerError)
-		return
+	// solcArgs confines filesystem access to tmpDir: --base-path is the import
+	// root and --allow-paths is the only extra readable location.
+	solcArgs := func(flag string) []string {
+		return []string{"--evm-version", "paris", "--base-path", tmpDir, "--allow-paths", tmpDir, flag, tmpPath}
 	}
-	tmpFile.Close()
 
 	// Compile bytecode
-	cmd := exec.Command("solc", "--evm-version", "paris", "--bin", tmpPath)
+	cmd := exec.Command("solc", solcArgs("--bin")...)
 	var binOut bytes.Buffer
 	var binErr bytes.Buffer
 	cmd.Stdout = &binOut
 	cmd.Stderr = &binErr
 	err = cmd.Run()
 	if err != nil {
-		jsonError(w, "Solidity compiler error: "+binErr.String(), http.StatusBadRequest)
+		// WH-H1: sanitize compiler output so absolute paths / file contents are
+		// not leaked back to the client.
+		jsonError(w, "Solidity compiler error: "+sanitizeSolcError(binErr.String(), tmpDir), http.StatusBadRequest)
 		return
 	}
 
@@ -1532,7 +1562,7 @@ func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Compile ABI
-	cmd = exec.Command("solc", "--evm-version", "paris", "--abi", tmpPath)
+	cmd = exec.Command("solc", solcArgs("--abi")...)
 	var abiOut bytes.Buffer
 	var abiErr bytes.Buffer
 	cmd.Stdout = &abiOut
@@ -1542,7 +1572,7 @@ func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]string{
 			"bytecode": bytecode,
 			"abi":      "",
-			"warning":  "ABI generation failed: " + abiErr.String(),
+			"warning":  "ABI generation failed: " + sanitizeSolcError(abiErr.String(), tmpDir),
 		})
 		return
 	}
