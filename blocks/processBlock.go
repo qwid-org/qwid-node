@@ -475,6 +475,12 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 
 	staked, rewarded := GetSupplyInStakedAccounts()
 	//coinsInDex := account.GetCoinLiquidityInDex()
+	// AC-H7 invariant (check-only path): this function does NOT call
+	// ProcessBlockTransfers, so it runs against state in which this block's
+	// reward is already reflected in account/staking balances. The reward term
+	// is therefore intentionally omitted here. Do NOT add `reward` to match
+	// CheckBlockAndTransferFunds below — that path checks the invariant BEFORE
+	// distributing the reward, which is why it includes it.
 	if checkFinal && GetSupplyInAccounts()+staked+rewarded+lastBlock.BlockFee != newBlock.GetBlockSupply() {
 		logger.GetLogger().Println("GetSupplyInAccounts()", GetSupplyInAccounts())
 		logger.GetLogger().Println("staked:", staked)
@@ -520,6 +526,10 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	staked, rewarded := GetSupplyInStakedAccounts()
 	//coinsInDex := account.GetCoinLiquidityInDex()
 	supplyInAccounts := GetSupplyInAccounts()
+	// AC-H7 invariant (pre-distribution path): ProcessBlockTransfers is called
+	// later in this function, so the block reward has NOT yet been added to any
+	// balance. It is added here explicitly. This is why the formula differs from
+	// CheckBlockAndTransactions, which checks post-distribution state.
 	calculatedSupply := supplyInAccounts + staked + rewarded + reward + lastBlock.BlockFee
 	expectedSupply := newBlock.GetBlockSupply()
 	if calculatedSupply != expectedSupply {
