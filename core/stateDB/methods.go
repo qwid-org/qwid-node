@@ -113,8 +113,8 @@ func (sa *StateAccount) SubBalance(common.Address, *big.Int) {
 func (sa *StateAccount) AddBalance(common.Address, *big.Int) {
 
 }
-func (sa *StateAccount) GetBalance(common.Address) *big.Int {
-	return new(big.Int).SetInt64(0)
+func (sa *StateAccount) GetBalance(a common.Address) *big.Int {
+	return new(big.Int).SetInt64(account.GetBalance(a.ByteValue))
 }
 
 func (sa *StateAccount) GetNonce(a common.Address) uint64 {
@@ -203,10 +203,11 @@ func (sa *StateAccount) Exist(a common.Address) bool {
 	return ok
 }
 
-// Empty returns whether the given account is empty. Empty
-// is defined according to EIP161 (balance = nonce = code = 0).
+// Empty returns whether the given account is empty per EIP-161
+// (nonce == 0 && code == 0 && balance == 0).
 func (sa *StateAccount) Empty(a common.Address) bool {
-	return sa.Nonces[a.ByteValue] == 0 && len(sa.Codes[a.ByteValue]) == 0
+	return sa.Nonces[a.ByteValue] == 0 && len(sa.Codes[a.ByteValue]) == 0 &&
+		sa.GetBalance(a).Sign() == 0
 }
 
 // PrepareAccessList resets the warm address/slot sets for a new transaction

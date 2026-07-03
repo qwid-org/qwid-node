@@ -3,6 +3,7 @@ package stateDB
 import (
 	"testing"
 
+	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/core/types"
 )
@@ -202,5 +203,42 @@ func TestAccessListRevert(t *testing.T) {
 	sa.ClearAccessList()
 	if sa.AddressInAccessList(a) {
 		t.Fatal("address still warm after ClearAccessList")
+	}
+}
+
+// initNativeAccounts resets the native account map so balance bridging has a
+// clean, non-nil map to write into.
+func initNativeAccounts() {
+	account.AccountsRWMutex.Lock()
+	account.Accounts.AllAccounts = make(map[[common.AddressLength]byte]account.Account)
+	account.AccountsRWMutex.Unlock()
+}
+
+func TestGetBalanceReadsNative(t *testing.T) {
+	initNativeAccounts()
+	sa := CreateStateDB()
+	a := addr(0x10)
+	account.SetBalance(a.ByteValue, 4200)
+	if got := sa.GetBalance(a); got.Int64() != 4200 {
+		t.Fatalf("GetBalance = %s, want 4200", got.String())
+	}
+	// Absent account reads as zero.
+	if got := sa.GetBalance(addr(0x11)); got.Sign() != 0 {
+		t.Fatalf("absent GetBalance = %s, want 0", got.String())
+	}
+}
+
+func TestEmptyConsidersBalance(t *testing.T) {
+	initNativeAccounts()
+	sa := CreateStateDB()
+	a := addr(0x12)
+	// zero nonce, no code, but non-zero balance => NOT empty (EIP-161).
+	account.SetBalance(a.ByteValue, 1)
+	if sa.Empty(a) {
+		t.Fatal("account with balance reported Empty")
+	}
+	account.SetBalance(a.ByteValue, 0)
+	if !sa.Empty(a) {
+		t.Fatal("zero nonce/code/balance account not reported Empty")
 	}
 }
