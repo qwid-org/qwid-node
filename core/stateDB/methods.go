@@ -25,10 +25,12 @@ type StateAccount struct {
 	Tokens              map[[common.AddressLength]byte]TokenInfo                            `json:"tokens"`
 	SnapShotNum         int                                                                 `json:"snapShotNum"`
 	journal             []changeEntry
-	logs                []*types.Log                           // transient
-	suicided            map[[common.AddressLength]byte]bool    // transient
-	HeightToSnapShotNum map[int64]int                          `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
-	ContractsByHeight   map[int64][][common.AddressLength]byte `json:"contractsByHeight"`
+	logs                []*types.Log                                        // transient
+	suicided            map[[common.AddressLength]byte]bool                 // transient
+	accessAddrs         map[[common.AddressLength]byte]bool                 // transient, EIP-2929 warm addresses
+	accessSlots         map[[common.AddressLength]byte]map[common.Hash]bool // transient, EIP-2929 warm slots
+	HeightToSnapShotNum map[int64]int                                       `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
+	ContractsByHeight   map[int64][][common.AddressLength]byte              `json:"contractsByHeight"`
 }
 
 func CreateStateDB() StateAccount {
@@ -44,6 +46,8 @@ func CreateStateDB() StateAccount {
 	sa.SnapShotNum = 0
 	sa.journal = nil
 	sa.suicided = map[[common.AddressLength]byte]bool{}
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
 	sa.HeightToSnapShotNum = map[int64]int{}
 	sa.ContractsByHeight = map[int64][][common.AddressLength]byte{}
 	return sa
@@ -205,26 +209,73 @@ func (sa *StateAccount) Empty(a common.Address) bool {
 	return sa.Nonces[a.ByteValue] == 0 && len(sa.Codes[a.ByteValue]) == 0
 }
 
+// PrepareAccessList resets the warm address/slot sets for a new transaction
+// and pre-warms the sender, destination, precompiles, and the tx's EIP-2930
+// access list, per EIP-2929/2930. This bypasses the journal since it only
+// happens at the start of a transaction, before any snapshot can be taken.
 func (sa *StateAccount) PrepareAccessList(sender common.Address, dest *common.Address, precompiles []common.Address, txAccesses types.AccessList) {
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+	sa.addAddrNoJournal(sender)
+	if dest != nil {
+		sa.addAddrNoJournal(*dest)
+	}
+	for _, p := range precompiles {
+		sa.addAddrNoJournal(p)
+	}
+	for _, tuple := range txAccesses {
+		sa.addAddrNoJournal(tuple.Address)
+		for _, h := range tuple.StorageKeys {
+			sa.addSlotNoJournal(tuple.Address, h)
+		}
+	}
+}
 
+func (sa *StateAccount) addAddrNoJournal(a common.Address) {
+	sa.accessAddrs[a.ByteValue] = true
 }
+
+func (sa *StateAccount) addSlotNoJournal(a common.Address, slot common.Hash) {
+	m, ok := sa.accessSlots[a.ByteValue]
+	if !ok {
+		m = map[common.Hash]bool{}
+		sa.accessSlots[a.ByteValue] = m
+	}
+	m[slot] = true
+}
+
 func (sa *StateAccount) AddressInAccessList(addr common.Address) bool {
-	return true
+	return sa.accessAddrs[addr.ByteValue]
 }
+
 func (sa *StateAccount) SlotInAccessList(addr common.Address, slot common.Hash) (addressOk bool, slotOk bool) {
-	return true, true
+	addressOk = sa.accessAddrs[addr.ByteValue]
+	if m, ok := sa.accessSlots[addr.ByteValue]; ok {
+		slotOk = m[slot]
+	}
+	return addressOk, slotOk
 }
 
 // AddAddressToAccessList adds the given address to the access list. This operation is safe to perform
 // even if the feature/fork is not active yet
 func (sa *StateAccount) AddAddressToAccessList(addr common.Address) {
-
+	if !sa.accessAddrs[addr.ByteValue] {
+		sa.journal = append(sa.journal, accessAddrChange{addr: addr.ByteValue})
+		sa.SnapShotNum = len(sa.journal)
+		sa.accessAddrs[addr.ByteValue] = true
+	}
 }
 
 // AddSlotToAccessList adds the given (address,slot) to the access list. This operation is safe to perform
 // even if the feature/fork is not active yet
 func (sa *StateAccount) AddSlotToAccessList(addr common.Address, slot common.Hash) {
-
+	sa.AddAddressToAccessList(addr)
+	m, ok := sa.accessSlots[addr.ByteValue]
+	if !ok || !m[slot] {
+		sa.journal = append(sa.journal, accessSlotChange{addr: addr.ByteValue, slot: slot})
+		sa.SnapShotNum = len(sa.journal)
+		sa.addSlotNoJournal(addr, slot)
+	}
 }
 
 func (sa *StateAccount) RevertToSnapshot(sn int) {

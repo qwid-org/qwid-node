@@ -45,3 +45,20 @@ type suicideChange struct {
 func (c suicideChange) revert(sa *StateAccount) {
 	delete(sa.suicided, c.addr)
 }
+
+// accessAddrChange unmarks a warm address on revert.
+type accessAddrChange struct{ addr [common.AddressLength]byte }
+
+func (c accessAddrChange) revert(sa *StateAccount) { delete(sa.accessAddrs, c.addr) }
+
+// accessSlotChange unmarks a warm (address, slot) pair on revert.
+type accessSlotChange struct {
+	addr [common.AddressLength]byte
+	slot common.Hash
+}
+
+func (c accessSlotChange) revert(sa *StateAccount) {
+	if m, ok := sa.accessSlots[c.addr]; ok {
+		delete(m, c.slot)
+	}
+}

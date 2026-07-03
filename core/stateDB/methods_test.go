@@ -143,3 +143,25 @@ func TestSuicideRevertAndNonexistent(t *testing.T) {
 		t.Fatal("HasSuicided true after ClearSuicided")
 	}
 }
+
+func TestAccessList(t *testing.T) {
+	sa := CreateStateDB()
+	a := addr(0x05)
+	if sa.AddressInAccessList(a) {
+		t.Fatal("address unexpectedly warm before add")
+	}
+	sa.AddAddressToAccessList(a)
+	if !sa.AddressInAccessList(a) {
+		t.Fatal("address not warm after add")
+	}
+	slot := common.Hash{0xCC}
+	adOk, slOk := sa.SlotInAccessList(a, slot)
+	if !adOk || slOk {
+		t.Fatalf("slot state wrong before add: addr=%v slot=%v", adOk, slOk)
+	}
+	sa.AddSlotToAccessList(a, slot)
+	adOk, slOk = sa.SlotInAccessList(a, slot)
+	if !adOk || !slOk {
+		t.Fatal("slot not warm after add")
+	}
+}
