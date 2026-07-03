@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -123,6 +124,11 @@ func main() {
 	server := &http.Server{
 		Addr:    "127.0.0.1:" + port,
 		Handler: mux,
+		// WH-M5: bound connection lifetimes to mitigate Slowloris-style attacks.
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
@@ -144,11 +150,32 @@ func main() {
 	fmt.Println("Server stopped")
 }
 
+// isAllowedOrigin permits only loopback origins (this is a local wallet UI).
+// WH-C2: replaces the wildcard Access-Control-Allow-Origin, which let any
+// website issue authenticated-by-cookie/localhost requests and drain the wallet.
+func isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// WH-H5: basic hardening headers.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {

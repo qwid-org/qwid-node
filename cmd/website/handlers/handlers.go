@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/wonabru/qwid-node/wallet"
 )
@@ -116,11 +118,34 @@ var WebsiteBasePath string
 // 	}
 // }
 
+// isAllowedOrigin reflects only origins listed in the CORS_ALLOWED_ORIGINS
+// environment variable (comma-separated). WH-C2: replaces the wildcard
+// Access-Control-Allow-Origin so arbitrary sites cannot script the wallet API.
+// With no env set, no cross-origin is allowed (same-origin still works).
+func isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	for _, a := range strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",") {
+		if strings.TrimSpace(a) == origin && a != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func CorsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// WH-H5: security headers.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {

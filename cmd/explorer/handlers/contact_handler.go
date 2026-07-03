@@ -39,6 +39,13 @@ func SendContact(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Invalid email address", http.StatusBadRequest)
 		return
 	}
+	// WH-H7: reject CR/LF in fields that are placed into email headers, to
+	// prevent SMTP header injection (e.g. adding Bcc: to relay spam).
+	if strings.ContainsAny(req.Email, "\r\n") || strings.ContainsAny(req.Subject, "\r\n") ||
+		strings.ContainsAny(req.Name, "\r\n") {
+		jsonError(w, "Invalid characters in input", http.StatusBadRequest)
+		return
+	}
 
 	smtpUser := os.Getenv("SMTP_USER")
 	smtpPass := os.Getenv("SMTP_PASS")

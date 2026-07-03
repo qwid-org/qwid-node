@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -87,6 +88,9 @@ func (s *SessionStore) SetCookie(w http.ResponseWriter, token string) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		// WH-H4: mark the session cookie Secure (HTTPS-only) by default. Set
+		// COOKIE_INSECURE=true only for local HTTP development.
+		Secure:   os.Getenv("COOKIE_INSECURE") != "true",
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(sessionTimeout.Seconds()),
 	})

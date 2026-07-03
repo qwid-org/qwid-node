@@ -160,6 +160,11 @@ func main() {
 	server := &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
+		// WH-M5: connection timeouts to mitigate Slowloris.
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

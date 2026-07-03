@@ -85,8 +85,9 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		JsonError(w, "Username must be 3-32 characters", http.StatusBadRequest)
 		return
 	}
-	if len(req.Password) < 6 {
-		JsonError(w, "Password must be at least 6 characters", http.StatusBadRequest)
+	// WH-M1: enforce the shared minimum password strength (8+ chars).
+	if err := wallet.ValidatePasswordStrength(req.Password); err != nil {
+		JsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
