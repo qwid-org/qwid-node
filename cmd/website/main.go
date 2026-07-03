@@ -134,15 +134,15 @@ func main() {
 	mux.HandleFunc("/api/wallet/mnemonic", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.GetMnemonic)))
 	mux.HandleFunc("/api/wallet/change-password", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.ChangePassword)))
 	mux.HandleFunc("/api/account", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.GetAccount)))
-	mux.HandleFunc("/api/send", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.SendTransaction)))
+	mux.HandleFunc("/api/send", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.FinancialRateLimit(handlers.SendTransaction))))
 	mux.HandleFunc("/api/history", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.GetHistory)))
 	mux.HandleFunc("/api/pending", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.GetPending)))
-	mux.HandleFunc("/api/staking/execute", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.ExecuteStaking)))
+	mux.HandleFunc("/api/staking/execute", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.FinancialRateLimit(handlers.ExecuteStaking))))
 	mux.HandleFunc("/api/dex/tokens", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.GetTokens)))
 	mux.HandleFunc("/api/dex/info", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.GetDexInfo)))
-	mux.HandleFunc("/api/dex/trade", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.TradeDex)))
-	mux.HandleFunc("/api/dex/execute", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.ExecuteDex)))
-	mux.HandleFunc("/api/token/create", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.CreateToken)))
+	mux.HandleFunc("/api/dex/trade", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.FinancialRateLimit(handlers.TradeDex))))
+	mux.HandleFunc("/api/dex/execute", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.FinancialRateLimit(handlers.ExecuteDex))))
+	mux.HandleFunc("/api/token/create", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.FinancialRateLimit(handlers.CreateToken))))
 
 	// Serve static files
 	staticFS, _ := fs.Sub(staticFiles, "static")
@@ -157,8 +157,12 @@ func main() {
 	fmt.Printf("  Press Ctrl+C to stop\n")
 	fmt.Printf("===========================================\n\n")
 
+	// WH-M6: bind address is configurable. Public deployments should terminate
+	// TLS at a reverse proxy and set BIND_ADDRESS=127.0.0.1 so plaintext HTTP is
+	// never exposed directly on the network.
+	bindHost := os.Getenv("BIND_ADDRESS")
 	server := &http.Server{
-		Addr:    ":" + port,
+		Addr:    bindHost + ":" + port,
 		Handler: mux,
 		// WH-M5: connection timeouts to mitigate Slowloris.
 		ReadTimeout:       15 * time.Second,

@@ -65,8 +65,14 @@ func main() {
 	fmt.Printf("  Press Ctrl+C to stop\n")
 	fmt.Printf("===========================================\n\n")
 
+	// WH-M12: bind address is configurable (default all interfaces for a public
+	// explorer). Set BIND_ADDRESS=127.0.0.1 to restrict, e.g. behind a TLS proxy.
+	bindHost := os.Getenv("BIND_ADDRESS")
+	if bindHost == "" {
+		bindHost = "0.0.0.0"
+	}
 	server := &http.Server{
-		Addr:    "0.0.0.0:" + port,
+		Addr:    bindHost + ":" + port,
 		Handler: mux,
 		// WH-M5: connection timeouts to mitigate Slowloris.
 		ReadTimeout:       15 * time.Second,

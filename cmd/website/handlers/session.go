@@ -71,7 +71,30 @@ func (s *SessionStore) Get(token string) *Session {
 func (s *SessionStore) Delete(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, token)
+	if sess, ok := s.sessions[token]; ok {
+		wipeSessionWallet(sess) // WH-M9
+		delete(s.sessions, token)
+	}
+}
+
+// DeleteByUsername removes any existing sessions for a user (WH-H8): a fresh
+// login invalidates prior sessions so a stolen/leaked token cannot outlive it.
+func (s *SessionStore) DeleteByUsername(username string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, sess := range s.sessions {
+		if sess.Username == username {
+			wipeSessionWallet(sess)
+			delete(s.sessions, token)
+		}
+	}
+}
+
+// wipeSessionWallet zeroes the wallet's key material (WH-M9). Caller holds s.mu.
+func wipeSessionWallet(sess *Session) {
+	if sess != nil && sess.Wallet != nil {
+		sess.Wallet.Wipe()
+	}
 }
 
 func (s *SessionStore) GetFromRequest(r *http.Request) *Session {
@@ -115,6 +138,7 @@ func (s *SessionStore) cleanupLoop() {
 		now := time.Now()
 		for token, sess := range s.sessions {
 			if now.Sub(sess.LastAccess) > sessionTimeout {
+				wipeSessionWallet(sess) // WH-M9
 				delete(s.sessions, token)
 			}
 		}

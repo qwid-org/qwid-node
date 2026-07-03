@@ -168,8 +168,13 @@ func isAllowedOrigin(origin string) bool {
 	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
+// maxRequestBodyBytes bounds request bodies (WH-H9). 2 MiB covers JSON and the
+// 512 KB contract-compile payload.
+const maxRequestBodyBytes = 2 << 20
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes) // WH-H9
 		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")

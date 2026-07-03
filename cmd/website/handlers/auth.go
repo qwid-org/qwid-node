@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,7 +30,61 @@ type rateLimiter struct {
 var (
 	registerLimiter = &rateLimiter{entries: make(map[string][]time.Time)}
 	loginLimiter    = &rateLimiter{entries: make(map[string][]time.Time)}
+	// WH-M11: per-account failed-login lockout (independent of the IP limiter,
+	// which WH-M10 also hardens).
+	loginLockout = &rateLimiter{entries: make(map[string][]time.Time)}
+	// WH-M3: rate limiter for financial endpoints (send/stake/trade).
+	financialLimiter = &rateLimiter{entries: make(map[string][]time.Time)}
+	// WH-H2: global cap on welcome-transaction issuance, so an attacker with many
+	// IPs cannot farm unlimited welcome funds via registration.
+	welcomeLimiter = &rateLimiter{entries: make(map[string][]time.Time)}
 )
+
+const maxWelcomePerHour = 50
+
+// FinancialRateLimit limits state-changing money operations per client IP.
+func FinancialRateLimit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !financialLimiter.allow(getClientIP(r), 20, time.Minute) {
+			JsonError(w, "Too many requests. Please slow down.", http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
+}
+
+const (
+	maxFailedLogins = 5
+	lockoutWindow   = 15 * time.Minute
+)
+
+// recordFailure logs a failed login for username. clearFailures resets them on
+// a successful login. isLockedOut reports whether the account is currently locked.
+func (rl *rateLimiter) recordFailure(username string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.entries[username] = append(rl.entries[username], time.Now())
+}
+
+func (rl *rateLimiter) clearFailures(username string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	delete(rl.entries, username)
+}
+
+func (rl *rateLimiter) isLockedOut(username string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-lockoutWindow)
+	var valid []time.Time
+	for _, t := range rl.entries[username] {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	rl.entries[username] = valid
+	return len(valid) >= maxFailedLogins
+}
 
 func (rl *rateLimiter) allow(ip string, maxCount int, window time.Duration) bool {
 	rl.mu.Lock()
@@ -53,11 +109,21 @@ func (rl *rateLimiter) allow(ip string, maxCount int, window time.Duration) bool
 	return true
 }
 
+// getClientIP returns the client IP for rate limiting. WH-M10: X-Forwarded-For
+// is attacker-controlled and is only trusted when TRUST_PROXY=true (i.e. the app
+// really is behind a proxy that sets it). Otherwise the real transport peer
+// address is used, so an attacker cannot rotate the header to bypass limits.
 func getClientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return fwd
+	if os.Getenv("TRUST_PROXY") == "true" {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			return strings.TrimSpace(strings.Split(fwd, ",")[0])
+		}
 	}
-	return r.RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func Register(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +172,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 
 	// Create user wallet directory
 	walletDir := UserWalletDir(WebsiteBasePath, req.Username)
-	if err := os.MkdirAll(walletDir, 0755); err != nil {
+	if err := os.MkdirAll(walletDir, 0700); err != nil {
 		JsonError(w, "Failed to create wallet directory", http.StatusInternalServerError)
 		return
 	}
@@ -162,8 +228,13 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send welcome transaction (5000 QWD) from node wallet
-	go sendWelcomeTransaction(wl.MainAddress)
+	// Send welcome transaction (5000 QWD) from node wallet, subject to a global
+	// hourly cap (WH-H2). Registration still succeeds if the cap is reached.
+	if welcomeLimiter.allow("global", maxWelcomePerHour, time.Hour) {
+		go sendWelcomeTransaction(wl.MainAddress)
+	} else {
+		logger.GetLogger().Println("welcome tx global cap reached; skipping for", req.Username)
+	}
 
 	JsonResponse(w, map[string]interface{}{
 		"success": true,
@@ -193,11 +264,19 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// WH-M11: reject logins for an account that has hit the failed-attempt limit.
+	if loginLockout.isLockedOut(req.Username) {
+		JsonError(w, "Account temporarily locked due to failed login attempts. Try again later.", http.StatusTooManyRequests)
+		return
+	}
+
 	entry, err := Users.Authenticate(req.Username, req.Password)
 	if err != nil {
+		loginLockout.recordFailure(req.Username)
 		JsonError(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
+	loginLockout.clearFailures(req.Username)
 
 	// Load user's wallet
 	userWallet, err := loadUserWallet(entry.WalletDir, req.Password)
@@ -205,6 +284,9 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		JsonError(w, fmt.Sprintf("Failed to load wallet: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// WH-H8: invalidate any prior sessions for this user before issuing a new one.
+	Sessions.DeleteByUsername(req.Username)
 
 	token, err := Sessions.Create(req.Username, userWallet)
 	if err != nil {

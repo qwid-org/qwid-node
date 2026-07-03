@@ -162,8 +162,13 @@ func isSafeMethod(m string) bool {
 	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
 }
 
+// maxRequestBodyBytes bounds request bodies (WH-H9) to prevent unbounded memory
+// use. 2 MiB comfortably covers JSON payloads and contract source.
+const maxRequestBodyBytes = 2 << 20
+
 func CorsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes) // WH-H9
 		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
