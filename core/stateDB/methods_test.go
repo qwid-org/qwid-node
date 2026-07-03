@@ -165,3 +165,42 @@ func TestAccessList(t *testing.T) {
 		t.Fatal("slot not warm after add")
 	}
 }
+
+func TestAccessListRevert(t *testing.T) {
+	sa := CreateStateDB()
+	a := addr(0x07)
+	slot := common.Hash{0xDD}
+
+	snap := sa.Snapshot()
+	sa.AddAddressToAccessList(a)
+	sa.AddSlotToAccessList(a, slot)
+
+	if !sa.AddressInAccessList(a) {
+		t.Fatal("address not warm after add")
+	}
+	adOk, slOk := sa.SlotInAccessList(a, slot)
+	if !adOk || !slOk {
+		t.Fatal("slot not warm after add")
+	}
+
+	sa.RevertToSnapshot(snap)
+
+	if sa.AddressInAccessList(a) {
+		t.Fatal("address still warm after RevertToSnapshot")
+	}
+	_, slOk = sa.SlotInAccessList(a, slot)
+	if slOk {
+		t.Fatal("slot still warm after RevertToSnapshot")
+	}
+
+	// ClearAccessList should also cold out a previously-warmed address,
+	// even without a revert.
+	sa.AddAddressToAccessList(a)
+	if !sa.AddressInAccessList(a) {
+		t.Fatal("address not warm after add (second time)")
+	}
+	sa.ClearAccessList()
+	if sa.AddressInAccessList(a) {
+		t.Fatal("address still warm after ClearAccessList")
+	}
+}

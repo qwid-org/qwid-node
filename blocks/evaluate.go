@@ -415,6 +415,9 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	// Reset the per-execution suicide set so a SELFDESTRUCT in this tx doesn't
 	// permanently mark the address as suicided for all future txs/blocks.
 	State.ClearSuicided()
+	// Reset the per-execution EIP-2929 access list so warm addresses/slots
+	// from this tx don't leak into the next one.
+	State.ClearAccessList()
 
 	if tx.TxData.Recipient == common.EmptyAddress() {
 		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0), nonce)

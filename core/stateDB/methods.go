@@ -259,6 +259,9 @@ func (sa *StateAccount) SlotInAccessList(addr common.Address, slot common.Hash) 
 // AddAddressToAccessList adds the given address to the access list. This operation is safe to perform
 // even if the feature/fork is not active yet
 func (sa *StateAccount) AddAddressToAccessList(addr common.Address) {
+	if sa.accessAddrs == nil {
+		sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	}
 	if !sa.accessAddrs[addr.ByteValue] {
 		sa.journal = append(sa.journal, accessAddrChange{addr: addr.ByteValue})
 		sa.SnapShotNum = len(sa.journal)
@@ -270,6 +273,9 @@ func (sa *StateAccount) AddAddressToAccessList(addr common.Address) {
 // even if the feature/fork is not active yet
 func (sa *StateAccount) AddSlotToAccessList(addr common.Address, slot common.Hash) {
 	sa.AddAddressToAccessList(addr)
+	if sa.accessSlots == nil {
+		sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+	}
 	m, ok := sa.accessSlots[addr.ByteValue]
 	if !ok || !m[slot] {
 		sa.journal = append(sa.journal, accessSlotChange{addr: addr.ByteValue, slot: slot})
@@ -310,6 +316,13 @@ func (sa *StateAccount) ClearLogs() { sa.logs = nil }
 
 // ClearSuicided resets the per-execution suicide set (call before running a tx).
 func (sa *StateAccount) ClearSuicided() { sa.suicided = map[[common.AddressLength]byte]bool{} }
+
+// ClearAccessList resets the per-execution EIP-2929 warm address/slot sets
+// (call before running a tx).
+func (sa *StateAccount) ClearAccessList() {
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+}
 func (sa *StateAccount) AddPreimage(h common.Hash, b []byte) {
 	(*sa).States[h] = b
 }
