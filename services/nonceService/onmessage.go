@@ -89,6 +89,13 @@ func OnMessage(addr [4]byte, m []byte) {
 		//	MyIP2 = addr
 		//}
 		// get oracles from nonce transaction
+		// NP-C7: validate length before slicing so a crafted short OptData
+		// cannot panic the node. Need the 8-byte + hash header, plus 8 bytes for
+		// price, 8 for rand.
+		if len(transaction.TxData.OptData) < 8+common.HashLength+16 {
+			logger.GetLogger().Println("nonce tx OptData too short for oracle/voting data")
+			return
+		}
 		optData := transaction.TxData.OptData[8+common.HashLength:]
 		_, stakedInDelAcc, _ := account.GetStakedInDelegatedAccount(n)
 		stakedInDelAccInt := int64(stakedInDelAcc)

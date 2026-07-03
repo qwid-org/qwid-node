@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/rpc"
+	"os"
 	"strconv"
 
 	"github.com/wonabru/qwid-node/account"
@@ -40,7 +41,15 @@ func extractRemoteIP(addr string) string {
 }
 
 func ListenRPC() {
-	var address = "0.0.0.0:" + strconv.Itoa(tcpip.Ports[tcpip.RPCTopic])
+	// NP-C4: bind the wallet-node RPC to loopback by default so unauthenticated
+	// operations (e.g. TRAN) are not exposed to the network. Operators who
+	// deliberately run the wallet on a separate host can override the bind host
+	// via RPC_BIND_ADDRESS (understanding the exposure).
+	bindHost := os.Getenv("RPC_BIND_ADDRESS")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+	var address = bindHost + ":" + strconv.Itoa(tcpip.Ports[tcpip.RPCTopic])
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		logger.GetLogger().Fatalf("Error resolving TCP address: %v", err)

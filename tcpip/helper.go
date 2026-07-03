@@ -20,17 +20,26 @@ func init() {
 	whiteListIPs = map[[4]byte]bool{}
 }
 
+// NP-C1: whiteListIPs is guarded by bannedIPMutex (the same lock as bannedIP),
+// since the two are always consulted together.
 func AddWhiteListIPs(ip [4]byte) {
+	bannedIPMutex.Lock()
+	defer bannedIPMutex.Unlock()
 	whiteListIPs[ip] = true
+}
+
+// isWhitelisted reports whether ip is whitelisted, taking the read lock.
+func isWhitelisted(ip [4]byte) bool {
+	bannedIPMutex.RLock()
+	defer bannedIPMutex.RUnlock()
+	return whiteListIPs[ip]
 }
 
 func IsIPBanned(ip [4]byte) bool {
 	bannedIPMutex.RLock()
 	defer bannedIPMutex.RUnlock()
-	for wip, _ := range whiteListIPs {
-		if bytes.Equal(wip[:], ip[:]) {
-			return false
-		}
+	if whiteListIPs[ip] {
+		return false
 	}
 	if hbanned, ok := bannedIP[ip]; ok {
 		if hbanned > common.GetCurrentTimeStampInSecond() {
@@ -42,10 +51,8 @@ func IsIPBanned(ip [4]byte) bool {
 
 func BanIP(ip [4]byte) {
 	// internal IP should not be banned || bytes.Equal(ip[:2], InternalIP[:2])
-	for wip, _ := range whiteListIPs {
-		if bytes.Equal(wip[:], ip[:]) {
-			return
-		}
+	if isWhitelisted(ip) {
+		return
 	}
 	bannedIPMutex.Lock()
 	logger.GetLogger().Println("BANNING ", ip)
@@ -175,6 +182,8 @@ func GetBannedPeersInfo() []map[string]interface{} {
 
 // GetWhitelistedIPs returns list of whitelisted IPs
 func GetWhitelistedIPs() []string {
+	bannedIPMutex.RLock()
+	defer bannedIPMutex.RUnlock()
 	ips := []string{}
 	for ip := range whiteListIPs {
 		ips = append(ips, formatIP(ip))

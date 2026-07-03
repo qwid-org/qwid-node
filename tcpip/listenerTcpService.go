@@ -102,8 +102,9 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 		case <-Quit:
 			logger.GetLogger().Println("Should exit LoopSend")
 			return
-		default:
 		}
+		// NP-C2: no default case — the select blocks until sendChan or Quit is
+		// ready instead of busy-spinning at 100% CPU.
 	}
 }
 
