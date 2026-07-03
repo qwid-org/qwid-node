@@ -104,6 +104,21 @@ func TestArgon2idKDF(t *testing.T) {
 	}
 }
 
+// TestVerifyPassword verifies WH-C5's re-auth helper accepts the correct
+// password and rejects wrong ones.
+func TestVerifyPassword(t *testing.T) {
+	w := newTestWallet("s3cretpass")
+	if !w.VerifyPassword("s3cretpass") {
+		t.Fatal("correct password rejected")
+	}
+	if w.VerifyPassword("wrongpass") {
+		t.Fatal("wrong password accepted")
+	}
+	if w.VerifyPassword("") {
+		t.Fatal("empty password accepted")
+	}
+}
+
 // TestLegacyCTRDecrypt verifies backward compatibility: a wallet secret written
 // in the old AES-CTR format still decrypts via the fallback path.
 func TestLegacyCTRDecrypt(t *testing.T) {

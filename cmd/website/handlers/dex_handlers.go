@@ -144,7 +144,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -270,7 +270,7 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{

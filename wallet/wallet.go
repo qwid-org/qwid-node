@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -104,6 +105,16 @@ func GetCurrentWallet(sigName, sigName2 string) (*Wallet, error) {
 func (w *Wallet) SetPassword(password string) {
 	(*w).password = []byte(password)
 	(*w).passwordBytes = w.deriveKey(password)
+}
+
+// VerifyPassword reports whether password matches this wallet's password, using
+// a constant-time comparison of the Argon2id-derived keys. Used to re-authenticate
+// before sensitive operations such as revealing the mnemonic (WH-C5).
+func (w *Wallet) VerifyPassword(password string) bool {
+	if len(w.passwordBytes) == 0 {
+		return false
+	}
+	return subtle.ConstantTimeCompare(w.passwordBytes, w.deriveKey(password)) == 1
 }
 
 // Wipe zeroes the plaintext password and derived key in memory. Call it when a

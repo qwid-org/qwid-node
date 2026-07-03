@@ -138,6 +138,20 @@ func GetMnemonic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wl := sess.Wallet
+	// WH-C5: require password re-entry before revealing the recovery phrase,
+	// so a stolen/left-open session cannot exfiltrate keys.
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		JsonError(w, "Password required", http.StatusBadRequest)
+		return
+	}
+	if !wl.VerifyPassword(req.Password) {
+		JsonError(w, "Invalid password", http.StatusUnauthorized)
+		return
+	}
+
 	mnemonic1, err1 := wl.GetMnemonicWords(true)
 	mnemonic2, err2 := wl.GetMnemonicWords(false)
 

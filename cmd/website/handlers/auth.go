@@ -283,7 +283,7 @@ func sendWelcomeTransaction(recipient common.Address) {
 		ChainID:     int16(23),
 		Sender:      NodeWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{

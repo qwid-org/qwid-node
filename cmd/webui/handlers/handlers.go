@@ -168,6 +168,7 @@ func LoadWallet(w http.ResponseWriter, r *http.Request) {
 
 	MainWallet = loadedWallet
 	TestAndSetEncryption()
+	startSession(w) // WH-C3: authenticate this browser session
 
 	warnings := []string{}
 	if MainWallet.GetSigName(true) != common.SigName() {
@@ -263,6 +264,7 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 
 	MainWallet = &wl
 	TestAndSetEncryption()
+	startSession(w) // WH-C3: authenticate this browser session
 
 	jsonResponse(w, map[string]interface{}{
 		"success": true,
@@ -306,6 +308,23 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 func GetMnemonic(w http.ResponseWriter, r *http.Request) {
 	if !walletReady() {
 		jsonError(w, "Load wallet first", http.StatusBadRequest)
+		return
+	}
+	// WH-C5: require the wallet password to be re-entered before revealing the
+	// recovery phrase, so a walk-up/left-open session cannot exfiltrate keys.
+	if r.Method != "POST" {
+		jsonError(w, "Password required (POST)", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	if !MainWallet.VerifyPassword(req.Password) {
+		jsonError(w, "Invalid password", http.StatusUnauthorized)
 		return
 	}
 
@@ -562,7 +581,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 	if req.MultiSigTxHash != "" {
 		par.MultiSignTx = hashms
@@ -791,7 +810,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1337,7 +1356,7 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1679,7 +1698,7 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1793,7 +1812,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int64(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{

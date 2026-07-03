@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -134,6 +135,33 @@ func isAllowedOrigin(origin string) bool {
 	return false
 }
 
+// isSameOriginRequest implements the WH-C4 CSRF defense: for state-changing
+// requests, the Origin (or Referer) must match the request Host or a configured
+// allowed origin. Browsers always send Origin on cross-origin-capable methods, so
+// this blocks cross-site POSTs without requiring a token round-trip in the SPA.
+func isSameOriginRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		// Cannot verify provenance of a state-changing request -> reject.
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Host == r.Host {
+		return true
+	}
+	return isAllowedOrigin(u.Scheme + "://" + u.Host)
+}
+
+func isSafeMethod(m string) bool {
+	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
+}
+
 func CorsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
@@ -150,6 +178,12 @@ func CorsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// WH-C4: CSRF protection for state-changing methods.
+		if !isSafeMethod(r.Method) && !isSameOriginRequest(r) {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "cross-origin request rejected"})
 			return
 		}
 		next(w, r)
