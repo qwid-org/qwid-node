@@ -103,3 +103,43 @@ func TestSuicide(t *testing.T) {
 		t.Fatal("HasSuicided false after Suicide")
 	}
 }
+
+func TestSuicideRevertAndNonexistent(t *testing.T) {
+	sa := CreateStateDB()
+
+	// Suicide on a nonexistent (never-CreateAccount'd) address.
+	nonexistent := addr(0x05)
+	if sa.Suicide(nonexistent) {
+		t.Fatal("Suicide returned true for nonexistent account")
+	}
+	if sa.HasSuicided(nonexistent) {
+		t.Fatal("HasSuicided true for nonexistent account")
+	}
+
+	// Revert path: suicide should be undone by RevertToSnapshot.
+	a := addr(0x06)
+	sa.CreateAccount(a)
+	snap := sa.Snapshot()
+	if !sa.Suicide(a) {
+		t.Fatal("Suicide returned false for existing account")
+	}
+	if !sa.HasSuicided(a) {
+		t.Fatal("HasSuicided false after Suicide")
+	}
+	sa.RevertToSnapshot(snap)
+	if sa.HasSuicided(a) {
+		t.Fatal("HasSuicided true after RevertToSnapshot")
+	}
+
+	// ClearSuicided should also reset suicided state, even without a revert.
+	if !sa.Suicide(a) {
+		t.Fatal("Suicide returned false for existing account (second call)")
+	}
+	if !sa.HasSuicided(a) {
+		t.Fatal("HasSuicided false after Suicide (second call)")
+	}
+	sa.ClearSuicided()
+	if sa.HasSuicided(a) {
+		t.Fatal("HasSuicided true after ClearSuicided")
+	}
+}

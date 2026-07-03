@@ -256,6 +256,9 @@ func (sa *StateAccount) GetLogs() []*types.Log { return sa.logs }
 
 // ClearLogs resets the per-execution log buffer (call before running a tx).
 func (sa *StateAccount) ClearLogs() { sa.logs = nil }
+
+// ClearSuicided resets the per-execution suicide set (call before running a tx).
+func (sa *StateAccount) ClearSuicided() { sa.suicided = map[[common.AddressLength]byte]bool{} }
 func (sa *StateAccount) AddPreimage(h common.Hash, b []byte) {
 	(*sa).States[h] = b
 }
