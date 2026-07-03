@@ -59,7 +59,16 @@ func JSON(reader io.Reader) (ABI, error) {
 // of 4 bytes and arguments are all 32 bytes.
 // Method ids are created from the first 4 bytes of the hash of the
 // methods string signature. (signature = baz(uint32,string32))
-func (abi ABI) Pack(name string, args ...interface{}) ([]byte, error) {
+func (abi ABI) Pack(name string, args ...interface{}) (packed []byte, err error) {
+	// Guard against panics deep in the packing path (e.g. packNum's
+	// panic("abi: fatal error") on an unsupported reflect.Kind, DB-M7) so
+	// malformed/unexpected arguments cannot crash the node; they surface
+	// as an error instead.
+	defer func() {
+		if r := recover(); r != nil {
+			packed, err = nil, fmt.Errorf("abi: pack panic recovered: %v", r)
+		}
+	}()
 	// Fetch the ABI of the requested method
 	if name == "" {
 		// constructor
@@ -101,7 +110,17 @@ func (abi ABI) getArguments(name string, data []byte) (Arguments, error) {
 }
 
 // Unpack unpacks the output according to the abi specification.
-func (abi ABI) Unpack(name string, data []byte) ([]interface{}, error) {
+//
+// data comes from untrusted contract call/return data, so decoding it can
+// walk malformed ABI type descriptors (e.g. Type.GetType's
+// panic("Invalid type"), DB-M6). The deferred recover converts any such
+// panic into a returned error instead of crashing the node.
+func (abi ABI) Unpack(name string, data []byte) (out []interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = nil, fmt.Errorf("abi: unpack panic recovered: %v", r)
+		}
+	}()
 	args, err := abi.getArguments(name, data)
 	if err != nil {
 		return nil, err
@@ -112,7 +131,12 @@ func (abi ABI) Unpack(name string, data []byte) ([]interface{}, error) {
 // UnpackIntoInterface unpacks the output in v according to the abi specification.
 // It performs an additional copy. Please only use, if you want to unpack into a
 // structure that does not strictly conform to the abi structure (e.g. has additional arguments)
-func (abi ABI) UnpackIntoInterface(v interface{}, name string, data []byte) error {
+func (abi ABI) UnpackIntoInterface(v interface{}, name string, data []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("abi: unpack panic recovered: %v", r)
+		}
+	}()
 	args, err := abi.getArguments(name, data)
 	if err != nil {
 		return err
@@ -126,6 +150,11 @@ func (abi ABI) UnpackIntoInterface(v interface{}, name string, data []byte) erro
 
 // UnpackIntoMap unpacks a log into the provided map[string]interface{}.
 func (abi ABI) UnpackIntoMap(v map[string]interface{}, name string, data []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("abi: unpack panic recovered: %v", r)
+		}
+	}()
 	args, err := abi.getArguments(name, data)
 	if err != nil {
 		return err

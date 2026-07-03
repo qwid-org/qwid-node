@@ -259,6 +259,16 @@ func (t Type) GetType() reflect.Type {
 	}
 }
 
+// safeGetType calls GetType but recovers from its panic("Invalid type")
+// (DB-M6), returning a nil reflect.Type instead of crashing the caller.
+// Malformed ABI type data (e.g. a Type with an unsupported T byte) cannot
+// panic through this wrapper. Callers that need to distinguish the error
+// case should check for a nil return value.
+func safeGetType(t Type) (rt reflect.Type) {
+	defer func() { _ = recover() }()
+	return t.GetType()
+}
+
 // String implements Stringer.
 func (t Type) String() (out string) {
 	return t.stringKind
