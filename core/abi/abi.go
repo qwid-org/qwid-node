@@ -268,7 +268,14 @@ var revertSelector = crypto.Keccak256([]byte("Error(string)"))[:4]
 // spec https://solidity.readthedocs.io/en/latest/control-structures.html#revert,
 // the provided revert reason is abi-encoded as if it were a call to a function
 // `Error(string)`. So it's a special tool for it.
-func UnpackRevert(data []byte) (string, error) {
+func UnpackRevert(data []byte) (reason string, err error) {
+	// Same rationale as ABI.Unpack (DB-M6): data is untrusted revert output,
+	// so guard against a panic escaping from the unpack path.
+	defer func() {
+		if r := recover(); r != nil {
+			reason, err = "", fmt.Errorf("abi: unpack revert panic recovered: %v", r)
+		}
+	}()
 	if len(data) < 4 {
 		return "", errors.New("invalid data for unpacking")
 	}
