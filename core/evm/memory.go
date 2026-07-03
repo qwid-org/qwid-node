@@ -72,7 +72,7 @@ func (m *Memory) GetCopy(offset, size int64) (cpy []byte) {
 		return nil
 	}
 
-	if offset < 0 || size < 0 || int64(len(m.store)) < offset+size {
+	if offset < 0 || size < 0 || offset > int64(len(m.store))-size {
 		return nil
 	}
 	cpy = make([]byte, size)
@@ -86,7 +86,7 @@ func (m *Memory) GetPtr(offset, size int64) []byte {
 		return nil
 	}
 
-	if offset < 0 || size < 0 || int64(len(m.store)) < offset+size {
+	if offset < 0 || size < 0 || offset > int64(len(m.store))-size {
 		return nil
 	}
 	return m.store[offset : offset+size]
