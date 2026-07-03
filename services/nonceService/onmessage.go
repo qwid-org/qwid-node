@@ -259,6 +259,9 @@ func OnMessage(addr [4]byte, m []byte) {
 				if err != nil {
 					logger.GetLogger().Println(err)
 				}
+				if err := blocks.CommitEVMState(newBlock.GetHeader().Height); err != nil {
+					logger.GetLogger().Println("cannot store EVM state", err)
+				}
 
 				err = account.StoreStakingAccounts(newBlock.GetHeader().Height)
 				if err != nil {

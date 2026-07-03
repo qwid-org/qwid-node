@@ -47,6 +47,9 @@ func RevertVMToBlockHeight(height int64) bool {
 
 	blocks.State.RevertToSnapshot(lastNum)
 	blocks.State.CleanupContractsAfterHeight(height)
+	if err := blocks.State.Load(height); err != nil {
+		logger.GetLogger().Println("could not reload EVM state on reset:", err)
+	}
 	return true
 }
 

@@ -30,6 +30,18 @@ func InitStateDB() {
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
 	State = stateDB.CreateStateDB()
+	// Phase 1: restore persisted EVM state so contracts survive restarts.
+	if err := State.Load(-1); err != nil {
+		loggerMain.GetLogger().Println("could not load persisted EVM state (starting empty):", err)
+	}
+}
+
+// CommitEVMState persists the current EVM state for a block height. Call it
+// wherever native accounts are stored on block finalize.
+func CommitEVMState(height int64) error {
+	StateMutex.Lock()
+	defer StateMutex.Unlock()
+	return State.Store(height)
 }
 
 func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {

@@ -259,6 +259,72 @@ func addrKeyAddrValMapFromHex(m map[string]map[string]int64) (map[[common.Addres
 	return result, nil
 }
 
-// Store/Load are added in Task 2 (they use database + logger, imported above).
-var _ = database.MainDB
-var _ = logger.GetLogger
+// Store persists the committed EVM state under EVMStateDBPrefix+height.
+func (sa *StateAccount) Store(height int64) error {
+	b, err := sa.Marshal()
+	if err != nil {
+		return err
+	}
+	prefix := append(common.EVMStateDBPrefix[:], common.GetByteInt64(height)...)
+	if err := database.MainDB.Put(prefix, b); err != nil {
+		logger.GetLogger().Println("cannot store EVM state", err)
+		return err
+	}
+	return nil
+}
+
+// Load restores EVM state for a height (height < 0 => latest stored).
+func (sa *StateAccount) Load(height int64) error {
+	if height < 0 {
+		h, err := sa.LastStoredHeight()
+		if err != nil {
+			return err
+		}
+		height = h
+	}
+	prefix := append(common.EVMStateDBPrefix[:], common.GetByteInt64(height)...)
+	b, err := database.MainDB.Get(prefix)
+	if err != nil || b == nil {
+		return err
+	}
+	return sa.Unmarshal(b)
+}
+
+// LastStoredHeight finds the highest stored EVM-state height via exponential +
+// binary search (heights are contiguous), mirroring account.LastHeightStoredInAccounts.
+func (sa *StateAccount) LastStoredHeight() (int64, error) {
+	exists := func(h int64) (bool, error) {
+		prefix := append(common.EVMStateDBPrefix[:], common.GetByteInt64(h)...)
+		return database.MainDB.IsKey(prefix)
+	}
+	if ok, err := exists(0); err != nil {
+		return -1, err
+	} else if !ok {
+		return -1, nil
+	}
+	lo, hi := int64(0), int64(1)
+	for {
+		ok, err := exists(hi)
+		if err != nil {
+			return lo, err
+		}
+		if !ok {
+			break
+		}
+		lo = hi
+		hi *= 2
+	}
+	for hi-lo > 1 {
+		mid := lo + (hi-lo)/2
+		ok, err := exists(mid)
+		if err != nil {
+			return lo, err
+		}
+		if ok {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo, nil
+}

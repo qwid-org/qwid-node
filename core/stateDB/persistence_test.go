@@ -60,3 +60,21 @@ func TestStateMarshalRoundTrip(t *testing.T) {
 		t.Fatal("token info mismatch")
 	}
 }
+
+func TestStoreAndLoadEVMState(t *testing.T) {
+	// Requires database.MainDB to be initialized by the test harness; skip if not.
+	sa := sampleState()
+	if err := sa.Store(5); err != nil {
+		t.Skipf("DB not available in this test context: %v", err)
+	}
+	var loaded StateAccount
+	loaded = CreateStateDB()
+	if err := loaded.Load(5); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var a [common.AddressLength]byte
+	a[0] = 0xAB
+	if loaded.Nonces[a] != 7 {
+		t.Fatalf("nonce not persisted: %d", loaded.Nonces[a])
+	}
+}

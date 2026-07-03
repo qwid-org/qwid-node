@@ -413,6 +413,9 @@ func InitGenesis(processTransactions bool) {
 		if err != nil {
 			logger.GetLogger().Fatal(err)
 		}
+		if err := blocks.CommitEVMState(genesisBlock.GetHeader().Height); err != nil {
+			logger.GetLogger().Println("cannot store genesis EVM state", err)
+		}
 		err = account.StoreStakingAccounts(0)
 		if err != nil {
 			logger.GetLogger().Fatal(err)
