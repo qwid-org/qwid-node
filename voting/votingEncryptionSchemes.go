@@ -38,7 +38,9 @@ func SaveVotesEncryption1(value []byte, height int64, delegatedAccount common.Ad
 	defer VotesEncryptionMutex.Unlock()
 
 	po, exists := VotesEncryption1[uint8(id)]
-	if !exists || po.Height <= height {
+	// AC-M4: only replace with a strictly newer height; `<=` allowed a second
+	// vote at the same height to overwrite the first.
+	if !exists || po.Height < height {
 		VotesEncryption1[uint8(id)] = Votes{
 			Values: value,
 			Height: height,
@@ -67,7 +69,8 @@ func SaveVotesEncryption2(value []byte, height int64, delegatedAccount common.Ad
 	defer VotesEncryptionMutex.Unlock()
 	logger.GetLogger().Println("Delegated Account ", id, " staked: ", account.Int64toFloat64(staked))
 	po, exists := VotesEncryption2[uint8(id)]
-	if !exists || po.Height <= height {
+	// AC-M4: only replace with a strictly newer height (see SaveVotesEncryption1).
+	if !exists || po.Height < height {
 		VotesEncryption2[uint8(id)] = Votes{
 			Values: value,
 			Height: height,
@@ -83,13 +86,11 @@ func SaveVotesEncryption2(value []byte, height int64, delegatedAccount common.Ad
 func ResetLastVoting() {
 	VotesEncryptionMutex.Lock()
 	defer VotesEncryptionMutex.Unlock()
-	for i := uint8(0); i < uint8(255); i++ {
-		if _, exist := VotesEncryption1[i]; exist {
-			delete(VotesEncryption1, i)
-		}
-		if _, exist := VotesEncryption2[i]; exist {
-			delete(VotesEncryption2, i)
-		}
+	// AC-M5: iterate 0..255 inclusive. The previous `uint8 < 255` loop skipped
+	// index 255 (and `<= 255` would wrap forever), so use an int counter.
+	for i := 0; i < 256; i++ {
+		delete(VotesEncryption1, uint8(i))
+		delete(VotesEncryption2, uint8(i))
 	}
 	AfterReset = true
 }

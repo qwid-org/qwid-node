@@ -113,6 +113,11 @@ func LoadStakingAccounts(height int64) error {
 func GetStakingAccountByAddressBytes(address []byte, delegatedAccount int) StakingAccount {
 	StakingRWMutex.RLock()
 	defer StakingRWMutex.RUnlock()
+	// AC-M2: bounds-check the delegated account index (0..255) before indexing
+	// the fixed-size array, so an invalid index returns empty instead of panicking.
+	if delegatedAccount < 0 || delegatedAccount >= len(StakingAccounts) {
+		return StakingAccount{}
+	}
 	addrb := [common.AddressLength]byte{}
 	copy(addrb[:], address[:common.AddressLength])
 	return StakingAccounts[delegatedAccount].AllStakingAccounts[addrb]
@@ -120,8 +125,13 @@ func GetStakingAccountByAddressBytes(address []byte, delegatedAccount int) Staki
 
 func RemoveStakingAccountsFromDB(height int64) error {
 	hb := common.GetByteInt64(height)
-	prefix := append(common.StakingAccountsDBPrefix[:], hb...)
+	base := append(common.StakingAccountsDBPrefix[:], hb...)
 	for i := 0; i < 256; i++ {
+		// AC-M3: build a fresh prefix per iteration. The previous code appended
+		// byte(i) to the same accumulating slice, producing prefixes like
+		// base+{0}, base+{0,1}, base+{0,1,2}, ... instead of base+{i}.
+		prefix := make([]byte, len(base), len(base)+1)
+		copy(prefix, base)
 		prefix = append(prefix, byte(i))
 		err := database.MainDB.Delete(prefix)
 		if err != nil {

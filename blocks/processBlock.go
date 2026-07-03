@@ -493,7 +493,9 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	head := newBlock.GetHeader()
 	sigName, sigName2, isPaused, isPaused2, err := newBlock.GetSigNames()
 	if err != nil {
-		fmt.Errorf("%v: CheckBlockAndTransactions", err)
+		// AC-M6: previously the fmt.Errorf result was discarded, swallowing the
+		// GetSigNames failure and proceeding with zero-value sig names.
+		return fmt.Errorf("%v: CheckBlockAndTransactions", err)
 	}
 	if head.Verify(sigName, sigName2, isPaused, isPaused2) == false {
 		return fmt.Errorf("header fails to verify: CheckBlockAndTransactions")

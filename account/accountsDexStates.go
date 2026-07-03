@@ -125,6 +125,9 @@ func SetDexAccountByAddressBytes(address []byte, acc DexAccount) {
 }
 
 func GetCoinLiquidityInDex() int64 {
+	// AC-M1: guard the map iteration with the DEX lock, like other accessors.
+	DexRWMutex.RLock()
+	defer DexRWMutex.RUnlock()
 	sum := int64(0)
 	for _, acc := range DexAccounts.AllDexAccounts {
 		sum += acc.CoinPool

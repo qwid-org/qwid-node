@@ -443,8 +443,11 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			n, err = account.IntDelegatedAccountFromAddress(addressRecipient)
 		}
 		if err == nil { // delegated account any transfer should be processed for staking unstaking and reward withdrawal
+			// AC-M7: skip this escrow tx but keep processing the rest of the
+			// batch. The previous `return nil` abandoned all remaining escrow
+			// transactions on the first delegated-account match.
 			logger.GetLogger().Printf("  escrow tx[%d]: delegated account (n=%d), skipping", i, n)
-			return nil
+			continue
 		} else { // this is not delegated account so standard transaction
 			senderAcc, exist := account.GetAccountByAddressBytes(address.GetBytes())
 			if !exist {
