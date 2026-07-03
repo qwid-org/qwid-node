@@ -24,9 +24,9 @@ type StateAccount struct {
 	Balances            map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64 `json:"balances"`
 	Tokens              map[[common.AddressLength]byte]TokenInfo                            `json:"tokens"`
 	SnapShotNum         int                                                                 `json:"snapShotNum"`
-	SnapShotPreimage    map[int]map[[common.AddressLength]byte]common.Hash                  `json:"snapShotPreimage"`
-	HeightToSnapShotNum map[int64]int                                                       `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
-	ContractsByHeight   map[int64][][common.AddressLength]byte                              `json:"contractsByHeight"`
+	journal             []changeEntry
+	HeightToSnapShotNum map[int64]int                          `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
+	ContractsByHeight   map[int64][][common.AddressLength]byte `json:"contractsByHeight"`
 }
 
 func CreateStateDB() StateAccount {
@@ -40,7 +40,7 @@ func CreateStateDB() StateAccount {
 	sa.Balances = map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64{}
 	sa.Tokens = map[[common.AddressLength]byte]TokenInfo{}
 	sa.SnapShotNum = 0
-	sa.SnapShotPreimage = map[int]map[[common.AddressLength]byte]common.Hash{}
+	sa.journal = nil
 	sa.HeightToSnapShotNum = map[int64]int{}
 	sa.ContractsByHeight = map[int64][][common.AddressLength]byte{}
 	return sa
@@ -159,17 +159,15 @@ func (sa *StateAccount) GetState(a common.Address, h common.Hash) common.Hash {
 	return common.Hash{}
 }
 func (sa *StateAccount) SetState(a common.Address, h common.Hash, h2 common.Hash) {
-	(*sa).SnapShotNum++
-
-	_, ok := (*sa).StatesHashes[a.ByteValue]
-	if ok {
-		(*sa).SnapShotPreimage[(*sa).SnapShotNum] = map[[common.AddressLength]byte]common.Hash{a.ByteValue: (*sa).StatesHashes[a.ByteValue][h]}
-		(*sa).StatesHashes[a.ByteValue][h] = h2
-		return
+	m, ok := sa.StatesHashes[a.ByteValue]
+	if !ok {
+		m = map[common.Hash]common.Hash{}
+		sa.StatesHashes[a.ByteValue] = m
 	}
-	(*sa).SnapShotPreimage[(*sa).SnapShotNum] = map[[common.AddressLength]byte]common.Hash{a.ByteValue: common.EmptyHash()}
-	(*sa).StatesHashes[a.ByteValue] = map[common.Hash]common.Hash{}
-	(*sa).StatesHashes[a.ByteValue][h] = h2
+	prev, existed := m[h]
+	sa.journal = append(sa.journal, slotChange{addr: a.ByteValue, key: h, prev: prev, existed: existed})
+	sa.SnapShotNum = len(sa.journal)
+	m[h] = h2
 }
 
 func (sa *StateAccount) Suicide(common.Address) bool {
@@ -215,20 +213,18 @@ func (sa *StateAccount) AddSlotToAccessList(addr common.Address, slot common.Has
 }
 
 func (sa *StateAccount) RevertToSnapshot(sn int) {
-	for s := sn + 1; s <= sa.SnapShotNum; s++ {
-		for a, h := range sa.SnapShotPreimage[s] {
-			if sa.SnapShotPreimage[s][a] == common.EmptyHash() {
-				delete((*sa).StatesHashes[a], h)
-				continue
-			}
-			(*sa).StatesHashes[a][h] = sa.SnapShotPreimage[s][a]
-		}
+	if sn < 0 {
+		sn = 0
 	}
-	(*sa).SnapShotNum = sn
+	for i := len(sa.journal) - 1; i >= sn; i-- {
+		sa.journal[i].revert(sa)
+	}
+	sa.journal = sa.journal[:sn]
+	sa.SnapShotNum = sn
 }
 
 func (sa *StateAccount) Snapshot() int {
-	return sa.SnapShotNum
+	return len(sa.journal)
 }
 
 func (sa *StateAccount) AddLog(*types.Log) {
