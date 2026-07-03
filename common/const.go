@@ -77,6 +77,7 @@ var (
 	OutputLogsHashesDBPrefix         = [2]byte{'O', '0'}
 	OutputLogDBPrefix                = [2]byte{'Z', '0'}
 	OutputAddressesHashesDBPrefix    = [2]byte{'C', '0'}
+	EVMStateDBPrefix                 = [2]byte{'E', 'V'}
 	TokenDetailsDBPrefix             = [2]byte{'T', 'D'}
 	DexAccountsDBPrefix              = [2]byte{'D', 'A'}
 	BadTransactionDBPrefix           = [2]byte{'B', 'T'}
