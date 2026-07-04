@@ -40,6 +40,27 @@ func evmTransfer(db vm.StateDB, from, to common.Address, amount *big.Int) {
 	db.AddBalance(to, amount)
 }
 
+// isContractCallTx reports whether the EVM (via EvaluateSC) owns this tx's value
+// transfer, so the native ProcessTransaction path must NOT also move it. It must
+// match EXACTLY the condition under which EvaluateSCForBlock routes a tx to
+// EvaluateSC: OptData present, non-delegated recipient, and a sender that is
+// neither a multisign account nor escrow-delayed (both skip SC execution).
+func isContractCallTx(tx transactionsDefinition.Transaction, senderAcc account.Account, height int64) bool {
+	if len(tx.TxData.OptData) == 0 {
+		return false
+	}
+	if _, err := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient); err == nil {
+		return false // delegated recipient (staking/reward/DEX) — not an SC call
+	}
+	if senderAcc.MultiSignNumber > 0 {
+		return false // multisign accounts skip SC execution
+	}
+	if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height {
+		return false // escrow-delayed — SC not executed
+	}
+	return true
+}
+
 func InitStateDB() {
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
@@ -427,7 +448,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	State.ResetTransient()
 
 	if tx.TxData.Recipient == common.EmptyAddress() {
-		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0), nonce)
+		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), big.NewInt(tx.TxData.Amount), nonce)
 
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
@@ -435,7 +456,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		}
 	} else {
 		address = tx.TxData.Recipient
-		ret, leftOverGas, err = VM.Call(vm.AccountRef(origin), address, code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0))
+		ret, leftOverGas, err = VM.Call(vm.AccountRef(origin), address, code, uint64(tx.GasUsage)*uint64(gasMult), big.NewInt(tx.TxData.Amount))
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
 			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err

@@ -294,14 +294,18 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 			if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 				transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.TxParam.MultiSignTx)
 			}
-			err = AddBalance(address.ByteValue, -amount)
-			if err != nil {
-				return err
-			}
-
-			err = AddBalance(addressRecipient.ByteValue, amount)
-			if err != nil {
-				return err
+			// DB-C2: for contract-call txs the EVM already moved Amount as
+			// msg.value; the native path must not move it again. Non-contract
+			// (plain) transfers move natively as before.
+			if !isContractCallTx(tx, senderAcc, height) {
+				err = AddBalance(address.ByteValue, -amount)
+				if err != nil {
+					return err
+				}
+				err = AddBalance(addressRecipient.ByteValue, amount)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		// escrow tx and multisigned should be paid fee upfront
