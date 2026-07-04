@@ -28,6 +28,18 @@ type PasiveFunction struct {
 	Height  int64          `json:"height"`
 }
 
+// evmCanTransfer reports whether addr's native balance covers amount (DB-C2).
+func evmCanTransfer(db vm.StateDB, addr common.Address, amount *big.Int) bool {
+	return db.GetBalance(addr).Cmp(amount) >= 0
+}
+
+// evmTransfer moves amount between native balances via the Phase 2 bridge
+// (journaled, so a reverted EVM call restores both sides).
+func evmTransfer(db vm.StateDB, from, to common.Address, amount *big.Int) {
+	db.SubBalance(from, amount)
+	db.AddBalance(to, amount)
+}
+
 func InitStateDB() {
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
@@ -369,8 +381,8 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	origin := tx.TxParam.Sender
 	code := tx.TxData.OptData
 	blockCtx := vm.BlockContext{
-		CanTransfer: nil,
-		Transfer:    nil,
+		CanTransfer: evmCanTransfer,
+		Transfer:    evmTransfer,
 		GetHash: func(height uint64) common.Hash {
 			hashBytes, _ := LoadHashOfBlock(int64(height))
 			return common.BytesToHash(hashBytes)
@@ -456,8 +468,8 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	gasMult := 10.0
 
 	blockCtx := vm.BlockContext{
-		CanTransfer: nil,
-		Transfer:    nil,
+		CanTransfer: evmCanTransfer,
+		Transfer:    evmTransfer,
 		GetHash: func(height uint64) common.Hash {
 			hashBytes, _ := LoadHashOfBlock(int64(height))
 			return common.BytesToHash(hashBytes)
@@ -514,8 +526,8 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	origin := common.EmptyAddress()
 	input := OptData
 	blockCtx := vm.BlockContext{
-		CanTransfer: nil,
-		Transfer:    nil,
+		CanTransfer: evmCanTransfer,
+		Transfer:    evmTransfer,
 		GetHash: func(height uint64) common.Hash {
 			hashBytes, _ := LoadHashOfBlock(int64(height))
 			return common.BytesToHash(hashBytes)
