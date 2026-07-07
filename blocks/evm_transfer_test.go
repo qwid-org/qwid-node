@@ -74,6 +74,14 @@ func TestIsContractCallTxPredicate(t *testing.T) {
 	if isContractCallTx(txEscrow, escrow, 100) {
 		t.Fatal("escrow-delayed tx must not be treated as EVM-owned")
 	}
+	// Delegated-account recipient => NOT a contract call (native settlement).
+	delegatedRecipient := common.GetDelegatedAccountAddress(5)
+	txDelegated := transactionsDefinition.Transaction{}
+	txDelegated.TxData.OptData = []byte{0x01}
+	txDelegated.TxData.Recipient = delegatedRecipient
+	if isContractCallTx(txDelegated, plain, 100) {
+		t.Fatal("delegated-account recipient must not be treated as contract call")
+	}
 }
 
 func TestContractTxValueNotDoubleMoved(t *testing.T) {

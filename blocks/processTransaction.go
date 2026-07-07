@@ -323,6 +323,13 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 }
 
 func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height int64, tree *transactionsPool.MerkleTree) error {
+	// INVARIANT (EVM Phase 3a / DB-C2): matured txs settled here move value
+	// natively and UNCONDITIONALLY. This is correct only because these pooled
+	// txs are never re-added to a block's TransactionsHashes and therefore never
+	// re-dispatched through EvaluateSCForBlock — so the EVM never moves their
+	// value. If block assembly ever re-includes a pooled tx hash, this native
+	// settlement plus the EVM entry-value move (blocks/evaluate.go) would
+	// DOUBLE-MOVE the amount. Do not break that invariant.
 
 	if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 		return nil
@@ -425,6 +432,13 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 }
 
 func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) error {
+	// INVARIANT (EVM Phase 3a / DB-C2): matured txs settled here move value
+	// natively and UNCONDITIONALLY. This is correct only because these pooled
+	// txs are never re-added to a block's TransactionsHashes and therefore never
+	// re-dispatched through EvaluateSCForBlock — so the EVM never moves their
+	// value. If block assembly ever re-includes a pooled tx hash, this native
+	// settlement plus the EVM entry-value move (blocks/evaluate.go) would
+	// DOUBLE-MOVE the amount. Do not break that invariant.
 
 	txs := transactionsPool.PoolTxEscrow.PeekTransactions(common.MaxTransactionInPool, height)
 	logger.GetLogger().Printf("ProcessTransactionsEscrow: height=%d, escrow pool returned %d transactions", height, len(txs))
