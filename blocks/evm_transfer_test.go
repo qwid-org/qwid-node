@@ -111,3 +111,25 @@ func TestContractTxValueNotDoubleMoved(t *testing.T) {
 			account.GetBalance(sender.ByteValue), account.GetBalance(contract.ByteValue))
 	}
 }
+
+func TestValueTransferRevertedOnFailure(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+	initNativeAccountsBlocks()
+	InitStateDB()
+
+	var from, to common.Address
+	from.ByteValue[0] = 0x80
+	to.ByteValue[0] = 0x81
+	account.SetBalance(from.ByteValue, 1000)
+
+	snap := State.Snapshot()
+	evmTransfer(&State, from, to, big.NewInt(300)) // as the EVM does after Snapshot()
+	// Simulate the call failing: EVM reverts to the snapshot.
+	State.RevertToSnapshot(snap)
+
+	if account.GetBalance(from.ByteValue) != 1000 || account.GetBalance(to.ByteValue) != 0 {
+		t.Fatalf("value not restored on revert: from=%d to=%d",
+			account.GetBalance(from.ByteValue), account.GetBalance(to.ByteValue))
+	}
+}
