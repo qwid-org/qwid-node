@@ -78,6 +78,14 @@ func TestEvaluateSCRevertingCreateIsExecutionError(t *testing.T) {
 	}
 }
 
+// TestEvaluateSCForBlockNotRejectedOnRevert asserts that a block containing a
+// reverting contract tx is NOT rejected (ok==true) and that the failed tx
+// registers no contract. It is DB-gated and t.Skip's without RocksDB, so it
+// does not run in the CI sandbox; the branch's correctness where this test
+// can't run was verified manually in the Phase 3b whole-branch review
+// (persisted OutputLogs are non-consensus; fee charged once; value reverted;
+// non-execution errors stay block-fatal). The always-running coverage is
+// TestIsEVMExecutionError + TestEvaluateSCRevertingCreateIsExecutionError.
 func TestEvaluateSCForBlockNotRejectedOnRevert(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
