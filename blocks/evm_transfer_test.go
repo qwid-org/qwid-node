@@ -84,6 +84,12 @@ func TestIsContractCallTxPredicate(t *testing.T) {
 	}
 }
 
+// TestContractTxValueNotDoubleMoved verifies the isContractCallTx predicate plus
+// evmTransfer in isolation: that a contract-call tx is classified such that
+// ProcessTransaction would skip its native amount move (avoiding a double move
+// on top of the EVM's own evmTransfer). It does NOT exercise the full
+// ProcessTransaction composition (block evaluation, tx dispatch, etc.) — that
+// requires a signed-tx harness and is left for a Phase 3b follow-up.
 func TestContractTxValueNotDoubleMoved(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
@@ -112,6 +118,13 @@ func TestContractTxValueNotDoubleMoved(t *testing.T) {
 	}
 }
 
+// TestValueTransferRevertedOnFailure verifies the EVM's snapshot/revert PRIMITIVE:
+// that calling State.RevertToSnapshot after a journaled evmTransfer restores the
+// native balances exactly as they were before the transfer. It does NOT verify
+// the on-chain failed-tx fee path (Ethereum-style "fee charged, value reverted").
+// On-chain, a reverting top-level contract call currently rejects the whole block
+// (EvaluateSmartContracts=false), so ProcessTransaction is not reached on failure;
+// this test covers only the revert primitive.
 func TestValueTransferRevertedOnFailure(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
