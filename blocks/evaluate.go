@@ -404,6 +404,20 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 		}
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
+			if isEVMExecutionError(err) {
+				// Phase 3b (CONSENSUS): per-tx contract failure. The EVM's internal
+				// snapshot (evm.go Call/create) already reverted this call's value
+				// transfer and storage writes. Include the tx (ProcessTransaction
+				// charges its size-based fee; value stays with the sender), record
+				// it as failed, register NO contract, and do NOT reject the block.
+				t.OutputLogs = []byte(l)
+				if serr := t.StoreToDBPoolTx(poolprefix); serr != nil {
+					loggerMain.GetLogger().Println(serr)
+					return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
+				}
+				continue
+			}
+			// Non-execution (node/processing) error: block-fatal, as before.
 			return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
 		}
 		//TODO we should refund left gas
