@@ -447,6 +447,15 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	// addresses/slots, or an unbounded journal) leaks into this one.
 	State.ResetTransient()
 
+	// EIP-2929: warm the tx sender, recipient, and precompiles at tx start.
+	var accessDest *common.Address
+	if tx.TxData.Recipient != common.EmptyAddress() {
+		r := tx.TxData.Recipient
+		accessDest = &r
+	}
+	rules := VM.ChainConfig().Rules(blockCtx.BlockNumber, blockCtx.Random != nil)
+	State.PrepareAccessList(tx.TxParam.Sender, accessDest, vm.ActivePrecompiles(rules), nil)
+
 	if tx.TxData.Recipient == common.EmptyAddress() {
 		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), big.NewInt(tx.TxData.Amount), nonce)
 
