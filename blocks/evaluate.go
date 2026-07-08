@@ -131,6 +131,19 @@ func constantProductPrice(coinPool, tokenPool, amountToken float64, roundDecimal
 	return 0
 }
 
+// scaleToInt64 converts a whole-unit float amount to base units (amount * 10^decimals),
+// returning ok=false when the result would not fit in an int64. This avoids the
+// non-portable `int64(hugeFloat)` conversion (implementation-defined in Go when the
+// value overflows), which would otherwise make DEX pricing non-deterministic across
+// architectures near the full-pool boundary (AC-H6).
+func scaleToInt64(amount float64, decimals int) (int64, bool) {
+	scaled := amount * math.Pow10(decimals)
+	if math.IsNaN(scaled) || math.IsInf(scaled, 0) || math.Abs(scaled) >= float64(math.MaxInt64) {
+		return 0, false
+	}
+	return int64(scaled), true
+}
+
 func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {
 	// 2 - adding liquidity, 3 - buy trade, 4 -sell trade, 5 - withdraw token, 6 - withdraw KURA (5,6 inactive, just withdraw is selling opposite)
 	amountToken := common.GetInt64FromByte(tx.TxData.OptData)
@@ -192,16 +205,24 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
 		if price > 0 {
 			amount := common.RoundCoin(-price * amountTokenFloat)
-			amountCoinInt64 = int64(amount * math.Pow10(int(common.Decimals)))
-			amountTokenInt64 = int64(amountTokenFloat * math.Pow10(int(ti.Decimals)))
+			c, okC := scaleToInt64(amount, int(common.Decimals))
+			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
+			if okC && okT {
+				amountCoinInt64 = c
+				amountTokenInt64 = tkn
+			}
 		}
 	case 4: //sell
 		amountTokenFloat *= -1
 		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
 		if price > 0 {
 			amount := common.RoundCoin(-price * amountTokenFloat)
-			amountCoinInt64 = int64(amount * math.Pow10(int(common.Decimals)))
-			amountTokenInt64 = int64(amountTokenFloat * math.Pow10(int(ti.Decimals)))
+			c, okC := scaleToInt64(amount, int(common.Decimals))
+			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
+			if okC && okT {
+				amountCoinInt64 = c
+				amountTokenInt64 = tkn
+			}
 		}
 	default:
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("wrong operation on dex")

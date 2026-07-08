@@ -59,6 +59,40 @@ func TestConstantProductHalfPoolBoundedAndGuard(t *testing.T) {
 	}
 }
 
+func TestScaleToInt64(t *testing.T) {
+	// Normal value scales correctly.
+	if got, ok := scaleToInt64(1.5, 8); !ok || got != 150000000 {
+		t.Fatalf("normal value: got (%v, %v), want (150000000, true)", got, ok)
+	}
+
+	// Negative value scales correctly.
+	if got, ok := scaleToInt64(-1.5, 8); !ok || got != -150000000 {
+		t.Fatalf("negative value: got (%v, %v), want (-150000000, true)", got, ok)
+	}
+
+	// Huge value overflows int64.
+	if got, ok := scaleToInt64(1e30, 8); ok || got != 0 {
+		t.Fatalf("huge value: got (%v, %v), want (0, false)", got, ok)
+	}
+
+	// Boundary: a value whose scaled result is >= float64(math.MaxInt64) must be rejected
+	// (float64(math.MaxInt64) rounds up to 2^63, which does not fit in int64).
+	if got, ok := scaleToInt64(float64(math.MaxInt64), 0); ok || got != 0 {
+		t.Fatalf("boundary value: got (%v, %v), want (0, false)", got, ok)
+	}
+
+	// NaN and Inf are rejected.
+	if got, ok := scaleToInt64(math.NaN(), 8); ok || got != 0 {
+		t.Fatalf("NaN: got (%v, %v), want (0, false)", got, ok)
+	}
+	if got, ok := scaleToInt64(math.Inf(1), 8); ok || got != 0 {
+		t.Fatalf("+Inf: got (%v, %v), want (0, false)", got, ok)
+	}
+	if got, ok := scaleToInt64(math.Inf(-1), 8); ok || got != 0 {
+		t.Fatalf("-Inf: got (%v, %v), want (0, false)", got, ok)
+	}
+}
+
 func TestConstantProductRoundTripNoValueCreation(t *testing.T) {
 	coinPool, tokenPool := 1000.0, 1000.0
 	d := 50.0
