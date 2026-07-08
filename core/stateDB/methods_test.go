@@ -298,3 +298,28 @@ func TestBalanceSaturates(t *testing.T) {
 		t.Fatalf("out-of-int64 amount did not saturate: got %d", account.GetBalance(b.ByteValue))
 	}
 }
+
+func TestRefundAccounting(t *testing.T) {
+	sa := CreateStateDB()
+	if sa.GetRefund() != 0 {
+		t.Fatal("fresh refund not zero")
+	}
+	sa.AddRefund(100)
+	sa.AddRefund(50)
+	if sa.GetRefund() != 150 {
+		t.Fatalf("GetRefund = %d, want 150", sa.GetRefund())
+	}
+	sa.SubRefund(20)
+	if sa.GetRefund() != 130 {
+		t.Fatalf("after SubRefund = %d, want 130", sa.GetRefund())
+	}
+	sa.SubRefund(9999) // clamp, no underflow
+	if sa.GetRefund() != 0 {
+		t.Fatalf("SubRefund underflow not clamped: %d", sa.GetRefund())
+	}
+	sa.AddRefund(77)
+	sa.ResetTransient()
+	if sa.GetRefund() != 0 {
+		t.Fatalf("ResetTransient did not clear refund: %d", sa.GetRefund())
+	}
+}

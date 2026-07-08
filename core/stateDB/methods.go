@@ -32,6 +32,7 @@ type StateAccount struct {
 	suicided            map[[common.AddressLength]byte]bool                 // transient
 	accessAddrs         map[[common.AddressLength]byte]bool                 // transient, EIP-2929 warm addresses
 	accessSlots         map[[common.AddressLength]byte]map[common.Hash]bool // transient, EIP-2929 warm slots
+	refund              uint64                                              // transient
 	HeightToSnapShotNum map[int64]int                                       `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
 	ContractsByHeight   map[int64][][common.AddressLength]byte              `json:"contractsByHeight"`
 }
@@ -192,14 +193,18 @@ func (sa *StateAccount) GetCodeSize(a common.Address) int {
 	return len(sa.Codes[a.ByteValue])
 }
 
-func (sa *StateAccount) AddRefund(uint64) {
-
+func (sa *StateAccount) AddRefund(gas uint64) {
+	sa.refund += gas
 }
-func (sa *StateAccount) SubRefund(uint64) {
-
+func (sa *StateAccount) SubRefund(gas uint64) {
+	if gas > sa.refund {
+		sa.refund = 0 // clamp; refund is not applied to the fee this phase (DB-C4 accounting-only)
+		return
+	}
+	sa.refund -= gas
 }
 func (sa *StateAccount) GetRefund() uint64 {
-	return 0
+	return sa.refund
 }
 
 func (sa *StateAccount) GetCommittedState(a common.Address, h common.Hash) common.Hash {
@@ -387,6 +392,7 @@ func (sa *StateAccount) ResetTransient() {
 	sa.suicided = map[[common.AddressLength]byte]bool{}
 	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
 	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+	sa.refund = 0
 }
 func (sa *StateAccount) AddPreimage(h common.Hash, b []byte) {
 	(*sa).States[h] = b
