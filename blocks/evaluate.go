@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
@@ -59,6 +60,42 @@ func isContractCallTx(tx transactionsDefinition.Transaction, senderAcc account.A
 		return false // escrow-delayed — SC not executed
 	}
 	return true
+}
+
+// isEVMExecutionError reports whether err is an EVM execution failure — a
+// contract-caused failure the sender pays for and the block includes — as
+// opposed to a node/processing error, which must stay block-fatal. Anything
+// not positively matched here is treated as block-fatal (the safe default).
+func isEVMExecutionError(err error) bool {
+	switch {
+	case errors.Is(err, vm.ErrExecutionReverted),
+		errors.Is(err, vm.ErrOutOfGas),
+		errors.Is(err, vm.ErrCodeStoreOutOfGas),
+		errors.Is(err, vm.ErrDepth),
+		errors.Is(err, vm.ErrInsufficientBalance),
+		errors.Is(err, vm.ErrContractAddressCollision),
+		errors.Is(err, vm.ErrMaxCodeSizeExceeded),
+		errors.Is(err, vm.ErrInvalidJump),
+		errors.Is(err, vm.ErrWriteProtection),
+		errors.Is(err, vm.ErrReturnDataOutOfBounds),
+		errors.Is(err, vm.ErrGasUintOverflow),
+		errors.Is(err, vm.ErrInvalidCode),
+		errors.Is(err, vm.ErrNonceUintOverflow):
+		return true
+	}
+	var opErr *vm.ErrInvalidOpCode
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var suErr *vm.ErrStackUnderflow
+	if errors.As(err, &suErr) {
+		return true
+	}
+	var soErr *vm.ErrStackOverflow
+	if errors.As(err, &soErr) {
+		return true
+	}
+	return false
 }
 
 func InitStateDB() {
