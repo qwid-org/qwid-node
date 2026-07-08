@@ -116,6 +116,21 @@ func CommitEVMState(height int64) error {
 	return State.Store(height)
 }
 
+// constantProductPrice returns the exact constant-product (x*y=k) average
+// execution price coinPool/(tokenPool - amountToken), rounded to roundDecimals,
+// or 0 when the pools/denominator are non-positive (e.g. a buy of the whole
+// token pool, which is not allowed). amountToken is SIGNED: >0 for a buy (tokens
+// leave the pool), <0 for a sell (tokens enter the pool). Using amountToken
+// (not the old 2*amountToken) makes swaps exact x*y=k (AC-H6): the price
+// diverges only as a trade approaches the full pool, never at half the pool.
+func constantProductPrice(coinPool, tokenPool, amountToken float64, roundDecimals int) float64 {
+	denom := tokenPool - amountToken
+	if coinPool > 0 && denom > 0 {
+		return common.RoundToken(coinPool/denom, roundDecimals)
+	}
+	return 0
+}
+
 func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {
 	// 2 - adding liquidity, 3 - buy trade, 4 -sell trade, 5 - withdraw token, 6 - withdraw KURA (5,6 inactive, just withdraw is selling opposite)
 	amountToken := common.GetInt64FromByte(tx.TxData.OptData)
@@ -174,9 +189,7 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 			amountCoinInt64 = int64(amountCoinFloat * math.Pow10(int(common.Decimals)))
 		}
 	case 3: //buy
-		if coinPoolAmount > 0 && tokenPoolAmount-2*amountTokenFloat > 0 {
-			price = common.RoundToken(coinPoolAmount/(tokenPoolAmount-2*amountTokenFloat), int(common.Decimals+ti.Decimals))
-		}
+		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
 		if price > 0 {
 			amount := common.RoundCoin(-price * amountTokenFloat)
 			amountCoinInt64 = int64(amount * math.Pow10(int(common.Decimals)))
@@ -184,9 +197,7 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 		}
 	case 4: //sell
 		amountTokenFloat *= -1
-		if coinPoolAmount > 0 && tokenPoolAmount-2*amountTokenFloat > 0 {
-			price = common.RoundToken(coinPoolAmount/(tokenPoolAmount-2*amountTokenFloat), int(common.Decimals+ti.Decimals))
-		}
+		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
 		if price > 0 {
 			amount := common.RoundCoin(-price * amountTokenFloat)
 			amountCoinInt64 = int64(amount * math.Pow10(int(common.Decimals)))
