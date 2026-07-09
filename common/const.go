@@ -42,13 +42,28 @@ var (
 	MaxTransactionInMultiSigPool   int64   = 60480        //one week
 	MaxNumberTransactionInChunk            = 100
 	ConnectionMaxTries                     = 10
-	BannedTimeSeconds              int64   = 2                   // 2 blocks
+	BannedTimeSeconds              int64   = 60                  // DoS hardening: was 2s; ~6 block intervals
 	MessageInitialization                  = [4]byte{2, 0, 2, 9} // will be overwrite in init() by MaxMessageSizeBytes
 	MaxMessageSizeBytes            int32   = 151126018           // should be adjusted to maximal message sent
 	DefaultWalletHomePath                  = "/.qwid/wallet/"
 	DefaultBlockchainHomePath              = "/.qwid/db/blockchain/"
 	ConnectionsWithoutVerification         = [][]byte{[]byte("TRAN"), []byte("STAT"), []byte("ENCR"), []byte("DETS"), []byte("STAK"), []byte("ADEX"), []byte("PUBA"), []byte("HELO"), []byte("VALS")}
 	CurrentHeightOfNetwork         int64   = 23
+
+	// Per-topic inbound message-size caps (bytes) — DoS hardening (sub-project A).
+	// Replace the single 151MB MaxMessageSizeBytes ENFORCEMENT (the wire marker
+	// MessageInitialization/MaxMessageSizeBytes are unchanged). Sized generously
+	// per topic so no legit traffic breaks.
+	MaxMsgSizeSmall int32 = 65536    // 64KB  — Nonce/SelfNonce (tiny fixed messages)
+	MaxMsgSizeTx    int32 = 1048576  // 1MB   — Transaction (unbounded OptData / contract deploys)
+	MaxMsgSizeSync  int32 = 16777216 // 16MB  — Sync (block-header batches, ~3.2MB real max)
+	MaxMsgSizeRPC   int32 = 1048576  // 1MB   — RPC (localhost-bound)
+
+	// Per-IP rate limits — DoS hardening.
+	MessageRateLimit            int   = 100 // max messages per window per IP
+	MessageRateWindowSeconds    int64 = 10
+	ConnectionRateLimit         int   = 5 // max connection attempts per window per IP
+	ConnectionRateWindowSeconds int64 = 60
 )
 
 // db prefixes

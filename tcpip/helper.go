@@ -58,6 +58,7 @@ func BanIP(ip [4]byte) {
 	logger.GetLogger().Println("BANNING ", ip)
 	bannedIP[ip] = common.GetCurrentTimeStampInSecond() + common.BannedTimeSeconds
 	bannedIPMutex.Unlock()
+	pruneRateLimits(ip)
 	if PeersMutex.TryLock() {
 		defer PeersMutex.Unlock()
 		if _, ok := validPeersConnected[ip]; ok {
@@ -193,4 +194,94 @@ func GetWhitelistedIPs() []string {
 
 func formatIP(ip [4]byte) string {
 	return fmt.Sprintf("%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3])
+}
+
+// MaxMessageSizeForTopic returns the per-topic inbound message-size cap in bytes,
+// replacing the single global MaxMessageSizeBytes at the receive-loop check.
+// Unknown topics get the tightest cap. Shrinks the buffering DoS surface without
+// breaking large contract-deploy txs (TransactionTopic) or block sync batches.
+func MaxMessageSizeForTopic(topic [2]byte) int32 {
+	switch topic {
+	case NonceTopic, SelfNonceTopic:
+		return common.MaxMsgSizeSmall
+	case TransactionTopic:
+		return common.MaxMsgSizeTx
+	case SyncTopic:
+		return common.MaxMsgSizeSync
+	case RPCTopic:
+		return common.MaxMsgSizeRPC
+	default:
+		return common.MaxMsgSizeSmall
+	}
+}
+
+type rateWindow struct {
+	windowStart int64 // unix seconds
+	count       int
+}
+
+var (
+	msgRate       = map[[4]byte]*rateWindow{}
+	msgRateMutex  sync.Mutex
+	connRate      = map[[4]byte]*rateWindow{}
+	connRateMutex sync.Mutex
+)
+
+// allowInWindow records one event at `now` and reports whether the running count
+// stays within `limit` over a `windowSecs` sliding window (reset when the window
+// elapses). Pure/deterministic given its inputs.
+func allowInWindow(w *rateWindow, now int64, limit int, windowSecs int64) bool {
+	if now-w.windowStart >= windowSecs {
+		w.windowStart = now
+		w.count = 0
+	}
+	w.count++
+	return w.count <= limit
+}
+
+// AllowMessageFromIP reports whether ip may send another message now, throttling
+// at MessageRateLimit per MessageRateWindowSeconds. Whitelisted IPs always pass
+// and are not counted.
+func AllowMessageFromIP(ip [4]byte) bool {
+	if isWhitelisted(ip) {
+		return true
+	}
+	now := common.GetCurrentTimeStampInSecond()
+	msgRateMutex.Lock()
+	defer msgRateMutex.Unlock()
+	w, ok := msgRate[ip]
+	if !ok {
+		w = &rateWindow{windowStart: now}
+		msgRate[ip] = w
+	}
+	return allowInWindow(w, now, common.MessageRateLimit, common.MessageRateWindowSeconds)
+}
+
+// AllowConnectionFromIP reports whether ip may make another connection attempt
+// now, throttling at ConnectionRateLimit per ConnectionRateWindowSeconds.
+// Whitelisted IPs always pass.
+func AllowConnectionFromIP(ip [4]byte) bool {
+	if isWhitelisted(ip) {
+		return true
+	}
+	now := common.GetCurrentTimeStampInSecond()
+	connRateMutex.Lock()
+	defer connRateMutex.Unlock()
+	w, ok := connRate[ip]
+	if !ok {
+		w = &rateWindow{windowStart: now}
+		connRate[ip] = w
+	}
+	return allowInWindow(w, now, common.ConnectionRateLimit, common.ConnectionRateWindowSeconds)
+}
+
+// pruneRateLimits drops an IP's rate/reconnection state — called when it is banned,
+// to bound long-run map growth.
+func pruneRateLimits(ip [4]byte) {
+	msgRateMutex.Lock()
+	delete(msgRate, ip)
+	msgRateMutex.Unlock()
+	connRateMutex.Lock()
+	delete(connRate, ip)
+	connRateMutex.Unlock()
 }
