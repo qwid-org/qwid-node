@@ -222,9 +222,13 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 	if hsErr != nil {
 		logger.GetLogger().Println("inbound handshake failed:", hsErr)
 		tcpConn.Close()
-		PeersMutex.Lock()
-		ReduceTrustRegisterPeer(ip)
-		PeersMutex.Unlock()
+		// NP-C3: a failed handshake is an unambiguous bad-signature/protocol
+		// violation signal (no benign cause), so ban immediately instead of
+		// the softer ReduceTrustRegisterPeer, which is a no-op for a
+		// first-contact IP not yet in validPeersConnected. BanIP takes its
+		// own locks (TryLocks PeersMutex), so it must not be called while
+		// holding PeersMutex.
+		BanIP(ip)
 		return nil, fmt.Errorf("inbound handshake failed: %w", hsErr)
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
@@ -392,15 +396,18 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn *net.TCPConn) {
 	nodePeersConnected[ip] = common.ConnectionMaxTries
 }
 
-// RegisterPeer registers a new peer connection.
+// registerPeerNoHandshake registers a new peer connection WITHOUT running the
+// peer-auth handshake.
 //
 // NP-C3 note: this pre-handshake convenience wrapper (admit checks + immediate
-// publish) is kept only for any external/test callers that don't need the
-// handshake gate. The live inbound accept path in Accept() below does NOT call
-// this — it calls admitPeer() and publishAcceptedConn() separately, with the
+// publish) bypasses authentication entirely and has zero callers in this
+// repo (confirmed by grep). It is kept unexported, with this name, so it
+// cannot be reintroduced as a handshake-bypass footgun by a future caller.
+// The live inbound accept path in Accept() below does NOT call this — it
+// calls admitPeer() and publishAcceptedConn() separately, with the
 // peer-auth handshake running strictly in between, so a connection is never
 // visible to LoopSend before it is authenticated.
-func RegisterPeer(topic [2]byte, tcpConn *net.TCPConn) bool {
+func registerPeerNoHandshake(topic [2]byte, tcpConn *net.TCPConn) bool {
 	ip, err := parsePeerIP(tcpConn)
 	if err != nil {
 		fmt.Println(err)

@@ -169,9 +169,13 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	if hsErr != nil {
 		logger.GetLogger().Println("outbound handshake failed with", ipport, ":", hsErr)
 		tcpConn.Close()
-		PeersMutex.Lock()
-		ReduceTrustRegisterPeer(ip)
-		PeersMutex.Unlock()
+		// NP-C3: a failed handshake is an unambiguous bad-signature/protocol
+		// violation signal (no benign cause), so ban immediately instead of
+		// the softer ReduceTrustRegisterPeer, which is a no-op for a
+		// first-contact IP not yet in validPeersConnected. BanIP respects the
+		// whitelist and takes its own locks, so it must not be called while
+		// holding PeersMutex.
+		BanIP(ip)
 		return
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
@@ -262,6 +266,18 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						logger.GetLogger().Printf("Connection attempt to %s failed: %v", ipport, err.Error())
 						// Reconnection failed — exit cleanly so subscriber can
 						// be re-established by the peer discovery loop.
+						receiveChan <- []byte("EXIT")
+						return
+					}
+					// NP-C3: the re-dial produced a brand-new TCP stream, so it
+					// must be re-authenticated with a fresh handshake before the
+					// receive loop resumes reading from it — otherwise an
+					// unauthenticated stream would be trusted just like the
+					// original, already-handshaken connection.
+					if _, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
+						logger.GetLogger().Println("re-dial handshake failed with", ipport, ":", hsErr)
+						tcpConn.Close()
+						BanIP(ip)
 						receiveChan <- []byte("EXIT")
 						return
 					}
