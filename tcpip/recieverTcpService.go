@@ -196,10 +196,40 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		return nil, fmt.Errorf("error accepting connection: %w", err)
 	}
 
-	if !RegisterPeer(topic, tcpConn) {
+	ip, err := parsePeerIP(tcpConn)
+	if err != nil {
+		tcpConn.Close()
+		return nil, fmt.Errorf("registration failed for connection: %w", err)
+	}
+	if !admitPeer(ip) {
 		tcpConn.Close()
 		return nil, fmt.Errorf("registration failed for connection")
 	}
+
+	// NP-C3: run the peer-auth handshake on the freshly accepted connection
+	// BEFORE it is published into tcpConnections. Accept() runs synchronously
+	// in StartNewListener's loop and tcpConn is not reachable by any other
+	// goroutine (LoopSend, the receive loop in StartNewConnection, etc.) until
+	// publishAcceptedConn below runs — so there is no reader/writer racing the
+	// handshake frames on this stream.
+	self, idErr := activeWalletIdentity()
+	if idErr != nil {
+		logger.GetLogger().Println("handshake: cannot build identity:", idErr)
+		tcpConn.Close()
+		return nil, fmt.Errorf("handshake identity unavailable")
+	}
+	peerID, hsErr := HandshakeResponder(tcpConn, self)
+	if hsErr != nil {
+		logger.GetLogger().Println("inbound handshake failed:", hsErr)
+		tcpConn.Close()
+		PeersMutex.Lock()
+		ReduceTrustRegisterPeer(ip)
+		PeersMutex.Unlock()
+		return nil, fmt.Errorf("inbound handshake failed: %w", hsErr)
+	}
+	storeVerifiedNodeID(topic, ip, peerID)
+
+	publishAcceptedConn(topic, ip, tcpConn)
 	tcpConn.SetKeepAlive(true)
 	return tcpConn, nil
 }
@@ -293,21 +323,31 @@ func FullyDeleteConnection(tcpConn *net.TCPConn) {
 	CloseAndRemoveConnection(tcpConn)
 }
 
-// RegisterPeer registers a new peer connection
-func RegisterPeer(topic [2]byte, tcpConn *net.TCPConn) bool {
-
+// parsePeerIP extracts the 4-byte IPv4 address from an accepted TCP connection's
+// remote address.
+func parsePeerIP(tcpConn *net.TCPConn) ([4]byte, error) {
 	raddr := tcpConn.RemoteAddr().String()
 	ra := strings.Split(raddr, ":")
 	ips := strings.Split(ra[0], ".")
 	var ip [4]byte
+	if len(ips) != 4 {
+		return ip, fmt.Errorf("invalid remote address: %s", raddr)
+	}
 	for i := 0; i < 4; i++ {
 		num, err := strconv.Atoi(ips[i])
 		if err != nil {
-			fmt.Println("Invalid IP address segment:", ips[i])
-			return false
+			return ip, fmt.Errorf("invalid IP address segment: %s", ips[i])
 		}
 		ip[i] = byte(num)
 	}
+	return ip, nil
+}
+
+// admitPeer runs the ban/rate-limit checks for an inbound connection BEFORE any
+// handshake or connection registration happens. It does not touch tcpConnections.
+// NP-C3: this gate must run first so an unauthenticated/banned peer never even
+// reaches the handshake step.
+func admitPeer(ip [4]byte) bool {
 	if IsIPBanned(ip) {
 		logger.GetLogger().Println("IP is BANNED", ip)
 		return false
@@ -317,6 +357,15 @@ func RegisterPeer(topic [2]byte, tcpConn *net.TCPConn) bool {
 		BanIP(ip)
 		return false
 	}
+	return true
+}
+
+// publishAcceptedConn registers an accepted connection for sending/tracking.
+// NP-C3: this MUST only be called AFTER the peer-auth handshake has succeeded
+// on tcpConn, because publishing into tcpConnections makes the connection a
+// live target for LoopSend — publishing before the handshake completes would
+// let ordinary topic traffic interleave on the wire with handshake frames.
+func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn *net.TCPConn) {
 	var topicipBytes [6]byte
 	copy(topicipBytes[:], append(topic[:], ip[:]...))
 
@@ -341,7 +390,26 @@ func RegisterPeer(topic [2]byte, tcpConn *net.TCPConn) bool {
 	peersConnected[topicipBytes] = topic
 	validPeersConnected[ip] = common.ConnectionMaxTries
 	nodePeersConnected[ip] = common.ConnectionMaxTries
+}
 
+// RegisterPeer registers a new peer connection.
+//
+// NP-C3 note: this pre-handshake convenience wrapper (admit checks + immediate
+// publish) is kept only for any external/test callers that don't need the
+// handshake gate. The live inbound accept path in Accept() below does NOT call
+// this — it calls admitPeer() and publishAcceptedConn() separately, with the
+// peer-auth handshake running strictly in between, so a connection is never
+// visible to LoopSend before it is authenticated.
+func RegisterPeer(topic [2]byte, tcpConn *net.TCPConn) bool {
+	ip, err := parsePeerIP(tcpConn)
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+	if !admitPeer(ip) {
+		return false
+	}
+	publishAcceptedConn(topic, ip, tcpConn)
 	return true
 }
 

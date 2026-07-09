@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/wonabru/qwid-node/common"
+	"github.com/wonabru/qwid-node/logger"
 	"github.com/wonabru/qwid-node/wallet"
 )
 
@@ -166,4 +168,61 @@ func HandshakeResponder(c net.Conn, self HandshakeIdentity) (common.Address, err
 		return common.Address{}, fmt.Errorf("handshake: initiator signature invalid")
 	}
 	return addrI, nil
+}
+
+// activeWalletIdentity builds this node's HandshakeIdentity from the active wallet.
+//
+// Sign byte-extraction: wallet.Wallet.Sign(data, primary) (wallet/wallet.go)
+// prepends a scheme byte (0=primary/Falcon-512, 1=secondary/MAYO-5) to the raw
+// signature and stores that combined slice in common.Signature.ByteValue via
+// Init(). Signature.GetBytes() (common/types.go) returns ByteValue verbatim —
+// i.e. exactly the scheme-flagged bytes wallet.Verify expects at sig[0]. This
+// matches how the RPC client signs requests (cmd/sendingTransaction/main.go
+// SignMessage: `line = append(line, sign.GetBytes()...)`) and how
+// rpc/server/server.go's Listener.Send receives/verifies them
+// (`signatureBytes = left; ...; wallet.Verify(..., signatureBytes, ...)`).
+// common.Signature has NO GetSignature() method — GetBytes() is the only and
+// correct accessor. Confirmed via a throwaway round-trip test (wallet.Sign ->
+// GetBytes -> wallet.Verify) during implementation; see hs-task-2-report.md.
+func activeWalletIdentity() (HandshakeIdentity, error) {
+	w := wallet.GetActiveWallet()
+	if w == nil {
+		return HandshakeIdentity{}, fmt.Errorf("handshake: no active wallet")
+	}
+	pub := w.Account1.PublicKey.GetBytes()
+	addr, err := common.PubKeyToAddress(pub, true)
+	if err != nil {
+		return HandshakeIdentity{}, err
+	}
+	return HandshakeIdentity{
+		PubKey:  pub,
+		Address: addr,
+		Sign: func(d []byte) ([]byte, error) {
+			sig, err := w.Sign(d, true)
+			if err != nil {
+				return nil, err
+			}
+			return sig.GetBytes(), nil // scheme-flagged bytes wallet.Verify accepts
+		},
+	}, nil
+}
+
+// verifiedNodeIDs stores the handshake-verified nodeID per (topic, ip) — a
+// foundation for a future nodeID-keyed ban/allowlist. It is store-and-log only;
+// no logic in this codebase currently gates on it (trust model stays OPEN
+// peering — any peer that completes the handshake with a valid signature is
+// accepted, regardless of which nodeID it presents).
+var (
+	verifiedNodeIDs      = map[[6]byte]common.Address{} // key = topic || ip
+	verifiedNodeIDsMutex sync.Mutex
+)
+
+func storeVerifiedNodeID(topic [2]byte, ip [4]byte, id common.Address) {
+	var k [6]byte
+	copy(k[:2], topic[:])
+	copy(k[2:], ip[:])
+	verifiedNodeIDsMutex.Lock()
+	verifiedNodeIDs[k] = id
+	verifiedNodeIDsMutex.Unlock()
+	logger.GetLogger().Printf("peer authenticated: topic=%s ip=%v nodeID=%x", string(topic[:]), ip, id.ByteValue)
 }

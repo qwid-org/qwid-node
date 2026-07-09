@@ -153,6 +153,29 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	}
 	logger.GetLogger().Printf("Connection successful to %s topic %c%c", ipport, topic[0], topic[1])
 
+	// NP-C3: run the peer-auth handshake on the freshly dialed connection BEFORE
+	// it is published into tcpConnections and BEFORE the receive loop below reads
+	// anything from it. tcpConn is only known to this goroutine at this point —
+	// it is not yet reachable by LoopSend (which sends to whatever is already in
+	// tcpConnections[topic]) or by any other receive loop — so there is no
+	// reader/writer racing the handshake frames on this stream.
+	self, idErr := activeWalletIdentity()
+	if idErr != nil {
+		logger.GetLogger().Println("handshake: cannot build identity:", idErr)
+		tcpConn.Close()
+		return
+	}
+	peerID, hsErr := HandshakeInitiator(tcpConn, self)
+	if hsErr != nil {
+		logger.GetLogger().Println("outbound handshake failed with", ipport, ":", hsErr)
+		tcpConn.Close()
+		PeersMutex.Lock()
+		ReduceTrustRegisterPeer(ip)
+		PeersMutex.Unlock()
+		return
+	}
+	storeVerifiedNodeID(topic, ip, peerID)
+
 	// Register the outbound connection for receiving.
 	// If an accepted connection already exists in tcpConnections for this peer+topic,
 	// keep it for sending (the other node reads from the outbound end of that connection).
