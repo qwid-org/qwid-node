@@ -53,16 +53,21 @@ var (
 	// Per-topic inbound message-size caps (bytes) — DoS hardening (sub-project A).
 	// Replace the single 151MB MaxMessageSizeBytes ENFORCEMENT (the wire marker
 	// MessageInitialization/MaxMessageSizeBytes are unchanged). Sized generously
-	// per topic so no legit traffic breaks.
+	// per topic so no legit traffic breaks. TransactionTopic intentionally keeps
+	// the full MaxMessageSizeBytes cap (see MaxMessageSizeForTopic in
+	// tcpip/helper.go): tx-gossip (up to MaxTransactionsPerBlock txs) and sync
+	// "bx" recovery (up to MaxNumberTransactionInChunk txs) are sent as
+	// un-chunked batches, so a tighter per-message cap would reject legitimate
+	// batches and get honest peers banned. Tightening it requires chunking
+	// those send paths (documented follow-up).
 	MaxMsgSizeSmall int32 = 65536    // 64KB  — Nonce/SelfNonce (tiny fixed messages)
-	MaxMsgSizeTx    int32 = 1048576  // 1MB   — Transaction (unbounded OptData / contract deploys)
 	MaxMsgSizeSync  int32 = 16777216 // 16MB  — Sync (block-header batches, ~3.2MB real max)
 	MaxMsgSizeRPC   int32 = 1048576  // 1MB   — RPC (localhost-bound)
 
 	// Per-IP rate limits — DoS hardening.
 	MessageRateLimit            int   = 100 // max messages per window per IP
 	MessageRateWindowSeconds    int64 = 10
-	ConnectionRateLimit         int   = 5 // max connection attempts per window per IP
+	ConnectionRateLimit         int   = 20 // max connection attempts per window per IP; 20 tolerates a legit multi-topic (tx/nonce/self-nonce/sync) restart+retry
 	ConnectionRateWindowSeconds int64 = 60
 )
 

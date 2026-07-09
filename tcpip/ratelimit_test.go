@@ -13,7 +13,7 @@ func TestMaxMessageSizeForTopic(t *testing.T) {
 	}{
 		{NonceTopic, common.MaxMsgSizeSmall},
 		{SelfNonceTopic, common.MaxMsgSizeSmall},
-		{TransactionTopic, common.MaxMsgSizeTx},
+		{TransactionTopic, common.MaxMessageSizeBytes},
 		{SyncTopic, common.MaxMsgSizeSync},
 		{RPCTopic, common.MaxMsgSizeRPC},
 		{[2]byte{'?', '?'}, common.MaxMsgSizeSmall}, // unknown -> tightest

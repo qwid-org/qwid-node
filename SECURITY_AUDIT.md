@@ -106,6 +106,8 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 
 ## 3. Networking & P2P
 
+> **DoS-hardening remediation (2026-07-09, branch `security-fixes`, OB-114/OB-114b):** Per-topic inbound message-size caps replace the single 151 MB global `MaxMessageSizeBytes` enforcement at the receive-loop check (`MaxMessageSizeForTopic`, `tcpip/helper.go`): Nonce/SelfNonce → 64 KB, Sync → 16 MB, RPC (localhost-bound) → 1 MB. **The TransactionTopic cap is intentionally kept at the full global 151 MB** because tx-gossip (up to `MaxTransactionsPerBlock` = 5000 txs, `services/transactionServices/serviceTransaction.go:69,94`) and sync "bx" recovery (up to `MaxNumberTransactionInChunk` = 100 txs) are sent as **un-chunked batches** — an earlier draft that capped this topic at 1 MB would reject legitimate batched traffic and trip `ReduceTrustRegisterPeer` → `BanIP` against honest peers, breaking sync recovery; tightening it requires chunking those send paths (a documented follow-up). Also added: a per-IP message-rate limiter (100 messages / 10 s, `AllowMessageFromIP`) and a reconnection-rate limiter (20 connection attempts / 60 s, `AllowConnectionFromIP`, raised from an initial 5 since a single legitimate node restart opens ~4 inbound connections across the Transaction/Nonce/SelfNonce/Sync topics) — both whitelist-exempt (`isWhitelisted`) — plus a lengthened ban duration (2 s → 60 s, `BannedTimeSeconds`). Peer identity/authentication (**NP-C3**, sub-project B) and transport encryption (**NP-H14**, sub-project C) remain open.
+
 ### CRITICAL
 
 | ID | Finding | File:Lines |

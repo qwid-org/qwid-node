@@ -198,14 +198,17 @@ func formatIP(ip [4]byte) string {
 
 // MaxMessageSizeForTopic returns the per-topic inbound message-size cap in bytes,
 // replacing the single global MaxMessageSizeBytes at the receive-loop check.
-// Unknown topics get the tightest cap. Shrinks the buffering DoS surface without
-// breaking large contract-deploy txs (TransactionTopic) or block sync batches.
+// Unknown topics get the tightest cap. Shrinks the buffering DoS surface for
+// Nonce/SelfNonce/Sync/RPC. TransactionTopic keeps the full global cap because
+// tx-gossip (up to MaxTransactionsPerBlock txs) and sync "bx" recovery (up to
+// MaxNumberTransactionInChunk txs) are sent as un-chunked batches — a tighter
+// cap would reject legitimate batches and get honest peers banned.
 func MaxMessageSizeForTopic(topic [2]byte) int32 {
 	switch topic {
 	case NonceTopic, SelfNonceTopic:
 		return common.MaxMsgSizeSmall
 	case TransactionTopic:
-		return common.MaxMsgSizeTx
+		return common.MaxMessageSizeBytes
 	case SyncTopic:
 		return common.MaxMsgSizeSync
 	case RPCTopic:
