@@ -312,6 +312,11 @@ func RegisterPeer(topic [2]byte, tcpConn *net.TCPConn) bool {
 		logger.GetLogger().Println("IP is BANNED", ip)
 		return false
 	}
+	if !AllowConnectionFromIP(ip) {
+		logger.GetLogger().Println("connection rate limit exceeded for", ip)
+		BanIP(ip)
+		return false
+	}
 	var topicipBytes [6]byte
 	copy(topicipBytes[:], append(topic[:], ip[:]...))
 

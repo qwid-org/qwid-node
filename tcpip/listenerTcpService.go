@@ -120,6 +120,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		return
 	}
 
+	if !AllowConnectionFromIP(ip) {
+		logger.GetLogger().Printf("connection rate limit exceeded for %s; skipping dial", ipport)
+		return
+	}
+
 	var tcpConn *net.TCPConn
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
@@ -267,7 +272,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 				rTopic[topic] = []byte{}
 			}
 
-			if int32(len(r)) > common.MaxMessageSizeBytes {
+			if int32(len(r)) > MaxMessageSizeForTopic(topic) {
 				logger.GetLogger().Println("error: too long message received: ", len(r))
 				PeersMutex.Lock()
 				ReduceTrustRegisterPeer(ip)
@@ -283,6 +288,19 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			if bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
 				if len(r) > 4 {
 					if bytes.Equal(r[:4], common.MessageInitialization[:]) {
+						if !AllowMessageFromIP(ip) {
+							logger.GetLogger().Println("message rate limit exceeded for", ip)
+							PeersMutex.Lock()
+							ReduceTrustRegisterPeer(ip)
+							trust, ok := validPeersConnected[ip]
+							PeersMutex.Unlock()
+							if ok && trust <= 0 {
+								BanIP(ip)
+								receiveChan <- []byte("EXIT")
+								return
+							}
+							continue // drop this message; do not dispatch
+						}
 						receiveChan <- append(ip[:], r[4:]...)
 					} else {
 						logger.GetLogger().Println("wrong MessageInitialization", r[:4], "should be", common.MessageInitialization[:])
