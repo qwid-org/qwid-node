@@ -165,7 +165,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		tcpConn.Close()
 		return
 	}
-	peerID, hsErr := HandshakeInitiator(tcpConn, self)
+	peerID, sKeys, hsErr := HandshakeInitiator(tcpConn, self)
 	if hsErr != nil {
 		logger.GetLogger().Println("outbound handshake failed with", ipport, ":", hsErr)
 		tcpConn.Close()
@@ -179,6 +179,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		return
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
+	storeSessionKeys(topic, ip, sKeys)
 
 	// Register the outbound connection for receiving.
 	// If an accepted connection already exists in tcpConnections for this peer+topic,
@@ -274,12 +275,14 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					// receive loop resumes reading from it — otherwise an
 					// unauthenticated stream would be trusted just like the
 					// original, already-handshaken connection.
-					if _, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
+					if _, sKeys, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
 						logger.GetLogger().Println("re-dial handshake failed with", ipport, ":", hsErr)
 						tcpConn.Close()
 						BanIP(ip)
 						receiveChan <- []byte("EXIT")
 						return
+					} else {
+						storeSessionKeys(topic, ip, sKeys)
 					}
 					reconnectionTries = 0
 					continue

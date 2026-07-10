@@ -218,7 +218,7 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		tcpConn.Close()
 		return nil, fmt.Errorf("handshake identity unavailable")
 	}
-	peerID, hsErr := HandshakeResponder(tcpConn, self)
+	peerID, sKeys, hsErr := HandshakeResponder(tcpConn, self)
 	if hsErr != nil {
 		logger.GetLogger().Println("inbound handshake failed:", hsErr)
 		tcpConn.Close()
@@ -232,6 +232,7 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		return nil, fmt.Errorf("inbound handshake failed: %w", hsErr)
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
+	storeSessionKeys(topic, ip, sKeys)
 
 	publishAcceptedConn(topic, ip, tcpConn)
 	tcpConn.SetKeepAlive(true)

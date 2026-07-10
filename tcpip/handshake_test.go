@@ -47,10 +47,11 @@ func TestHandshakeMutualAuth(t *testing.T) {
 
 	var respAddr common.Address
 	var respErr error
+	var respKeys *SessionKeys
 	done := make(chan struct{})
-	go func() { respAddr, respErr = HandshakeResponder(cb, b); close(done) }()
+	go func() { respAddr, respKeys, respErr = HandshakeResponder(cb, b); close(done) }()
 
-	initAddr, initErr := HandshakeInitiator(ca, a)
+	initAddr, initKeys, initErr := HandshakeInitiator(ca, a)
 	<-done
 
 	if initErr != nil || respErr != nil {
@@ -62,13 +63,61 @@ func TestHandshakeMutualAuth(t *testing.T) {
 	if respAddr != a.Address {
 		t.Fatalf("responder learned wrong peer nodeID: %x want %x", respAddr.ByteValue, a.Address.ByteValue)
 	}
+	if initKeys == nil || respKeys == nil {
+		t.Fatal("expected non-nil session keys from both sides")
+	}
+}
+
+func TestHandshakeDerivesMatchingSessionKeys(t *testing.T) {
+	a := newTestIdentity(t)
+	b := newTestIdentity(t)
+	ca, cb := net.Pipe()
+	defer ca.Close()
+	defer cb.Close()
+	var rAddr common.Address
+	var rKeys *SessionKeys
+	var rErr error
+	done := make(chan struct{})
+	go func() { rAddr, rKeys, rErr = HandshakeResponder(cb, b); close(done) }()
+	iAddr, iKeys, iErr := HandshakeInitiator(ca, a)
+	<-done
+	if iErr != nil || rErr != nil {
+		t.Fatalf("init=%v resp=%v", iErr, rErr)
+	}
+	if iAddr != b.Address || rAddr != a.Address {
+		t.Fatal("wrong peer nodeID")
+	}
+	// initiator.Write == responder.Read and vice versa
+	if !bytes.Equal(iKeys.WriteKey, rKeys.ReadKey) || !bytes.Equal(iKeys.ReadKey, rKeys.WriteKey) {
+		t.Fatal("session keys do not mirror across the two sides")
+	}
+	if bytes.Equal(iKeys.WriteKey, iKeys.ReadKey) {
+		t.Fatal("the two directional keys must differ")
+	}
+}
+
+func TestKEMAlgAvailable(t *testing.T) {
+	if kemAlg == "" {
+		t.Skip("no KEM available in this liboqs build")
+	}
+	found := false
+	for _, k := range oqs.EnabledKEMs() {
+		if k == kemAlg {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("selected KEM %q not in EnabledKEMs", kemAlg)
+	}
 }
 
 func TestHandshakeRejectsTamperAndReplay(t *testing.T) {
 	a := newTestIdentity(t)
 	nI := bytes.Repeat([]byte{1}, 32)
 	nR := bytes.Repeat([]byte{2}, 32)
-	tr := handshakeTranscript(nI, nR, a.Address)
+	dummyKemPub := bytes.Repeat([]byte{3}, 8)
+	dummyKemCt := bytes.Repeat([]byte{4}, 8)
+	tr := handshakeTranscript(nI, nR, dummyKemPub, dummyKemCt, a.Address)
 	sig, err := a.Sign(tr)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
@@ -86,19 +135,21 @@ func TestHandshakeRejectsTamperAndReplay(t *testing.T) {
 		t.Fatal("tampered signature must NOT verify")
 	}
 	// Signature over a different session (different nonceR) must be rejected (replay/session binding).
-	trOther := handshakeTranscript(nI, bytes.Repeat([]byte{9}, 32), a.Address)
+	trOther := handshakeTranscript(nI, bytes.Repeat([]byte{9}, 32), dummyKemPub, dummyKemCt, a.Address)
 	if verify(trOther, sig, a.PubKey) {
 		t.Fatal("signature must not verify against a different transcript (replay)")
 	}
 }
 
 func TestHandshakeTranscriptDomainSeparated(t *testing.T) {
-	tr := handshakeTranscript(bytes.Repeat([]byte{0}, 32), bytes.Repeat([]byte{0}, 32), common.Address{})
+	dummyKemPub := bytes.Repeat([]byte{5}, 10)
+	dummyKemCt := bytes.Repeat([]byte{6}, 12)
+	tr := handshakeTranscript(bytes.Repeat([]byte{0}, 32), bytes.Repeat([]byte{0}, 32), dummyKemPub, dummyKemCt, common.Address{})
 	if !bytes.HasPrefix(tr, []byte("QWID-P2P-HS-v1")) {
 		t.Fatal("transcript must start with the domain tag QWID-P2P-HS-v1")
 	}
-	if len(tr) != len("QWID-P2P-HS-v1")+32+32+common.AddressLength {
-		t.Fatalf("transcript length = %d, want tag+32+32+%d", len(tr), common.AddressLength)
+	if len(tr) != len("QWID-P2P-HS-v1")+32+32+len(dummyKemPub)+len(dummyKemCt)+common.AddressLength {
+		t.Fatalf("transcript length = %d, want tag+32+32+kemPub+kemCt+%d", len(tr), common.AddressLength)
 	}
 }
 
