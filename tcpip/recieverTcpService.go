@@ -424,30 +424,6 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 	nodePeersConnected[ip] = common.ConnectionMaxTries
 }
 
-// registerPeerNoHandshake registers a new peer connection WITHOUT running the
-// peer-auth handshake.
-//
-// NP-C3 note: this pre-handshake convenience wrapper (admit checks + immediate
-// publish) bypasses authentication entirely and has zero callers in this
-// repo (confirmed by grep). It is kept unexported, with this name, so it
-// cannot be reintroduced as a handshake-bypass footgun by a future caller.
-// The live inbound accept path in Accept() below does NOT call this — it
-// calls admitPeer() and publishAcceptedConn() separately, with the
-// peer-auth handshake running strictly in between, so a connection is never
-// visible to LoopSend before it is authenticated.
-func registerPeerNoHandshake(topic [2]byte, tcpConn *net.TCPConn) bool {
-	ip, err := parsePeerIP(tcpConn)
-	if err != nil {
-		fmt.Println(err)
-		return false
-	}
-	if !admitPeer(ip) {
-		return false
-	}
-	publishAcceptedConn(topic, ip, tcpConn)
-	return true
-}
-
 func GetPeersConnected(topic [2]byte) map[[6]byte][2]byte {
 	PeersMutex.RLock()
 	defer PeersMutex.RUnlock()

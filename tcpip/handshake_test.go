@@ -141,6 +141,44 @@ func TestHandshakeRejectsTamperAndReplay(t *testing.T) {
 	}
 }
 
+// TestHandshakeTranscriptBindsKEMMaterial directly asserts the authenticated-KEM
+// property: the KEM public key and ciphertext are bound into the signed
+// handshake transcript, so a MITM that swaps either value breaks signature
+// verification. Nonces and addr are held constant; only kemCt, then only
+// kemPubI, are mutated between verifications.
+func TestHandshakeTranscriptBindsKEMMaterial(t *testing.T) {
+	id := newTestIdentity(t)
+	nI := bytes.Repeat([]byte{0xAA}, 32)
+	nR := bytes.Repeat([]byte{0xBB}, 32)
+	kemPubI := bytes.Repeat([]byte{0xCC}, 16)
+	kemCt := bytes.Repeat([]byte{0xDD}, 16)
+
+	tr := handshakeTranscript(nI, nR, kemPubI, kemCt, id.Address)
+	sig, err := id.Sign(tr)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	// Baseline: correct transcript must verify.
+	if !verifyPeer(tr, sig, id.PubKey) {
+		t.Fatal("valid transcript with correct KEM material must verify")
+	}
+
+	// Only kemCt changed (different byte slice, same length) -> must fail.
+	swappedCt := bytes.Repeat([]byte{0xEE}, 16)
+	trBadCt := handshakeTranscript(nI, nR, kemPubI, swappedCt, id.Address)
+	if verifyPeer(trBadCt, sig, id.PubKey) {
+		t.Fatal("signature must NOT verify when kemCt is swapped (MITM KEM-ciphertext substitution)")
+	}
+
+	// Only kemPubI changed -> must fail.
+	swappedPub := bytes.Repeat([]byte{0xFF}, 16)
+	trBadPub := handshakeTranscript(nI, nR, swappedPub, kemCt, id.Address)
+	if verifyPeer(trBadPub, sig, id.PubKey) {
+		t.Fatal("signature must NOT verify when kemPubI is swapped (MITM KEM-key substitution)")
+	}
+}
+
 func TestHandshakeTranscriptDomainSeparated(t *testing.T) {
 	dummyKemPub := bytes.Repeat([]byte{5}, 10)
 	dummyKemCt := bytes.Repeat([]byte{6}, 12)
