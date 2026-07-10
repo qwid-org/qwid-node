@@ -49,7 +49,7 @@ func StartNewListener(topic [2]byte) {
 
 type connEntry struct {
 	ip   [4]byte
-	conn *net.TCPConn
+	conn net.Conn
 }
 
 func LoopSend(sendChan <-chan []byte, topic [2]byte) {
@@ -181,13 +181,29 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	storeVerifiedNodeID(topic, ip, peerID)
 	storeSessionKeys(topic, ip, sKeys)
 
+	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer.
+	// tcpConn stays the raw *net.TCPConn (used for dial/re-dial and Close);
+	// conn is the net.Conn actually stored/sent/received on from here on.
+	keys := takeSessionKeys(topic, ip)
+	if keys == nil {
+		logger.GetLogger().Println("outbound handshake: no session keys stored for", ip)
+		tcpConn.Close()
+		return
+	}
+	conn, err := newEncryptedConn(tcpConn, keys)
+	if err != nil {
+		logger.GetLogger().Println("outbound handshake: failed to wrap connection:", err)
+		tcpConn.Close()
+		return
+	}
+
 	// Register the outbound connection for receiving.
 	// If an accepted connection already exists in tcpConnections for this peer+topic,
 	// keep it for sending (the other node reads from the outbound end of that connection).
 	// This outbound connection will still be used for the receive loop below.
 	PeersMutex.Lock()
 	if _, ok := tcpConnections[topic]; !ok {
-		tcpConnections[topic] = make(map[[4]byte]*net.TCPConn)
+		tcpConnections[topic] = make(map[[4]byte]net.Conn)
 	}
 	// Track whether we stored the outbound connection in tcpConnections.
 	// If an accepted connection already exists, we keep it for sending and
@@ -196,7 +212,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	if existingConn, exists := tcpConnections[topic][ip]; exists {
 		_ = existingConn
 	} else {
-		tcpConnections[topic][ip] = tcpConn
+		tcpConnections[topic][ip] = conn
 		outboundStoredInMap = true
 	}
 	var topicipBytes [6]byte
@@ -215,14 +231,14 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	cleanupOutbound := func() {
 		PeersMutex.Lock()
 		if outboundStoredInMap {
-			deletedIP := CloseAndRemoveConnection(tcpConn)
+			deletedIP := CloseAndRemoveConnection(conn)
 			PeersMutex.Unlock()
 			for _, d := range deletedIP {
 				ChanPeer <- d
 			}
 		} else {
-			if tcpConn != nil {
-				tcpConn.Close()
+			if conn != nil {
+				conn.Close()
 			}
 			PeersMutex.Unlock()
 			// Notify to re-establish the receive connection
@@ -250,18 +266,18 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		select {
 		case <-Quit:
 			PeersMutex.Lock()
-			CloseAndRemoveConnection(tcpConn)
+			CloseAndRemoveConnection(conn)
 			PeersMutex.Unlock()
 			return
 		default:
-			r := Receive(topic, tcpConn)
+			r := Receive(topic, conn)
 			if r == nil {
 				continue
 			}
 			if bytes.Equal(r, []byte("<-ERR->")) {
 				if reconnectionTries > common.ConnectionMaxTries {
 					logger.GetLogger().Println("error in read. Closing connection", ip, string(r))
-					tcpConn.Close()
+					conn.Close()
 					tcpConn, err = net.DialTCP("tcp", nil, tcpAddr)
 					if err != nil {
 						logger.GetLogger().Printf("Connection attempt to %s failed: %v", ipport, err.Error())
@@ -283,6 +299,33 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						return
 					} else {
 						storeSessionKeys(topic, ip, sKeys)
+						// Task 3: re-wrap the re-dialed raw stream with the fresh
+						// session keys before the receive loop resumes reading —
+						// the old encryptedConn (and its counters) belonged to the
+						// now-closed connection and must not be reused.
+						newKeys := takeSessionKeys(topic, ip)
+						if newKeys == nil {
+							logger.GetLogger().Println("re-dial handshake: no session keys stored for", ip)
+							tcpConn.Close()
+							receiveChan <- []byte("EXIT")
+							return
+						}
+						newConn, wrapErr := newEncryptedConn(tcpConn, newKeys)
+						if wrapErr != nil {
+							logger.GetLogger().Println("re-dial handshake: failed to wrap connection:", wrapErr)
+							tcpConn.Close()
+							receiveChan <- []byte("EXIT")
+							return
+						}
+						conn = newConn
+						if outboundStoredInMap {
+							PeersMutex.Lock()
+							if _, ok := tcpConnections[topic]; !ok {
+								tcpConnections[topic] = make(map[[4]byte]net.Conn)
+							}
+							tcpConnections[topic][ip] = conn
+							PeersMutex.Unlock()
+						}
 					}
 					reconnectionTries = 0
 					continue
@@ -361,7 +404,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	}
 }
 
-func CloseAndRemoveConnection(tcpConn *net.TCPConn) [][]byte {
+func CloseAndRemoveConnection(tcpConn net.Conn) [][]byte {
 	if tcpConn == nil {
 		return [][]byte{}
 	}

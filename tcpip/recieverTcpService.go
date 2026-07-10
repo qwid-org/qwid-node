@@ -25,7 +25,7 @@ var (
 	oldPeers            = map[[6]byte][2]byte{}
 	PeersCount          = 0
 	waitChan            = make(chan []byte)
-	tcpConnections      = make(map[[2]byte]map[[4]byte]*net.TCPConn)
+	tcpConnections      = make(map[[2]byte]map[[4]byte]net.Conn)
 	PeersMutex          = &sync.RWMutex{}
 	Quit                chan os.Signal
 	TransactionTopic    = [2]byte{'T', 'T'}
@@ -55,7 +55,7 @@ func init() {
 
 	logger.GetLogger().Println("Discover MyIP: ", MyIP)
 	for k := range Ports {
-		tcpConnections[k] = map[[4]byte]*net.TCPConn{}
+		tcpConnections[k] = map[[4]byte]net.Conn{}
 	}
 	// Get NODE_IP environment variable
 	ips := os.Getenv("NODE_IP")
@@ -232,14 +232,34 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		return nil, fmt.Errorf("inbound handshake failed: %w", hsErr)
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
-	storeSessionKeys(topic, ip, sKeys)
 
-	publishAcceptedConn(topic, ip, tcpConn)
+	// TCP-specific options must be set on the raw *net.TCPConn before it is
+	// wrapped in encryptedConn (net.Conn has no SetKeepAlive).
 	tcpConn.SetKeepAlive(true)
+
+	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer
+	// using the keys the handshake just derived. sKeys is also available
+	// directly here, but we go through takeSessionKeys for symmetry with the
+	// outbound/re-dial paths and to consume the one-shot stored copy.
+	storeSessionKeys(topic, ip, sKeys)
+	keys := takeSessionKeys(topic, ip)
+	if keys == nil {
+		logger.GetLogger().Println("inbound handshake: no session keys stored for", ip)
+		tcpConn.Close()
+		return nil, fmt.Errorf("inbound handshake: session keys unavailable")
+	}
+	ec, err := newEncryptedConn(tcpConn, keys)
+	if err != nil {
+		logger.GetLogger().Println("inbound handshake: failed to wrap connection:", err)
+		tcpConn.Close()
+		return nil, fmt.Errorf("inbound handshake: encryptedConn wrap failed: %w", err)
+	}
+
+	publishAcceptedConn(topic, ip, ec)
 	return tcpConn, nil
 }
 
-func Send(conn *net.TCPConn, message []byte) error {
+func Send(conn net.Conn, message []byte) error {
 
 	message = append(common.MessageInitialization[:], message...)
 	message = append(message, []byte("<-END->")...)
@@ -255,8 +275,15 @@ func Send(conn *net.TCPConn, message []byte) error {
 	return nil
 }
 
-// Receive reads data from the connection and handles errors
-func Receive(topic [2]byte, conn *net.TCPConn) []byte {
+// Receive reads data from the connection and handles errors. conn is the
+// post-handshake connection stored in tcpConnections, which since Task 3 is
+// always an encryptedConn (net.Conn) for authenticated peers — Read()
+// transparently decrypts. A decrypt failure (tampering/desync) surfaces from
+// encryptedConn.Read as a plain error, is not io.EOF and not a net.Error
+// timeout, so it falls through to the "<-ERR->" sentinel below like any other
+// read error, and the caller (StartNewConnection's receive loop) drops/
+// reconnects the connection — it never continues past a decrypt failure.
+func Receive(topic [2]byte, conn net.Conn) []byte {
 	const bufSize = 1024 //1048576
 
 	if conn == nil {
@@ -322,7 +349,7 @@ func ReduceTrustRegisterPeer(ip [4]byte) {
 	}
 }
 
-func FullyDeleteConnection(tcpConn *net.TCPConn) {
+func FullyDeleteConnection(tcpConn net.Conn) {
 	PeersMutex.Lock()
 	defer PeersMutex.Unlock()
 	CloseAndRemoveConnection(tcpConn)
@@ -370,7 +397,7 @@ func admitPeer(ip [4]byte) bool {
 // on tcpConn, because publishing into tcpConnections makes the connection a
 // live target for LoopSend — publishing before the handshake completes would
 // let ordinary topic traffic interleave on the wire with handshake frames.
-func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn *net.TCPConn) {
+func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 	var topicipBytes [6]byte
 	copy(topicipBytes[:], append(topic[:], ip[:]...))
 
@@ -379,7 +406,7 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn *net.TCPConn) {
 
 	// Initialize the map for the topic if it doesn't exist
 	if _, ok := tcpConnections[topic]; !ok {
-		tcpConnections[topic] = make(map[[4]byte]*net.TCPConn)
+		tcpConnections[topic] = make(map[[4]byte]net.Conn)
 	}
 
 	// Check if we already have a connection for this peer
