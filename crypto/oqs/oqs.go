@@ -441,6 +441,9 @@ func (sig *Signature) Sign(message []byte) ([]byte, error) {
 // signature is valid, and false otherwise.
 func (sig *Signature) Verify(message []byte, signature []byte,
 	publicKey []byte) (bool, error) {
+	if len(message) == 0 || len(signature) == 0 {
+		return false, errors.New("empty message or signature") // CW-M1: avoid &x[0] panic
+	}
 	if len(publicKey) != sig.algDetails.LengthPublicKey {
 		return false, errors.New("incorrect public key length")
 	}

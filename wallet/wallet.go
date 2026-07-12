@@ -940,6 +940,9 @@ func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isP
 	if len(sig) < 1 {
 		return false
 	}
+	if len(msg) < 1 { // CW-M1: empty message would panic the underlying oqs Verify
+		return false
+	}
 	var verifier oqs.Signature
 	// CW-H5: always release the liboqs C verifier context. Clean()/OQS_SIG_free
 	// tolerate a never-initialized (nil) context, so an unconditional defer is safe.
