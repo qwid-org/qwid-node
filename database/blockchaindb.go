@@ -33,17 +33,11 @@ func InitDB() {
 }
 
 func CloseDB() error {
-	var err error
-
-	// Close the blockchain database
 	if MainDB != nil {
-		MainDB.mutex.Lock()
-		(*MainDB).Close()
-		MainDB.mutex.Unlock()
+		MainDB.Close() // acquires the mutex itself
 		MainDB = nil
 	}
-
-	return err
+	return nil
 }
 
 type InMemoryDBReader struct {

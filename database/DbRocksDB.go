@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	gorocksdb "github.com/linxGnu/grocksdb"
 	commoneth "github.com/wonabru/qwid-node/common"
@@ -95,72 +94,23 @@ func (db *BlockchainDB) GetNode(hash commoneth.Hash) ([]byte, error) {
 	return db.Get(hash[:])
 }
 
+// Close flushes and closes the database atomically under the mutex. It blocks
+// until any in-flight operation releases its (R)lock, then closes — so no op can
+// ever race a nil-ing d.db (DB-H4). Idempotent.
 func (d *BlockchainDB) Close() {
-	logger.GetLogger().Println("Starting database closure...")
-
-	// Create a channel to signal completion
-	done := make(chan struct{})
-
-	// Start the close operation in a goroutine
-	go func() {
-		// Try to acquire lock with timeout
-		lockAcquired := make(chan bool, 1)
-		go func() {
-			d.mutex.Lock()
-			lockAcquired <- true
-		}()
-
-		select {
-		case <-lockAcquired:
-			logger.GetLogger().Println("Acquired database mutex lock")
-			defer d.mutex.Unlock()
-
-			if d.db == nil {
-				logger.GetLogger().Println("Database already closed")
-				done <- struct{}{}
-				return
-			}
-
-			logger.GetLogger().Println("Flushing pending writes...")
-			fo := gorocksdb.NewDefaultFlushOptions()
-			defer fo.Destroy()
-			if err := d.db.Flush(fo); err != nil {
-				logger.GetLogger().Printf("Error flushing database: %v", err)
-			} else {
-				logger.GetLogger().Println("Successfully flushed pending writes")
-			}
-
-			logger.GetLogger().Println("Closing database...")
-			d.db.Close()
-			logger.GetLogger().Println("Successfully closed database")
-
-			d.db = nil
-			logger.GetLogger().Println("Database closure completed successfully")
-			done <- struct{}{}
-
-		case <-time.After(1 * time.Second):
-			logger.GetLogger().Println("Failed to acquire mutex lock, forcing cleanup")
-			// Force cleanup without mutex
-			if d.db != nil {
-				d.db.Close()
-				d.db = nil
-			}
-			done <- struct{}{}
-		}
-	}()
-
-	// Wait for completion with timeout
-	select {
-	case <-done:
-		logger.GetLogger().Println("Database closed normally")
-	case <-time.After(5 * time.Second):
-		logger.GetLogger().Println("Database closure timed out, forcing cleanup")
-		// Last resort cleanup
-		if d.db != nil {
-			d.db.Close()
-			d.db = nil
-		}
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.db == nil {
+		return
 	}
+	fo := gorocksdb.NewDefaultFlushOptions()
+	defer fo.Destroy()
+	if err := d.db.Flush(fo); err != nil {
+		logger.GetLogger().Printf("Error flushing database on close: %v", err)
+	}
+	d.db.Close()
+	d.db = nil
+	logger.GetLogger().Println("Database closed")
 }
 
 func (db *BlockchainDB) Put(k []byte, v []byte) error {
