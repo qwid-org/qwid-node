@@ -251,7 +251,7 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 		copy(wl.Account2.EncryptedSecretKey, acc.EncryptedSecretKey)
 	}
 
-	err = os.MkdirAll(wl.HomePath, 0755)
+	err = os.MkdirAll(wl.HomePath, 0700) // CW-H3: owner-only; matches StoreJSON's 0700 (MkdirAll won't chmod an existing dir)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("Failed to create wallet directory: %v", err), http.StatusInternalServerError)
 		return
