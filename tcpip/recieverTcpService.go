@@ -205,6 +205,11 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		tcpConn.Close()
 		return nil, fmt.Errorf("registration failed for connection")
 	}
+	// NP-H2: bound concurrent inbound connections per topic. Whitelisted operators bypass.
+	if !isWhitelisted(ip) && inboundCapReached(topic) {
+		tcpConn.Close()
+		return nil, fmt.Errorf("inbound connection cap reached for topic")
+	}
 
 	// NP-C3: run the peer-auth handshake on the freshly accepted connection
 	// BEFORE it is published into tcpConnections. Accept() runs synchronously
@@ -486,6 +491,14 @@ func GetIPsConnected() [][]byte {
 		}
 	}
 	return [][]byte{}
+}
+
+// inboundCapReached reports whether the number of concurrent inbound connections
+// already registered for topic has reached MaxInboundConnectionsPerTopic. NP-H2.
+func inboundCapReached(topic [2]byte) bool {
+	PeersMutex.RLock()
+	defer PeersMutex.RUnlock()
+	return len(tcpConnections[topic]) >= common.MaxInboundConnectionsPerTopic
 }
 
 func GetPeersCount() int {

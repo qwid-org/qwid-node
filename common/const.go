@@ -69,6 +69,8 @@ var (
 	MessageRateWindowSeconds    int64 = 10
 	ConnectionRateLimit         int   = 20 // max connection attempts per window per IP; 20 tolerates a legit multi-topic (tx/nonce/self-nonce/sync) restart+retry
 	ConnectionRateWindowSeconds int64 = 60
+
+	MaxInboundConnectionsPerTopic int = 64 // NP-H2: cap concurrent inbound conns per topic (~10x the ~6 legit peers) to bound fd exhaustion / slow-loris
 )
 
 // db prefixes
