@@ -493,6 +493,29 @@ func (w *Wallet) RestoreSecretKeyFromMnemonic(mnemonic string, primary bool) err
 	return nil
 }
 
+// normalizeAccountRoles sets the primary/secondary role metadata (the Primary
+// flags and PublicKey.MainAddress) consistently across the wallet's two accounts:
+// Account1 is primary, Account2 secondary. This mirrors the canonical state that
+// loadKeys produces after loading a wallet from disk, so a freshly generated
+// wallet equals its own reloaded form (OB-122). GenerateNewAccount cannot set
+// these at creation time (w.MainAddress is unknown when Account1 is generated,
+// and accounts are created with primary=false), which is why the persist path
+// normalizes them here. secretKey is not persisted, but its Primary flag is part
+// of the in-memory identity compared by callers, so it is normalized too.
+func (w *Wallet) normalizeAccountRoles() {
+	w.MainAddress.Primary = true
+	w.Account1.Address.Primary = true
+	w.Account2.Address.Primary = false
+	w.Account1.PublicKey.Address.Primary = true
+	w.Account2.PublicKey.Address.Primary = false
+	w.Account1.PublicKey.Primary = true
+	w.Account2.PublicKey.Primary = false
+	w.Account1.PublicKey.MainAddress = w.MainAddress
+	w.Account2.PublicKey.MainAddress = w.MainAddress
+	w.Account1.secretKey.Primary = true
+	w.Account2.secretKey.Primary = false
+}
+
 func (w *Wallet) StoreJSON() error {
 	if w.GetSecretKey().GetBytes() == nil {
 		return fmt.Errorf("you need load wallet first")
@@ -539,6 +562,17 @@ func (w *Wallet) StoreJSON() error {
 		}
 		copy(w.Accounts[k].EncryptedSecretKey, se)
 	}
+
+	// OB-122: normalize account role metadata before persisting so a freshly
+	// generated wallet is identical to its own reloaded form. GenerateNewAccount
+	// cannot set these for Account1 (w.MainAddress is not yet known when Account1
+	// is created, and it is created with the secondary/primary=false role), so
+	// without this a fresh wallet diverges from loadKeys' normalized output on
+	// PublicKey.MainAddress and the primary/secondary flags. MainAddress and the
+	// Primary flags are part of the pubkey/tx identity. Loaded wallets already
+	// normalize on load, so this does not change on-wire behavior for existing
+	// wallets — it only makes the pre-store in-memory/persisted state consistent.
+	w.normalizeAccountRoles()
 
 	// Marshal the wallet to JSON
 	wm, err := json.MarshalIndent(&w, "", "    ")
