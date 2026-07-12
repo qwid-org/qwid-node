@@ -52,9 +52,7 @@ func SignMessage(line []byte) []byte {
 }
 
 func SetCurrentEncryptions() (string, string, error) {
-	clientrpc.InRPC <- SignMessage([]byte("ENCR"))
-	var reply []byte
-	reply = <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("ENCR")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		return "", "", fmt.Errorf("timout")
 	}

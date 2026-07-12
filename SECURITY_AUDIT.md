@@ -94,7 +94,7 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 - **High:** AC-H1, AC-H2, AC-H3, AC-H5, AC-H6, AC-H7, CW-H1, CW-H3, CW-H4, CW-H5, CW-H6, DB-H1, DB-H2, DB-H3, DB-H7, DB-H8, NP-H11, NP-H13, NP-H14, NP-H4, NP-H7, NP-H8, WH-H1, WH-H2, WH-H4, WH-H6, WH-H7, WH-H8
 - **Medium:** AC-M1, AC-M2, AC-M3, AC-M4, AC-M5, AC-M6, AC-M7, AC-M8, AC-M9, CW-M1, CW-M4, CW-M5, CW-M6, CW-M8, DB-M2, DB-M5, DB-M6, DB-M7, NP-M3, NP-M5, NP-M8, NP-M9, NP-M11, NP-M12, WH-M10, WH-M11, WH-M2, WH-M5, WH-M8
 
-**WH-C6 note:** fixed in the concurrent HTTP servers (`cmd/website`, `cmd/webui`, `cmd/explorer` — all ~75 handler call sites now use the mutex-safe `clientrpc.Call()`, locked in by `rpc/client/client_test.go`'s `-race`-clean concurrency test). Residual: all RPC still funnels through one shared connection, so a slow call still delays others — that needs connection pooling / correlation IDs as a follow-up (tracked as action item 18 below), not a correctness bug.
+**WH-C6 note:** fixed in the concurrent HTTP servers (`cmd/website`, `cmd/webui`, `cmd/explorer` — all 76 handler call sites now use the mutex-safe `clientrpc.Call()`). Residual: all RPC still funnels through one shared connection, so a slow call still delays others — that needs connection pooling / correlation IDs as a follow-up (tracked as action item 18 below), not a correctness bug.
 
 ## 1. Crypto & Wallet
 
