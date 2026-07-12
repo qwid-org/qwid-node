@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/wonabru/qwid-node/logger"
 	"os"
-	"path/filepath"
 	"sync"
 
 	gorocksdb "github.com/linxGnu/grocksdb"
@@ -37,20 +36,6 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	// Check if the database directory exists
-	if _, err := os.Stat(dbPath); err == nil {
-		// If it exists, try to remove any stale lock files
-		lockFile := filepath.Join(dbPath, "LOCK")
-		if _, err := os.Stat(lockFile); err == nil {
-			// Try to remove the lock file
-			if err := os.Remove(lockFile); err != nil {
-				logger.GetLogger().Printf("Warning: Could not remove stale lock file: %v", err)
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to check database directory: %w", err)
-	}
-
 	opts := gorocksdb.NewDefaultOptions()
 	opts.SetCreateIfMissing(true)
 	opts.SetErrorIfExists(false) // Don't error if database exists
@@ -64,7 +49,7 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 
 	db.db, err = gorocksdb.OpenDb(opts, dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to open database at %s (another node instance may be running on this data dir, or it is corrupt): %w", dbPath, err)
 	}
 
 	return db, nil

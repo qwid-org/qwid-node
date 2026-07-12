@@ -1,6 +1,7 @@
 package database
 
 import (
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -91,5 +92,25 @@ func TestConcurrentOpsVsCloseNoPanic(t *testing.T) {
 	wg.Wait()
 	if atomic.LoadInt32(&panicked) == 1 {
 		t.Fatal("an op panicked while racing Close (unsafe d.db access)")
+	}
+}
+
+func TestInitPermanentNoLockRemovalAndSecondOpenFails(t *testing.T) {
+	dir := t.TempDir()
+	a := &BlockchainDB{}
+	first, err := a.InitPermanent(dir)
+	if err != nil {
+		t.Skipf("RocksDB unavailable: %v", err)
+	}
+	defer first.Close()
+	// LOCK file must still exist (we no longer delete it)
+	if _, err := os.Stat(dir + "/LOCK"); err != nil {
+		t.Fatalf("RocksDB LOCK file should exist while the DB is open: %v", err)
+	}
+	// A second open on the same live directory must FAIL (RocksDB single-instance lock),
+	// not corrupt the DB.
+	b := &BlockchainDB{}
+	if _, err := b.InitPermanent(dir); err == nil {
+		t.Fatal("second InitPermanent on a live DB dir should fail (lock held), got nil error")
 	}
 }
