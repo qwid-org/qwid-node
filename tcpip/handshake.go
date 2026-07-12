@@ -331,31 +331,3 @@ func storeVerifiedNodeID(topic [2]byte, ip [4]byte, id common.Address) {
 	verifiedNodeIDsMutex.Unlock()
 	logger.GetLogger().Printf("peer authenticated: topic=%s ip=%v nodeID=%x", string(topic[:]), ip, id.ByteValue)
 }
-
-// sessionKeys stores the per-(topic, ip) directional AEAD keys derived during
-// the handshake's KEM exchange. Task 3 (conn wrapping) consumes these via
-// takeSessionKeys; storing here does not itself encrypt the connection.
-var (
-	sessionKeys      = map[[6]byte]*SessionKeys{}
-	sessionKeysMutex sync.Mutex
-)
-
-func storeSessionKeys(topic [2]byte, ip [4]byte, keys *SessionKeys) {
-	var k [6]byte
-	copy(k[:2], topic[:])
-	copy(k[2:], ip[:])
-	sessionKeysMutex.Lock()
-	sessionKeys[k] = keys
-	sessionKeysMutex.Unlock()
-}
-
-func takeSessionKeys(topic [2]byte, ip [4]byte) *SessionKeys {
-	var k [6]byte
-	copy(k[:2], topic[:])
-	copy(k[2:], ip[:])
-	sessionKeysMutex.Lock()
-	defer sessionKeysMutex.Unlock()
-	ks := sessionKeys[k]
-	delete(sessionKeys, k)
-	return ks
-}

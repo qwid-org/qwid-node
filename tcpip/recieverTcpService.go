@@ -238,17 +238,17 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 	tcpConn.SetKeepAlive(true)
 
 	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer
-	// using the keys the handshake just derived. sKeys is also available
-	// directly here, but we go through takeSessionKeys for symmetry with the
-	// outbound/re-dial paths and to consume the one-shot stored copy.
-	storeSessionKeys(topic, ip, sKeys)
-	keys := takeSessionKeys(topic, ip)
-	if keys == nil {
-		logger.GetLogger().Println("inbound handshake: no session keys stored for", ip)
+	// using the keys the handshake just derived. Use sKeys directly — routing
+	// it through a shared (topic, ip)-keyed map would collide with the
+	// concurrent initiator handshake on a self-connection (genesis node dialing
+	// itself on 127.0.0.1), clobbering the directional keys and breaking
+	// decryption on both ends.
+	if sKeys == nil {
+		logger.GetLogger().Println("inbound handshake: no session keys derived for", ip)
 		tcpConn.Close()
 		return nil, fmt.Errorf("inbound handshake: session keys unavailable")
 	}
-	ec, err := newEncryptedConn(tcpConn, keys)
+	ec, err := newEncryptedConn(tcpConn, sKeys)
 	if err != nil {
 		logger.GetLogger().Println("inbound handshake: failed to wrap connection:", err)
 		tcpConn.Close()
@@ -375,6 +375,17 @@ func parsePeerIP(tcpConn *net.TCPConn) ([4]byte, error) {
 	return ip, nil
 }
 
+// isSelfIP reports whether ip refers to this node itself — either configured
+// self address or IPv4 loopback. Self-connections (e.g. the self-nonce topic)
+// dial our own listener, so the dial end and accept end are two ends of ONE TCP
+// link that collide on the same (topic, ip) map key; they must not be treated
+// as duplicate connections where the "old" one gets closed.
+func isSelfIP(ip [4]byte) bool {
+	return bytes.Equal(ip[:], MyIP[:]) ||
+		bytes.Equal(ip[:], MyIPSelfNonce[:]) ||
+		bytes.Equal(ip[:], []byte{127, 0, 0, 1})
+}
+
 // admitPeer runs the ban/rate-limit checks for an inbound connection BEFORE any
 // handshake or connection registration happens. It does not touch tcpConnections.
 // NP-C3: this gate must run first so an unauthenticated/banned peer never even
@@ -411,10 +422,20 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 
 	// Check if we already have a connection for this peer
 	if oldConn, ok := tcpConnections[topic][ip]; ok {
-		// Close the old connection before replacing it, so the other node's
-		// outbound receive loop gets a clean EOF instead of lingering and
-		// triggering repeated reconnections.
-		oldConn.Close()
+		// For a self/loopback connection (the genesis node dialing its own
+		// listener, e.g. the self-nonce topic) the "old" entry is the dial-side
+		// end of the SAME physical TCP link: StartNewConnection reads from that
+		// end (D) while LoopSend must write to this accepted end (A) for the
+		// bytes to reach D's reader. Closing D here would tear down the dialer's
+		// live receive loop and send both ends into an endless reconnect loop.
+		// So only close a genuinely distinct old connection to a remote peer;
+		// for self, just replace the map value (LoopSend then writes to A).
+		if !isSelfIP(ip) {
+			// Close the old connection before replacing it, so the other node's
+			// outbound receive loop gets a clean EOF instead of lingering and
+			// triggering repeated reconnections.
+			oldConn.Close()
+		}
 	}
 
 	// Register the accepted connection for sending

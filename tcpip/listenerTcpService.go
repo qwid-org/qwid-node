@@ -179,18 +179,20 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		return
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
-	storeSessionKeys(topic, ip, sKeys)
 
 	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer.
 	// tcpConn stays the raw *net.TCPConn (used for dial/re-dial and Close);
 	// conn is the net.Conn actually stored/sent/received on from here on.
-	keys := takeSessionKeys(topic, ip)
-	if keys == nil {
-		logger.GetLogger().Println("outbound handshake: no session keys stored for", ip)
+	// Use the session keys the handshake just returned directly — routing them
+	// through a shared (topic, ip)-keyed map would collide with the concurrent
+	// responder handshake on a self-connection (genesis node dialing itself on
+	// 127.0.0.1), clobbering the directional keys and breaking decryption.
+	if sKeys == nil {
+		logger.GetLogger().Println("outbound handshake: no session keys derived for", ip)
 		tcpConn.Close()
 		return
 	}
-	conn, err := newEncryptedConn(tcpConn, keys)
+	conn, err := newEncryptedConn(tcpConn, sKeys)
 	if err != nil {
 		logger.GetLogger().Println("outbound handshake: failed to wrap connection:", err)
 		tcpConn.Close()
@@ -298,19 +300,20 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						receiveChan <- []byte("EXIT")
 						return
 					} else {
-						storeSessionKeys(topic, ip, sKeys)
 						// Task 3: re-wrap the re-dialed raw stream with the fresh
 						// session keys before the receive loop resumes reading —
 						// the old encryptedConn (and its counters) belonged to the
-						// now-closed connection and must not be reused.
-						newKeys := takeSessionKeys(topic, ip)
-						if newKeys == nil {
-							logger.GetLogger().Println("re-dial handshake: no session keys stored for", ip)
+						// now-closed connection and must not be reused. Use the keys
+						// the handshake just returned directly (a shared (topic, ip)
+						// map would collide with the concurrent responder handshake
+						// on a self-connection).
+						if sKeys == nil {
+							logger.GetLogger().Println("re-dial handshake: no session keys derived for", ip)
 							tcpConn.Close()
 							receiveChan <- []byte("EXIT")
 							return
 						}
-						newConn, wrapErr := newEncryptedConn(tcpConn, newKeys)
+						newConn, wrapErr := newEncryptedConn(tcpConn, sKeys)
 						if wrapErr != nil {
 							logger.GetLogger().Println("re-dial handshake: failed to wrap connection:", wrapErr)
 							tcpConn.Close()
