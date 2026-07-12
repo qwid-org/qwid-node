@@ -129,6 +129,15 @@ func (w *Wallet) Wipe() {
 	}
 	w.password = nil
 	w.passwordBytes = nil
+	// CW-H2: cleanse the live post-quantum secret keys. signer.Clean() runs
+	// OQS_MEM_cleanse over the retained secret-key bytes (which alias
+	// secretKey.ByteValue) and frees the C handle; it is nil-safe on an account
+	// that never initialized (e.g. paused encryption). Cleanse() zeroes the
+	// PrivKey.ByteValue slice as defense-in-depth.
+	w.Account1.signer.Clean()
+	w.Account2.signer.Clean()
+	w.Account1.secretKey.Cleanse()
+	w.Account2.secretKey.Cleanse()
 }
 
 // deriveKey derives the AES-256 key from the password using Argon2id and the
