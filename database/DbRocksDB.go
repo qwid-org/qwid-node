@@ -82,7 +82,7 @@ func (db *BlockchainDB) InitInMemory() (*BlockchainDB, error) {
 	opts.SetEnv(gorocksdb.NewMemEnv())
 	db.db, err = gorocksdb.OpenDb(opts, "qwid_node")
 	if err != nil {
-		logger.GetLogger().Fatal(err)
+		return nil, err
 	}
 	return db, nil
 }
