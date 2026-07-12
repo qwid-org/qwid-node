@@ -124,6 +124,10 @@ func (db *BlockchainDB) Put(k []byte, v []byte) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
+	if db.db == nil {
+		return fmt.Errorf("database is closed")
+	}
+
 	wo := gorocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
 
@@ -147,6 +151,10 @@ func (db *BlockchainDB) LoadAllKeys(prefix []byte) ([][]byte, error) {
 	}
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+
+	if db.db == nil {
+		return nil, fmt.Errorf("database is closed")
+	}
 
 	ro := gorocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
@@ -176,6 +184,10 @@ func (db *BlockchainDB) LoadAll(prefix []byte) ([][]byte, error) {
 	}
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+
+	if db.db == nil {
+		return nil, fmt.Errorf("database is closed")
+	}
 
 	ro := gorocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
@@ -236,6 +248,9 @@ func (db *BlockchainDB) IsKey(key []byte) (bool, error) {
 	}
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+	if db.db == nil {
+		return false, fmt.Errorf("database is closed")
+	}
 	ro := gorocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
 	value, err := db.db.Get(ro, key)
@@ -253,8 +268,11 @@ func (db *BlockchainDB) Delete(key []byte) error {
 	if len(key) == 0 {
 		return errors.New("key cannot be empty")
 	}
-	db.mutex.RLock()
-	defer db.mutex.RUnlock()
+	db.mutex.Lock() // DB-H5: write lock (was RLock)
+	defer db.mutex.Unlock()
+	if db.db == nil { // DB-H5: guard closed DB (was missing)
+		return fmt.Errorf("database is closed")
+	}
 	wo := gorocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
 	return db.db.Delete(wo, key)
