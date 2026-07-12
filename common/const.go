@@ -71,6 +71,7 @@ var (
 	ConnectionRateWindowSeconds int64 = 60
 
 	MaxInboundConnectionsPerTopic int = 64 // NP-H2: cap concurrent inbound conns per topic (~10x the ~6 legit peers) to bound fd exhaustion / slow-loris
+	MaxConcurrentRPCConnections   int = 64 // NP-H6: cap concurrent RPC conns (HTTP servers hold ~1 persistent conn each) to bound fd exhaustion
 )
 
 // db prefixes
