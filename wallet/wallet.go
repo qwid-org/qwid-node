@@ -775,17 +775,27 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	w2.SetPassword(newPassword)
 
 	for k, v := range w.Accounts {
-		ds, err := w.decrypt(v.EncryptedSecretKey)
-		if err != nil {
-			logger.GetLogger().Println(err)
+		if err := func() error {
+			ds, err := w.decrypt(v.EncryptedSecretKey)
+			if err != nil {
+				logger.GetLogger().Println(err)
+				return err
+			}
+			defer func() { // CW-H2: cleanse the ephemeral decrypted key
+				if len(ds) > 0 {
+					oqs.MemCleanse(ds)
+				}
+			}()
+			se, err := w2.encrypt(ds)
+			if err != nil {
+				logger.GetLogger().Println(err)
+				return err
+			}
+			copy(w2.Accounts[k].EncryptedSecretKey, se)
+			return nil
+		}(); err != nil {
 			return err
 		}
-		se, err := w2.encrypt(ds)
-		if err != nil {
-			logger.GetLogger().Println(err)
-			return err
-		}
-		copy(w2.Accounts[k].EncryptedSecretKey, se)
 	}
 
 	// Re-encrypt Account1 and Account2 with the new password
@@ -794,6 +804,11 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account1: %v", err)
 		}
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
 		se, err := w2.encrypt(ds)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt Account1: %v", err)
@@ -805,6 +820,11 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account2: %v", err)
 		}
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
 		se, err := w2.encrypt(ds)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt Account2: %v", err)
@@ -853,20 +873,30 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 
 	// Temporarily keep old password for decryption
 	for k, v := range w.Accounts {
-		ds, err := w.decrypt(v.EncryptedSecretKey)
-		if err != nil {
-			logger.GetLogger().Println(err)
-			return err
-		}
-		w.passwordBytes = newPasswordBytes
-		se, err := w.encrypt(ds)
-		if err != nil {
+		if err := func() error {
+			ds, err := w.decrypt(v.EncryptedSecretKey)
+			if err != nil {
+				logger.GetLogger().Println(err)
+				return err
+			}
+			defer func() { // CW-H2: cleanse the ephemeral decrypted key
+				if len(ds) > 0 {
+					oqs.MemCleanse(ds)
+				}
+			}()
+			w.passwordBytes = newPasswordBytes
+			se, err := w.encrypt(ds)
+			if err != nil {
+				w.passwordBytes = oldPasswordBytes
+				logger.GetLogger().Println(err)
+				return err
+			}
 			w.passwordBytes = oldPasswordBytes
-			logger.GetLogger().Println(err)
+			copy(w.Accounts[k].EncryptedSecretKey, se)
+			return nil
+		}(); err != nil {
 			return err
 		}
-		w.passwordBytes = oldPasswordBytes
-		copy(w.Accounts[k].EncryptedSecretKey, se)
 	}
 
 	// Re-encrypt Account1 and Account2
@@ -875,6 +905,11 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account1: %v", err)
 		}
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
 		w.passwordBytes = newPasswordBytes
 		se, err := w.encrypt(ds)
 		if err != nil {
@@ -889,6 +924,11 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account2: %v", err)
 		}
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
 		w.passwordBytes = newPasswordBytes
 		se, err := w.encrypt(ds)
 		if err != nil {
