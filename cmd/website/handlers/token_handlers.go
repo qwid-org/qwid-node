@@ -181,8 +181,7 @@ func CreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		JsonError(w, "Timeout getting network stats", http.StatusGatewayTimeout)
 		return
@@ -214,8 +213,7 @@ func CreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), msg.GetBytes()...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
 
 	logger.GetLogger().Println("CreateToken: deployed token", req.Name, "("+req.Symbol+") tx:", tx.Hash.GetHex())
 

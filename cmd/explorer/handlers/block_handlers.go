@@ -57,8 +57,7 @@ func GetBlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := common.GetByteInt64(height)
-	clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -102,8 +101,7 @@ func GetBlocks(w http.ResponseWriter, r *http.Request) {
 		fromHeight = f
 	} else {
 		// Get current height from stats
-		clientrpc.InRPC <- SignMessage([]byte("STAT"))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage([]byte("STAT")))
 		if bytes.Equal(reply, []byte("Timeout")) {
 			jsonError(w, "Timeout", http.StatusGatewayTimeout)
 			return
@@ -122,8 +120,7 @@ func GetBlocks(w http.ResponseWriter, r *http.Request) {
 	for i := 0; i < count && fromHeight-int64(i) >= 0; i++ {
 		h := fromHeight - int64(i)
 		b := common.GetByteInt64(h)
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 		if bytes.Equal(reply, []byte("Timeout")) {
 			continue
 		}
@@ -158,8 +155,7 @@ func fetchBlockByHash(hashHex string) (blocks.Block, error) {
 	if err != nil {
 		return blocks.Block{}, err
 	}
-	clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 	if len(reply) < 3 || string(reply[:2]) != "BL" {
 		return blocks.Block{}, err
 	}

@@ -84,8 +84,7 @@ func SetCurrentEncryptions() (string, string, error) {
 // which encryption to use.
 func TestAndSetEncryption() {
 
-	clientrpc.InRPC <- SignMessage([]byte("HELO"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("HELO")))
 	if len(reply) < 3 || string(reply[:2]) != "Hi" {
 		logger.GetLogger().Println("HELO test: invalid response")
 		return

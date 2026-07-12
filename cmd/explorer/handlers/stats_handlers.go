@@ -30,8 +30,7 @@ type StatsResponse struct {
 }
 
 func GetStats(w http.ResponseWriter, r *http.Request) {
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -61,8 +60,7 @@ func GetStats(w http.ResponseWriter, r *http.Request) {
 
 	// Get supply from latest block
 	b := common.GetByteInt64(st.Height)
-	clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-	blockReply := <-clientrpc.OutRPC
+	blockReply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 	if !bytes.Equal(blockReply, []byte("Timeout")) && len(blockReply) > 2 && string(blockReply[:2]) == "BL" {
 		bb := blocks.Block{}
 		bb, err = bb.GetFromBytes(blockReply[2:])
@@ -72,8 +70,7 @@ func GetStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get total staked from VALS
-	clientrpc.InRPC <- SignMessage([]byte("VALS"))
-	valsReply := <-clientrpc.OutRPC
+	valsReply := clientrpc.Call(SignMessage([]byte("VALS")))
 	if !bytes.Equal(valsReply, []byte("Timeout")) {
 		var valsResp ValidatorsResponse
 		if err := json.Unmarshal(valsReply, &valsResp); err == nil {

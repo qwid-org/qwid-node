@@ -412,8 +412,7 @@ func sendWelcomeTransaction(recipient common.Address) {
 		GasUsage:  0,
 	}
 
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		logger.GetLogger().Println("sendWelcomeTransaction: timeout getting stats")
 		return
@@ -446,8 +445,7 @@ func sendWelcomeTransaction(recipient common.Address) {
 		return
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), msg.GetBytes()...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
 
 	logger.GetLogger().Println("sendWelcomeTransaction: sent", welcomeAmountQWD, "QWD to", recipient.GetHex())
 }

@@ -152,8 +152,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		GasUsage:  0,
 	}
 
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -185,8 +184,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	JsonResponse(w, map[string]string{
 		"success": "true",
