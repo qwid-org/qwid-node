@@ -43,6 +43,8 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 | Medium | 29 | 7 | 16 |
 
 
+> **Update 2026-07-12 (OB-118 incomplete-fixes pass):** **CW-M1** (empty-msg/sig panic guard), **CW-H3** (wallet dir 0700 at all entry points), **NP-M12** (EncryptionOptData read under the writers' `encryptionMutex`), and **WH-C6** (all 76 website/webui/explorer RPC handler sites now use the mutex-safe `clientrpc.Call()`) are now **FIXED** — move them from the OPEN/PARTIAL lists below. Residual WH-C6 single-connection serialization-DoS (needs connection pooling) remains a follow-up.
+
 ### OPEN — still to be tackled (25)
 
 - **NP-C5** [CRITICAL] — handleWALL still serializes the entire wallet struct; audit's own re-scoping (requires localhost+signature, so downgraded from remote-exposure CRITICAL) is accurate, but the underlying over-broad serialization is unchanged in code. _(rpc/server/server.go:178-186 handleWALL still does `r, err := json.Marshal(w)` on the full `wallet.GetActiveWallet()` struct and returns it verbatim — no field redaction added.)_
