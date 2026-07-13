@@ -356,8 +356,11 @@ func GenerateNewIv() []byte {
 // ciphertext tampering is detected on decryption (fixes CW-C1). A fresh random
 // nonce is generated for every call and prepended to the output, so no two
 // encryptions ever reuse a nonce (fixes CW-C2). Output layout: nonce || ciphertext+tag.
-func (w *Wallet) encrypt(v []byte) ([]byte, error) {
-	cb, err := aes.NewCipher(w.passwordBytes)
+// encryptWithKey encrypts v under the given AES key without reading or mutating
+// w.passwordBytes. CW-M3: lets ChangePasswordInPlace re-encrypt under the new key
+// without toggling the shared field (which raced concurrent passwordBytes readers).
+func (w *Wallet) encryptWithKey(key, v []byte) ([]byte, error) {
+	cb, err := aes.NewCipher(key)
 	if err != nil {
 		logger.GetLogger().Println("Can not create AES function")
 		return []byte{}, err
@@ -374,6 +377,10 @@ func (w *Wallet) encrypt(v []byte) ([]byte, error) {
 	// Seal appends the ciphertext (including the auth tag) to nonce, so the
 	// returned slice is nonce || ciphertext+tag.
 	return gcm.Seal(nonce, nonce, v, nil), nil
+}
+
+func (w *Wallet) encrypt(v []byte) ([]byte, error) {
+	return w.encryptWithKey(w.passwordBytes, v)
 }
 
 // decrypt reverses encrypt. New wallets are AES-256-GCM; if GCM authentication
@@ -902,7 +909,6 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 	// Fresh Argon2id salt for the new password; applied to w only after all
 	// blobs are re-encrypted (below), so decryption of old blobs still works.
 	newSalt := newKdfSalt()
-	oldPasswordBytes := w.passwordBytes
 	newPasswordBytes := argon2Key(newPassword, newSalt)
 
 	// Temporarily keep old password for decryption
@@ -918,14 +924,11 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 					oqs.MemCleanse(ds)
 				}
 			}()
-			w.passwordBytes = newPasswordBytes
-			se, err := w.encrypt(ds)
+			se, err := w.encryptWithKey(newPasswordBytes, ds) // CW-M3: no toggle
 			if err != nil {
-				w.passwordBytes = oldPasswordBytes
 				logger.GetLogger().Println(err)
 				return err
 			}
-			w.passwordBytes = oldPasswordBytes
 			copy(w.Accounts[k].EncryptedSecretKey, se)
 			return nil
 		}(); err != nil {
@@ -944,13 +947,10 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 				oqs.MemCleanse(ds)
 			}
 		}()
-		w.passwordBytes = newPasswordBytes
-		se, err := w.encrypt(ds)
+		se, err := w.encryptWithKey(newPasswordBytes, ds) // CW-M3: no toggle
 		if err != nil {
-			w.passwordBytes = oldPasswordBytes
 			return fmt.Errorf("failed to encrypt Account1: %v", err)
 		}
-		w.passwordBytes = oldPasswordBytes
 		w.Account1.EncryptedSecretKey = se
 	}
 	if len(w.Account2.EncryptedSecretKey) > 0 {
@@ -963,13 +963,10 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 				oqs.MemCleanse(ds)
 			}
 		}()
-		w.passwordBytes = newPasswordBytes
-		se, err := w.encrypt(ds)
+		se, err := w.encryptWithKey(newPasswordBytes, ds) // CW-M3: no toggle
 		if err != nil {
-			w.passwordBytes = oldPasswordBytes
 			return fmt.Errorf("failed to encrypt Account2: %v", err)
 		}
-		w.passwordBytes = oldPasswordBytes
 		w.Account2.EncryptedSecretKey = se
 	}
 
