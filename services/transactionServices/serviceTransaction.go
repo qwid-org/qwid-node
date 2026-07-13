@@ -157,6 +157,11 @@ func Send(addr [4]byte, nb []byte) bool {
 		case services.SendChanTx <- nb:
 			return true
 		default:
+			// NP-M10: best-effort gossip — the send channel is full, so drop this
+			// message but log it (propagation is still covered by on-arrival
+			// BroadcastTxn and the periodic delta loop). Blocking here would push
+			// backpressure into the caller.
+			logger.GetLogger().Println("NP-M10: tx send channel full, dropping outbound message")
 			return false
 		}
 	}
