@@ -39,7 +39,7 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 | Severity | FIXED | PARTIAL | OPEN |
 |---|---|---|---|
 | Critical | 24 | 2 | 1 |
-| High | 35 | 5 | 1 |
+| High | 36 | 5 | 0 |
 | Medium | 30 | 7 | 15 |
 
 
@@ -47,10 +47,9 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 
 > **Update 2026-07-12 (OB-119 DB-concurrency cluster):** **DB-H4** (atomic `Close()` under the mutex — the goroutine/timeout force-cleanup that mutated `d.db` unlocked is removed; `Close()` now blocks until in-flight ops release the (R)lock, then closes), **DB-M8** (`CloseDB()` no longer pre-locks the non-reentrant mutex before calling the self-locking `Close()`, so the guaranteed reentrant deadlock — which forced DB-H4's unsafe path every shutdown — is gone), **DB-H5** (`Delete` now takes the write `Lock` (was `RLock`) and every data op — `Delete`/`Put`/`IsKey`/`LoadAll`/`LoadAllKeys` — nil-guards `d.db` and returns a clean `"database is closed"` error instead of panicking after close), and **DB-H6** (`InitPermanent` no longer deletes the RocksDB `LOCK` file — it relies on RocksDB's OS advisory single-instance lock; a second open on a live data dir now fails cleanly instead of corrupting, and the open error is wrapped with an operator hint) are now **FIXED** — moved from the OPEN list below. See `docs/superpowers/specs/2026-07-12-db-concurrency-cluster-design.md`.
 
-### OPEN — still to be tackled (17)
+### OPEN — still to be tackled (16)
 
 - **NP-C5** [CRITICAL] — handleWALL still serializes the entire wallet struct; audit's own re-scoping (requires localhost+signature, so downgraded from remote-exposure CRITICAL) is accurate, but the underlying over-broad serialization is unchanged in code. _(rpc/server/server.go:178-186 handleWALL still does `r, err := json.Marshal(w)` on the full `wallet.GetActiveWallet()` struct and returns it verbatim — no field redaction added.)_
-- **WH-H3** [HIGH] — Registration still directly discloses whether a username is taken, enabling enumeration. _(cmd/website/handlers/auth.go:202-204 still returns a distinct "Username already taken" 409 response when Users.Exists(req.Username) is true, with no comment/tag indicating remediation.)_
 - **CW-M2** [MEDIUM] — Mnemonic generation/restore is still hard-capped at 64 bytes, so Falcon-512 keys still cannot use the mnemonic feature -- unchanged from the audit. _(wallet/wallet.go:429-431 - GetMnemonicWords() still rejects any secretLength > 64 with 'return "", fmt.Errorf("secret must be less than 64 bytes")'. No CW-M2 tag or alternate encoding scheme found anywhere in the file. Falcon-512's secret key remains far larger than 64 bytes, so )_
 - **CW-M3** [MEDIUM] — The in-place password-byte toggling race is unchanged; globalMutex serializes only the two password-change functions against each other, not against other wallet methods that read passwordBytes. _(wallet/wallet.go:825-861 - ChangePasswordInPlace still repeatedly toggles the shared w.passwordBytes field in place ('w.passwordBytes = newPasswordBytes' ... 'w.passwordBytes = oldPasswordBytes') inside a loop, guarded only by globalMutex (:836-837). That mutex is acquired by Cha)_
 - **DB-M1** [MEDIUM] — EIP activation still mutates cfg.ExtraEips while iterating over it, which can skip or mis-process subsequent entries on activation failure. _(core/evm/interpreter.go:93-101 — `for i, eip := range cfg.ExtraEips { ... cfg.ExtraEips = append(cfg.ExtraEips[:i], cfg.ExtraEips[i+1:]...) ... }` still mutates cfg.ExtraEips (the slice being ranged over) inside the loop body on EIP activation failure; no fix comment found.)_
@@ -88,10 +87,12 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 
 > **Update 2026-07-12 (OB-121 CW-H2 secret-key zeroing):** **CW-H2** is now **FIXED** — decrypted post-quantum secret keys are cleansed from memory. The two retained live keys (loaded in `loadKeys`, held by `signer`/`PrivKey` for the session) are cleansed at logout via an extended `Wallet.Wipe()` (`signer.Clean()`'s `OQS_MEM_cleanse` + new `PrivKey.Cleanse()`); the six ephemeral decrypted keys in `ChangePassword`/`ChangePasswordInPlace` are cleansed with `oqs.MemCleanse` (len-guarded) on every exit path right after re-encryption. See `docs/superpowers/specs/2026-07-12-cw-h2-secret-key-zeroing-design.md`. Residual (follow-up): broaden `Wipe()` adoption beyond the website logout to the Qt/webui/CLI exit paths.
 
-### FIXED (89) — verified remediated
+> **Update 2026-07-13 (OB-123 WH-H3 username enumeration):** **WH-H3** is now **FIXED** — registration no longer returns a distinct "Username already taken" 409. Both disclosure sites (the `Users.Exists` branch and the `Users.Create` TOCTOU-race error) return an identical generic `Registration could not be completed. Please try different details.` (400); the real error is logged server-side only. The existence check is retained (it guards against overwriting an existing user's wallet dir) and the existing per-IP rate-limit (`registerLimiter`, 5/10min) remains the enumeration throttle. See `docs/superpowers/specs/2026-07-12-wh-h3-username-enumeration-design.md`. **This clears the last OPEN HIGH — High severity is now 0 OPEN.** Documented residual: on this immediate-create username-login flow, success-vs-failure outcome and response timing (a fresh registration runs PQ keygen, so it is slower than a rejected one) still allow throttled inference; full elimination requires an email-confirmation registration loop / timing normalization, deferred as a follow-up.
+
+### FIXED (90) — verified remediated
 
 - **Critical:** AC-C1, AC-C2, AC-C3, AC-C4, CW-C1, CW-C2, CW-C3, CW-C4, DB-C1, DB-C2, DB-C3, DB-C5, DB-C6, NP-C1, NP-C2, NP-C3, NP-C6, NP-C7, WH-C1, WH-C2, WH-C3, WH-C4, WH-C5, WH-C6
-- **High:** AC-H1, AC-H2, AC-H3, AC-H5, AC-H6, AC-H7, CW-H1, CW-H2, CW-H3, CW-H4, CW-H5, CW-H6, DB-H1, DB-H2, DB-H3, DB-H4, DB-H5, DB-H6, DB-H7, DB-H8, NP-H2, NP-H4, NP-H6, NP-H7, NP-H8, NP-H10, NP-H11, NP-H13, NP-H14, WH-H1, WH-H2, WH-H4, WH-H6, WH-H7, WH-H8
+- **High:** AC-H1, AC-H2, AC-H3, AC-H5, AC-H6, AC-H7, CW-H1, CW-H2, CW-H3, CW-H4, CW-H5, CW-H6, DB-H1, DB-H2, DB-H3, DB-H4, DB-H5, DB-H6, DB-H7, DB-H8, NP-H2, NP-H4, NP-H6, NP-H7, NP-H8, NP-H10, NP-H11, NP-H13, NP-H14, WH-H1, WH-H2, WH-H3, WH-H4, WH-H6, WH-H7, WH-H8
 - **Medium:** AC-M1, AC-M2, AC-M3, AC-M4, AC-M5, AC-M6, AC-M7, AC-M8, AC-M9, CW-M1, CW-M4, CW-M5, CW-M6, CW-M8, DB-M2, DB-M5, DB-M6, DB-M7, DB-M8, NP-M3, NP-M5, NP-M8, NP-M9, NP-M11, NP-M12, WH-M10, WH-M11, WH-M2, WH-M5, WH-M8
 
 **WH-C6 note:** fixed in the concurrent HTTP servers (`cmd/website`, `cmd/webui`, `cmd/explorer` — all 76 handler call sites now use the mutex-safe `clientrpc.Call()`). Residual: all RPC still funnels through one shared connection, so a slow call still delays others — that needs connection pooling / correlation IDs as a follow-up (tracked as action item 18 below), not a correctness bug.
