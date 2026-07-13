@@ -109,9 +109,22 @@ Runtime config in `~/.qwid/.env`:
 DELEGATED_ACCOUNT=1          # Staking account (1-254, use 1 for genesis node)
 REWARD_PERCENTAGE=200        # Operator reward (0-500, where 500=50%)
 NODE_IP=<your_external_ip>
-WHITELIST_IP=<optional_ip>   # IP to never ban
+WHITELIST_IP=<optional_ip>   # IP to EXEMPT from banning/rate-limiting (never banned)
 HEIGHT_OF_NETWORK=<current_height>  # For faster initial sync
+RPC_BIND_ADDRESS=<host>      # Optional. wallet<->node RPC bind host; default 127.0.0.1 (loopback only, NP-C4). Override only if wallet/UI runs on a different host — exposes unauthenticated RPC (e.g. TRAN).
+NODE_IP_SELF_NONCE=<ip>      # Optional. IP for the self-nonce connection; unset = default local behaviour.
 ```
+
+Service/web env vars (read by `cmd/website` / `cmd/explorer` handlers, not from `.env`):
+```
+BIND_ADDRESS=127.0.0.1               # HTTP listener bind host; default all interfaces. Set loopback behind a TLS reverse proxy (WH-M6/M12).
+TRUST_PROXY=true                     # Trust X-Forwarded-For only when behind a trusted proxy (else clients spoof IPs past rate limits).
+CORS_ALLOWED_ORIGINS=<origins>       # Comma-separated allowlist; only these origins are reflected. Default: none.
+COOKIE_INSECURE=true                 # Local HTTP dev only; unset in prod so the session cookie is Secure.
+SMTP_USER / SMTP_PASS                # Optional, for website email features.
+```
+
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); the BIP39 mnemonic backup is unavailable for post-quantum keys (CW-M2 — back up the AES-256-GCM/Argon2id-encrypted wallet file instead); password minimum is 8 chars on password-change and website-registration flows.
 
 Genesis config: `~/.qwid/genesis/config/genesis.json` (copy from `genesis/config/genesis_internal_tests.json`)
 
