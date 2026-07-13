@@ -2,6 +2,7 @@ package syncServices
 
 import (
 	"bytes"
+	"math/rand"
 	"time"
 
 	"github.com/wonabru/qwid-node/blocks"
@@ -11,6 +12,21 @@ import (
 	"github.com/wonabru/qwid-node/services"
 	"github.com/wonabru/qwid-node/tcpip"
 )
+
+// sampleIPs returns up to n distinct entries of ips chosen at random (all of ips
+// if len(ips) <= n). Preserves peer discovery without revealing the full peer set
+// in any single 'hi' message. NP-M14.
+func sampleIPs(ips [][]byte, n int) [][]byte {
+	if len(ips) <= n {
+		return ips
+	}
+	perm := rand.Perm(len(ips))[:n]
+	out := make([][]byte, 0, n)
+	for _, i := range perm {
+		out = append(out, ips[i])
+	}
+	return out
+}
 
 func InitSyncService() {
 	services.SendMutexSync.Lock()
@@ -40,7 +56,9 @@ func generateSyncMsgHeight() []byte {
 	}
 	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{lastBlockHash}
 
-	peers := tcpip.GetIPsConnected()
+	// NP-M14: share only a bounded random subset of connected peers, so no single
+	// 'hi' message discloses the full topology, while peer discovery still works.
+	peers := sampleIPs(tcpip.GetIPsConnected(), common.MaxPeersSharedInHi)
 
 	n.TransactionsBytes[[2]byte{'P', 'P'}] = peers
 	nb := n.GetBytes()

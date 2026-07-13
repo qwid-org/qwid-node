@@ -30,6 +30,7 @@ var (
 	MaxTransactionsPerBlock        int16   = 5000 // on average 500 TPS
 	MaxTransactionInPool                   = 50000
 	MaxPeersConnected              int     = 6
+	MaxPeersSharedInHi             int     = 3 // NP-M14: cap peer IPs shared per 'hi' message (topology-leak reduction)
 	NumberOfHashesInBucket         int64   = 20
 	NumberOfBlocksInBucket         int64   = 20
 	MaxNumberOfTxBans              int     = 50 // number of bans
