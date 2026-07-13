@@ -28,8 +28,7 @@ type ValidatorsResponse struct {
 }
 
 func GetValidators(w http.ResponseWriter, r *http.Request) {
-	clientrpc.InRPC <- SignMessage([]byte("VALS"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("VALS")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -62,8 +61,7 @@ func GetValidatorBlocks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -82,8 +80,7 @@ func GetValidatorBlocks(w http.ResponseWriter, r *http.Request) {
 	for i := 0; i < count && currentHeight-int64(i) >= 0; i++ {
 		h := currentHeight - int64(i)
 		b := common.GetByteInt64(h)
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 		if bytes.Equal(reply, []byte("Timeout")) {
 			continue
 		}

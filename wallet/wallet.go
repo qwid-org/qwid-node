@@ -129,6 +129,15 @@ func (w *Wallet) Wipe() {
 	}
 	w.password = nil
 	w.passwordBytes = nil
+	// CW-H2: cleanse the live post-quantum secret keys. signer.Clean() runs
+	// OQS_MEM_cleanse over the retained secret-key bytes (which alias
+	// secretKey.ByteValue) and frees the C handle; it is nil-safe on an account
+	// that never initialized (e.g. paused encryption). Cleanse() zeroes the
+	// PrivKey.ByteValue slice as defense-in-depth.
+	w.Account1.signer.Clean()
+	w.Account2.signer.Clean()
+	w.Account1.secretKey.Cleanse()
+	w.Account2.secretKey.Cleanse()
 }
 
 // deriveKey derives the AES-256 key from the password using Argon2id and the
@@ -347,8 +356,11 @@ func GenerateNewIv() []byte {
 // ciphertext tampering is detected on decryption (fixes CW-C1). A fresh random
 // nonce is generated for every call and prepended to the output, so no two
 // encryptions ever reuse a nonce (fixes CW-C2). Output layout: nonce || ciphertext+tag.
-func (w *Wallet) encrypt(v []byte) ([]byte, error) {
-	cb, err := aes.NewCipher(w.passwordBytes)
+// encryptWithKey encrypts v under the given AES key without reading or mutating
+// w.passwordBytes. CW-M3: lets ChangePasswordInPlace re-encrypt under the new key
+// without toggling the shared field (which raced concurrent passwordBytes readers).
+func (w *Wallet) encryptWithKey(key, v []byte) ([]byte, error) {
+	cb, err := aes.NewCipher(key)
 	if err != nil {
 		logger.GetLogger().Println("Can not create AES function")
 		return []byte{}, err
@@ -365,6 +377,10 @@ func (w *Wallet) encrypt(v []byte) ([]byte, error) {
 	// Seal appends the ciphertext (including the auth tag) to nonce, so the
 	// returned slice is nonce || ciphertext+tag.
 	return gcm.Seal(nonce, nonce, v, nil), nil
+}
+
+func (w *Wallet) encrypt(v []byte) ([]byte, error) {
+	return w.encryptWithKey(w.passwordBytes, v)
 }
 
 // decrypt reverses encrypt. New wallets are AES-256-GCM; if GCM authentication
@@ -427,7 +443,10 @@ func (w *Wallet) GetMnemonicWords(primary bool) (string, error) {
 	}
 
 	if secretLength > 64 {
-		return "", fmt.Errorf("secret must be less than 64 bytes")
+		// CW-M2: BIP39-style mnemonics cannot represent a post-quantum secret key
+		// (e.g. Falcon-512 is ~1281 bytes) — the 64-byte ceiling is intentional.
+		// Give a clear, actionable error instead of the misleading "< 64 bytes" one.
+		return "", fmt.Errorf("mnemonic backup is unavailable for keys larger than 64 bytes (post-quantum secret keys); use the encrypted wallet-file backup instead")
 	}
 	if secretLength < 64 {
 		logger.GetLogger().Println("not all mnemonic words are important. secret is less than 64 bytes")
@@ -484,6 +503,29 @@ func (w *Wallet) RestoreSecretKeyFromMnemonic(mnemonic string, primary bool) err
 	return nil
 }
 
+// normalizeAccountRoles sets the primary/secondary role metadata (the Primary
+// flags and PublicKey.MainAddress) consistently across the wallet's two accounts:
+// Account1 is primary, Account2 secondary. This mirrors the canonical state that
+// loadKeys produces after loading a wallet from disk, so a freshly generated
+// wallet equals its own reloaded form (OB-122). GenerateNewAccount cannot set
+// these at creation time (w.MainAddress is unknown when Account1 is generated,
+// and accounts are created with primary=false), which is why the persist path
+// normalizes them here. secretKey is not persisted, but its Primary flag is part
+// of the in-memory identity compared by callers, so it is normalized too.
+func (w *Wallet) normalizeAccountRoles() {
+	w.MainAddress.Primary = true
+	w.Account1.Address.Primary = true
+	w.Account2.Address.Primary = false
+	w.Account1.PublicKey.Address.Primary = true
+	w.Account2.PublicKey.Address.Primary = false
+	w.Account1.PublicKey.Primary = true
+	w.Account2.PublicKey.Primary = false
+	w.Account1.PublicKey.MainAddress = w.MainAddress
+	w.Account2.PublicKey.MainAddress = w.MainAddress
+	w.Account1.secretKey.Primary = true
+	w.Account2.secretKey.Primary = false
+}
+
 func (w *Wallet) StoreJSON() error {
 	if w.GetSecretKey().GetBytes() == nil {
 		return fmt.Errorf("you need load wallet first")
@@ -530,6 +572,17 @@ func (w *Wallet) StoreJSON() error {
 		}
 		copy(w.Accounts[k].EncryptedSecretKey, se)
 	}
+
+	// OB-122: normalize account role metadata before persisting so a freshly
+	// generated wallet is identical to its own reloaded form. GenerateNewAccount
+	// cannot set these for Account1 (w.MainAddress is not yet known when Account1
+	// is created, and it is created with the secondary/primary=false role), so
+	// without this a fresh wallet diverges from loadKeys' normalized output on
+	// PublicKey.MainAddress and the primary/secondary flags. MainAddress and the
+	// Primary flags are part of the pubkey/tx identity. Loaded wallets already
+	// normalize on load, so this does not change on-wire behavior for existing
+	// wallets — it only makes the pre-store in-memory/persisted state consistent.
+	w.normalizeAccountRoles()
 
 	// Marshal the wallet to JSON
 	wm, err := json.MarshalIndent(&w, "", "    ")
@@ -766,17 +819,27 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	w2.SetPassword(newPassword)
 
 	for k, v := range w.Accounts {
-		ds, err := w.decrypt(v.EncryptedSecretKey)
-		if err != nil {
-			logger.GetLogger().Println(err)
+		if err := func() error {
+			ds, err := w.decrypt(v.EncryptedSecretKey)
+			if err != nil {
+				logger.GetLogger().Println(err)
+				return err
+			}
+			defer func() { // CW-H2: cleanse the ephemeral decrypted key
+				if len(ds) > 0 {
+					oqs.MemCleanse(ds)
+				}
+			}()
+			se, err := w2.encrypt(ds)
+			if err != nil {
+				logger.GetLogger().Println(err)
+				return err
+			}
+			copy(w2.Accounts[k].EncryptedSecretKey, se)
+			return nil
+		}(); err != nil {
 			return err
 		}
-		se, err := w2.encrypt(ds)
-		if err != nil {
-			logger.GetLogger().Println(err)
-			return err
-		}
-		copy(w2.Accounts[k].EncryptedSecretKey, se)
 	}
 
 	// Re-encrypt Account1 and Account2 with the new password
@@ -785,6 +848,11 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account1: %v", err)
 		}
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
 		se, err := w2.encrypt(ds)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt Account1: %v", err)
@@ -796,6 +864,11 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account2: %v", err)
 		}
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
 		se, err := w2.encrypt(ds)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt Account2: %v", err)
@@ -839,25 +912,31 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 	// Fresh Argon2id salt for the new password; applied to w only after all
 	// blobs are re-encrypted (below), so decryption of old blobs still works.
 	newSalt := newKdfSalt()
-	oldPasswordBytes := w.passwordBytes
 	newPasswordBytes := argon2Key(newPassword, newSalt)
 
 	// Temporarily keep old password for decryption
 	for k, v := range w.Accounts {
-		ds, err := w.decrypt(v.EncryptedSecretKey)
-		if err != nil {
-			logger.GetLogger().Println(err)
+		if err := func() error {
+			ds, err := w.decrypt(v.EncryptedSecretKey)
+			if err != nil {
+				logger.GetLogger().Println(err)
+				return err
+			}
+			defer func() { // CW-H2: cleanse the ephemeral decrypted key
+				if len(ds) > 0 {
+					oqs.MemCleanse(ds)
+				}
+			}()
+			se, err := w.encryptWithKey(newPasswordBytes, ds) // CW-M3: no toggle
+			if err != nil {
+				logger.GetLogger().Println(err)
+				return err
+			}
+			copy(w.Accounts[k].EncryptedSecretKey, se)
+			return nil
+		}(); err != nil {
 			return err
 		}
-		w.passwordBytes = newPasswordBytes
-		se, err := w.encrypt(ds)
-		if err != nil {
-			w.passwordBytes = oldPasswordBytes
-			logger.GetLogger().Println(err)
-			return err
-		}
-		w.passwordBytes = oldPasswordBytes
-		copy(w.Accounts[k].EncryptedSecretKey, se)
 	}
 
 	// Re-encrypt Account1 and Account2
@@ -866,13 +945,15 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account1: %v", err)
 		}
-		w.passwordBytes = newPasswordBytes
-		se, err := w.encrypt(ds)
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
+		se, err := w.encryptWithKey(newPasswordBytes, ds) // CW-M3: no toggle
 		if err != nil {
-			w.passwordBytes = oldPasswordBytes
 			return fmt.Errorf("failed to encrypt Account1: %v", err)
 		}
-		w.passwordBytes = oldPasswordBytes
 		w.Account1.EncryptedSecretKey = se
 	}
 	if len(w.Account2.EncryptedSecretKey) > 0 {
@@ -880,13 +961,15 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 		if err != nil {
 			return fmt.Errorf("failed to decrypt Account2: %v", err)
 		}
-		w.passwordBytes = newPasswordBytes
-		se, err := w.encrypt(ds)
+		defer func() { // CW-H2: cleanse the ephemeral decrypted key
+			if len(ds) > 0 {
+				oqs.MemCleanse(ds)
+			}
+		}()
+		se, err := w.encryptWithKey(newPasswordBytes, ds) // CW-M3: no toggle
 		if err != nil {
-			w.passwordBytes = oldPasswordBytes
 			return fmt.Errorf("failed to encrypt Account2: %v", err)
 		}
-		w.passwordBytes = oldPasswordBytes
 		w.Account2.EncryptedSecretKey = se
 	}
 
@@ -938,6 +1021,9 @@ func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isP
 	// CW-M1: reject empty signature before indexing; this path is reachable
 	// from untrusted network input and must not panic.
 	if len(sig) < 1 {
+		return false
+	}
+	if len(msg) < 1 { // CW-M1: empty message would panic the underlying oqs Verify
 		return false
 	}
 	var verifier oqs.Signature

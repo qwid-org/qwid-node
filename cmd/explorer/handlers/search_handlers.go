@@ -26,8 +26,7 @@ func Search(w http.ResponseWriter, r *http.Request) {
 	// Try as block height (numeric)
 	if height, err := strconv.ParseInt(q, 10, 64); err == nil {
 		b := common.GetByteInt64(height)
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 		if !bytes.Equal(reply, []byte("Timeout")) && len(reply) > 2 && string(reply[:2]) == "BL" {
 			bb := blocks.Block{}
 			bb, err = bb.GetFromBytes(reply[2:])
@@ -48,8 +47,7 @@ func Search(w http.ResponseWriter, r *http.Request) {
 			switch len(b) {
 			case common.AddressLength:
 				// Account lookup
-				clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-				reply := <-clientrpc.OutRPC
+				reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 				if !bytes.Equal(reply, []byte("Timeout")) && len(reply) > 2 && string(reply[:2]) == "AC" {
 					var acc account.Account
 					if err := acc.Unmarshal(reply[2:]); err == nil {
@@ -67,8 +65,7 @@ func Search(w http.ResponseWriter, r *http.Request) {
 				}
 			case common.HashLength:
 				// Transaction lookup
-				clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-				reply := <-clientrpc.OutRPC
+				reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 				if !bytes.Equal(reply, []byte("Timeout")) && len(reply) > 2 {
 					if string(reply[:2]) == "TX" && len(reply) > 3 {
 						locLen := int(reply[2])

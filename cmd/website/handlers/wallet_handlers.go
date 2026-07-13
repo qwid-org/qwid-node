@@ -63,8 +63,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 
 	wl := sess.Wallet
 	inb := append([]byte("ACCT"), wl.MainAddress.GetBytes()...)
-	clientrpc.InRPC <- SignMessage(inb)
-	re := <-clientrpc.OutRPC
+	re := clientrpc.Call(SignMessage(inb))
 	if bytes.Equal(re, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -85,8 +84,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	for i := 1; i < 5; i++ {
 		inb = append([]byte("STAK"), wl.MainAddress.GetBytes()...)
 		inb = append(inb, byte(i))
-		clientrpc.InRPC <- SignMessage(inb)
-		re = <-clientrpc.OutRPC
+		re = clientrpc.Call(SignMessage(inb))
 		if bytes.Equal(re, []byte("Timeout")) {
 			continue
 		}

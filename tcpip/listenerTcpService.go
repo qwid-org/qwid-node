@@ -97,7 +97,11 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 			}
 
 			for _, deletedIP := range deletedIPs {
-				ChanPeer <- deletedIP
+				select {
+				case ChanPeer <- deletedIP:
+				default:
+					logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+				}
 			}
 		case <-Quit:
 			logger.GetLogger().Println("Should exit LoopSend")
@@ -225,7 +229,6 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	PeersMutex.Unlock()
 
 	reconnectionTries := 0
-	resetNumber := 0
 
 	// cleanupOutbound closes the outbound connection and triggers reconnection.
 	// If the outbound conn is not in tcpConnections, we close it directly and
@@ -236,7 +239,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			deletedIP := CloseAndRemoveConnection(conn)
 			PeersMutex.Unlock()
 			for _, d := range deletedIP {
-				ChanPeer <- d
+				select {
+				case ChanPeer <- d:
+				default:
+					logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+				}
 			}
 		} else {
 			if conn != nil {
@@ -244,7 +251,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			}
 			PeersMutex.Unlock()
 			// Notify to re-establish the receive connection
-			ChanPeer <- append(topic[:], ip[:]...)
+			select {
+			case ChanPeer <- append(topic[:], ip[:]...):
+			default:
+				logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+			}
 		}
 	}
 
@@ -260,11 +271,6 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	rTopic := map[[2]byte][]byte{}
 
 	for {
-		resetNumber++
-		if resetNumber%100 == 0 {
-			reconnectionTries = 0
-		}
-
 		select {
 		case <-Quit:
 			PeersMutex.Lock()
@@ -343,6 +349,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 				return
 
 			}
+			reconnectionTries = 0 // NP-M4: a real frame arrived — the connection is healthy, so reset the consecutive-error counter (was reset on a fixed iteration cadence)
 			//if bytes.Equal(r, []byte("WAIT")) {
 			//	waitChan <- topic[:]
 			//	continue

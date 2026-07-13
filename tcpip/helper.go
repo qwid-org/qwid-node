@@ -36,8 +36,8 @@ func isWhitelisted(ip [4]byte) bool {
 }
 
 func IsIPBanned(ip [4]byte) bool {
-	bannedIPMutex.RLock()
-	defer bannedIPMutex.RUnlock()
+	bannedIPMutex.Lock()
+	defer bannedIPMutex.Unlock()
 	if whiteListIPs[ip] {
 		return false
 	}
@@ -45,6 +45,7 @@ func IsIPBanned(ip [4]byte) bool {
 		if hbanned > common.GetCurrentTimeStampInSecond() {
 			return true
 		}
+		delete(bannedIP, ip) // NP-M1: evict the expired ban so the map does not grow unboundedly
 	}
 	return false
 }
@@ -55,6 +56,14 @@ func BanIP(ip [4]byte) {
 		return
 	}
 	bannedIPMutex.Lock()
+	// NP-M1: opportunistically evict already-expired bans so the map self-trims
+	// even for IPs that are never re-checked.
+	nowTs := common.GetCurrentTimeStampInSecond()
+	for k, exp := range bannedIP {
+		if exp <= nowTs {
+			delete(bannedIP, k)
+		}
+	}
 	logger.GetLogger().Println("BANNING ", ip)
 	bannedIP[ip] = common.GetCurrentTimeStampInSecond() + common.BannedTimeSeconds
 	bannedIPMutex.Unlock()

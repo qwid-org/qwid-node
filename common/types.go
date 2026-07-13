@@ -381,6 +381,16 @@ func (pk *PrivKey) Init(b []byte, address Address, primary bool) error {
 	return nil
 }
 
+// Cleanse zeroes the in-memory secret-key bytes and drops the reference. Call at
+// logout/wipe so a decrypted post-quantum secret key does not linger in memory
+// (CW-H2). Plain zero-loop, mirroring the CW-C4 password wipe.
+func (pk *PrivKey) Cleanse() {
+	for i := range pk.ByteValue {
+		pk.ByteValue[i] = 0
+	}
+	pk.ByteValue = nil
+}
+
 func (pk PrivKey) GetBytes() []byte {
 	return pk.ByteValue[:]
 }

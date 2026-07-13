@@ -139,9 +139,13 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 		ResetToDefaultEncryptionOptData()
 		voting.AfterReset = false
 	}
-	// NP-M12: read the shared EncryptionOptData while still holding the lock.
-	optData = append(optData, EncryptionOptData...)
 	voting.VotesEncryptionMutex.Unlock()
+
+	// NP-M12: read EncryptionOptData under encryptionMutex — the lock the writers
+	// (SetEncryptionData/ResetToDefaultEncryptionOptData) hold — not VotesEncryptionMutex.
+	encryptionMutex.Lock()
+	optData = append(optData, EncryptionOptData...)
+	encryptionMutex.Unlock()
 
 	pubkey := common.PubKey{}
 	if primary == false {

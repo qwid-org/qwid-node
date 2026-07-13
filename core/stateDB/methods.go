@@ -426,12 +426,9 @@ func (sa *StateAccount) ForEachStorage(a common.Address, cb func(key common.Hash
 	if !ok {
 		return nil
 	}
-	for h, _ := range shs {
-		if value, dirty := shs[h]; dirty {
-			if !cb(h, value) {
-				return nil
-			}
-			continue
+	for h, value := range shs {
+		if !cb(h, value) {
+			return nil
 		}
 	}
 

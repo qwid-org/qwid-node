@@ -216,6 +216,15 @@ func (c *dataCopy) Run(in []byte) ([]byte, error) {
 	return out, nil
 }
 
+// MaxModExpLen bounds each MODEXP operand length. On this chain gas is not
+// charged (DB-C4), so the EIP-2565 gas formula does not bound operand size;
+// this explicit ceiling prevents an OOM/DoS from attacker-controlled lengths.
+// 1024 bytes = 8192-bit operands, far above any realistic crypto (RSA-4096 is
+// 512 bytes), so no legitimate contract is affected. DB-M10.
+const MaxModExpLen = 1024
+
+var ErrModExpOperandTooLarge = errors.New("modexp operand length exceeds maximum")
+
 // bigModExp implements a native big integer exponential modular operation.
 type bigModExp struct {
 	eip2565 bool
@@ -345,6 +354,9 @@ func (c *bigModExp) Run(input []byte) ([]byte, error) {
 		expLen  = new(big.Int).SetBytes(getData(input, 32, 32)).Uint64()
 		modLen  = new(big.Int).SetBytes(getData(input, 64, 32)).Uint64()
 	)
+	if baseLen > MaxModExpLen || expLen > MaxModExpLen || modLen > MaxModExpLen {
+		return nil, ErrModExpOperandTooLarge // DB-M10: bound operand size (gas does not bind on this chain — DB-C4)
+	}
 	if len(input) > 96 {
 		input = input[96:]
 	} else {

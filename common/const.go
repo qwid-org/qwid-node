@@ -30,6 +30,7 @@ var (
 	MaxTransactionsPerBlock        int16   = 5000 // on average 500 TPS
 	MaxTransactionInPool                   = 50000
 	MaxPeersConnected              int     = 6
+	MaxPeersSharedInHi             int     = 3 // NP-M14: cap peer IPs shared per 'hi' message (topology-leak reduction)
 	NumberOfHashesInBucket         int64   = 20
 	NumberOfBlocksInBucket         int64   = 20
 	MaxNumberOfTxBans              int     = 50 // number of bans
@@ -69,6 +70,9 @@ var (
 	MessageRateWindowSeconds    int64 = 10
 	ConnectionRateLimit         int   = 20 // max connection attempts per window per IP; 20 tolerates a legit multi-topic (tx/nonce/self-nonce/sync) restart+retry
 	ConnectionRateWindowSeconds int64 = 60
+
+	MaxInboundConnectionsPerTopic int = 64 // NP-H2: cap concurrent inbound conns per topic (~10x the ~6 legit peers) to bound fd exhaustion / slow-loris
+	MaxConcurrentRPCConnections   int = 64 // NP-H6: cap concurrent RPC conns (HTTP servers hold ~1 persistent conn each) to bound fd exhaustion
 )
 
 // db prefixes

@@ -10,6 +10,7 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/blocks"
@@ -40,6 +41,20 @@ func extractRemoteIP(addr string) string {
 	return host
 }
 
+var rpcConnCount int64 // NP-H6: current in-flight RPC connections
+
+// tryAcquireRPCSlot atomically reserves a connection slot if under the cap,
+// returning true on success (a rejected acquire rolls the counter back). NP-H6.
+func tryAcquireRPCSlot() bool {
+	if atomic.AddInt64(&rpcConnCount, 1) > int64(common.MaxConcurrentRPCConnections) {
+		atomic.AddInt64(&rpcConnCount, -1)
+		return false
+	}
+	return true
+}
+
+func releaseRPCSlot() { atomic.AddInt64(&rpcConnCount, -1) }
+
 func ListenRPC() {
 	// NP-C4: bind the wallet-node RPC to loopback by default so unauthenticated
 	// operations (e.g. TRAN) are not exposed to the network. Operators who
@@ -62,8 +77,15 @@ func ListenRPC() {
 			logger.GetLogger().Printf("RPC accept error: %v", err)
 			continue
 		}
+		// NP-H6: bound concurrent RPC connections.
+		if !tryAcquireRPCSlot() {
+			logger.GetLogger().Printf("RPC connection cap (%d) reached; rejecting %s", common.MaxConcurrentRPCConnections, conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
 		remoteIP := extractRemoteIP(conn.RemoteAddr().String())
 		go func(c net.Conn, ip string) {
+			defer releaseRPCSlot()
 			srv := rpc.NewServer()
 			srv.Register(&Listener{remoteIP: ip})
 			srv.ServeConn(c)
@@ -178,9 +200,11 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 func handleWALL(line []byte, reply *[]byte) {
 	logger.GetLogger().Println(string(line))
 	w := wallet.GetActiveWallet()
-	r, err := json.Marshal(w)
+	// NP-C5: return a redacted public projection — never the KdfSalt, the
+	// EncryptedSecretKey, the Iv, or HomePath (the offline-attack material).
+	r, err := json.Marshal(w.PublicView())
 	if err != nil {
-		logger.GetLogger().Println("Cannot marshal stat's struct")
+		logger.GetLogger().Println("Cannot marshal wallet public view")
 		return
 	}
 	*reply = r
