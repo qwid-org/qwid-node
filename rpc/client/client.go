@@ -10,9 +10,18 @@ import (
 )
 
 const (
-	retryInterval = 5 * time.Second
-	bufferSize    = 1024 * 1024
+	initialBackoff = 1 * time.Second  // NP-M6
+	maxBackoff     = 30 * time.Second // NP-M6
 )
+
+// nextBackoff doubles cur, capped at maxBackoff. Pure/deterministic. NP-M6.
+func nextBackoff(cur time.Duration) time.Duration {
+	next := cur * 2
+	if next > maxBackoff {
+		return maxBackoff
+	}
+	return next
+}
 
 var InRPC = make(chan []byte)
 var OutRPC = make(chan []byte)
@@ -39,13 +48,15 @@ func ConnectRPC(ip string) {
 	address := ip + ":" + strconv.Itoa(tcpip.Ports[tcpip.RPCTopic])
 	var client *rpc.Client
 	var err error
+	backoff := initialBackoff
 	for {
 		client, err = rpc.Dial("tcp", address)
 		if err == nil {
 			break
 		}
-		logger.GetLogger().Printf("Failed to connect to RPC server at %s: %v. Retrying in %v...", address, err, retryInterval)
-		time.Sleep(retryInterval)
+		logger.GetLogger().Printf("Failed to connect to RPC server at %s: %v. Retrying in %v...", address, err, backoff)
+		time.Sleep(backoff)
+		backoff = nextBackoff(backoff) // NP-M6: exponential backoff
 	}
 
 	// WH-C6: block on InRPC instead of polling with a 100ms sleep, which added
@@ -53,18 +64,20 @@ func ConnectRPC(ip string) {
 	for {
 		line := <-InRPC
 		muRPC.Lock()
-		reply := make([]byte, bufferSize)
+		var reply []byte // NP-M7: net/rpc gob sizes the reply slice itself; no fixed pre-alloc
 		err = client.Call("Listener.Send", line, &reply)
 		if err != nil {
 			logger.GetLogger().Printf("RPC call failed: %v. Reconnecting...", err)
 			OutRPC <- []byte("Timeout")
+			reconnectBackoff := initialBackoff
 			for {
 				client, err = rpc.Dial("tcp", address)
 				if err == nil {
 					break
 				}
-				logger.GetLogger().Printf("Failed to reconnect to RPC server at %s: %v. Retrying in %v...", address, err, retryInterval)
-				time.Sleep(retryInterval)
+				logger.GetLogger().Printf("Failed to reconnect to RPC server at %s: %v. Retrying in %v...", address, err, reconnectBackoff)
+				time.Sleep(reconnectBackoff)
+				reconnectBackoff = nextBackoff(reconnectBackoff) // NP-M6
 			}
 		} else {
 			OutRPC <- reply
