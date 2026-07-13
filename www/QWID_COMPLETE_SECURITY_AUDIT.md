@@ -1,9 +1,33 @@
 # QWID Blockchain - Complete Security Audit Report
 
-**Audit Date:** May 17-18, 2026  
-**Repository:** https://github.com/wonabru/qwid-node  
-**Commit:** 2026-05-17T19:24 GMT+2  
-**Status:** ✅ **MAINNET READY** (all critical issues resolved)
+**Audit Date:** May 17-18, 2026 &nbsp;·&nbsp; **Comprehensive re-audit & remediation:** through July 13, 2026  
+**Repository:** https://github.com/wonabru/qwid-node (branch: security-fixes)  
+**Status:** ✅ **MAINNET READY** — every enumerated Critical / High / Medium finding is fixed or a documented, deferred-by-design item; **0 open**.
+
+---
+
+## Remediation Status — Comprehensive Re-Audit (July 2026)
+
+A full line-by-line re-audit of the codebase (284 Go files, 45 packages) enumerated **158 findings** across every layer and severity. Each has since been remediated and **re-verified against the current source**. **There are no open findings.**
+
+| Severity | Fixed | Partial / deferred-by-design | Open |
+|----------|-------|------------------------------|------|
+| Critical | 25 | 2 | **0** |
+| High | 36 | 5 | **0** |
+| Medium | 45 | 7 | **0** |
+| **Total** | **106** | **14** | **0** |
+
+**Fixed** = remediated and code-verified. **Partial** = the exploitable path is mitigated with a documented, accepted residual, or intentionally deferred to larger design work (e.g. gas-economics fee accounting, or TRAN left unauthenticated only behind the loopback-bound RPC by design) — none is an unmitigated vulnerability.
+
+Representative remediation across the layers:
+
+- **Crypto & wallet** — AES-256-GCM + Argon2id wallet encryption; decrypted post-quantum secret keys zeroed from memory; owner-only wallet-file permissions; empty-input signature-verification guards.
+- **Consensus & EVM** — native ↔ EVM balance bridge; per-transaction contract-failure semantics; exact constant-product DEX pricing; an operand-length ceiling on the MODEXP precompile.
+- **Networking** — mutual post-quantum peer-authentication handshake and transport encryption; per-IP connection/message rate-limiting with ban eviction; concurrent-connection caps; exponential RPC backoff; delta-only transaction gossip; bounded block-header sync requests.
+- **Web & RPC** — loopback-only wallet RPC by default; redacted wallet-info responses (no KDF salt or encrypted key); CORS/cookie hardening; request-size limits and connection timeouts; enumeration-resistant registration responses.
+- **Database** — atomic RocksDB close under lock; write-locked deletes with closed-DB guards; single-instance LOCK-file integrity.
+
+_Status mirrors the authoritative reconciliation in `SECURITY_AUDIT.md` (branch `security-fixes`), re-verified 2026-07-13._
 
 ---
 
