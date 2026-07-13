@@ -38,7 +38,7 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 
 | Severity | FIXED | PARTIAL | OPEN |
 |---|---|---|---|
-| Critical | 24 | 2 | 1 |
+| Critical | 25 | 2 | 0 |
 | High | 36 | 5 | 0 |
 | Medium | 45 | 7 | 0 |
 
@@ -47,9 +47,9 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 
 > **Update 2026-07-12 (OB-119 DB-concurrency cluster):** **DB-H4** (atomic `Close()` under the mutex — the goroutine/timeout force-cleanup that mutated `d.db` unlocked is removed; `Close()` now blocks until in-flight ops release the (R)lock, then closes), **DB-M8** (`CloseDB()` no longer pre-locks the non-reentrant mutex before calling the self-locking `Close()`, so the guaranteed reentrant deadlock — which forced DB-H4's unsafe path every shutdown — is gone), **DB-H5** (`Delete` now takes the write `Lock` (was `RLock`) and every data op — `Delete`/`Put`/`IsKey`/`LoadAll`/`LoadAllKeys` — nil-guards `d.db` and returns a clean `"database is closed"` error instead of panicking after close), and **DB-H6** (`InitPermanent` no longer deletes the RocksDB `LOCK` file — it relies on RocksDB's OS advisory single-instance lock; a second open on a live data dir now fails cleanly instead of corrupting, and the open error is wrapped with an operator hint) are now **FIXED** — moved from the OPEN list below. See `docs/superpowers/specs/2026-07-12-db-concurrency-cluster-design.md`.
 
-### OPEN — still to be tackled (1)
+### OPEN — still to be tackled (0)
 
-- **NP-C5** [CRITICAL] — handleWALL still serializes the entire wallet struct; audit's own re-scoping (requires localhost+signature, so downgraded from remote-exposure CRITICAL) is accurate, but the underlying over-broad serialization is unchanged in code. _(rpc/server/server.go:178-186 handleWALL still does `r, err := json.Marshal(w)` on the full `wallet.GetActiveWallet()` struct and returns it verbatim — no field redaction added.)_
+_None. Every enumerated Critical/High/Medium finding is FIXED or a documented PARTIAL/deferred-by-design item (see below)._
 
 ### PARTIAL / deferred — what remains (14)
 
@@ -80,9 +80,11 @@ The QWID-Node codebase contains **27 critical vulnerabilities** across all layer
 
 > **Update 2026-07-13 (OB-126 wallet mediums cluster — closes the last OPEN mediums):** **CW-M3** (`ChangePasswordInPlace` no longer toggles the shared `w.passwordBytes` field in place — an internal `encryptWithKey(key, v)` re-encrypts under the new key without mutating the shared field, so only the single final swap remains, matching the safer `ChangePassword`; residual: that single final-swap write vs lock-free readers is pre-existing and shared with `SetPassword`/`Wipe`/`LoadJSON`, and closing it fully is the deferred lock-discipline follow-up) and **CW-M2** (`GetMnemonicWords` now returns a clear, actionable error for a secret key larger than the 64-byte mnemonic ceiling — directing to the encrypted wallet-file backup — instead of the misleading "less than 64 bytes"; the 64-byte ceiling is intentional-by-design, since BIP39-style mnemonics cannot represent a ~1281-byte post-quantum key) are now **FIXED**. See `docs/superpowers/specs/2026-07-13-cw-mediums-cluster-design.md`. **With this, OPEN MEDIUM count is 0** — every enumerated Critical/High/Medium finding is now FIXED or a documented PARTIAL/deferred-by-design item. The only remaining OPEN finding is NP-C5 (re-scoped: localhost+signature-gated wallet-struct over-serialization).
 
-### FIXED (105) — verified remediated
+> **Update 2026-07-13 (OB-127 NP-C5 — closes the last OPEN finding):** **NP-C5** is now **FIXED** — `handleWALL` returns a redacted `PublicView` projection (wallet number, main address, per-account public key + address, sig names) instead of `json.Marshal` of the whole `Wallet`. The response no longer includes `KdfSalt`, any account's `EncryptedSecretKey`, `Iv`, `HomePath`, or the `Accounts` map — i.e. the offline-password-cracking material is no longer served. See `docs/superpowers/specs/2026-07-13-np-c5-wall-redaction-design.md`. **With this, OPEN findings = 0**: every enumerated Critical/High/Medium finding is FIXED or a documented PARTIAL/deferred-by-design item.
 
-- **Critical:** AC-C1, AC-C2, AC-C3, AC-C4, CW-C1, CW-C2, CW-C3, CW-C4, DB-C1, DB-C2, DB-C3, DB-C5, DB-C6, NP-C1, NP-C2, NP-C3, NP-C6, NP-C7, WH-C1, WH-C2, WH-C3, WH-C4, WH-C5, WH-C6
+### FIXED (106) — verified remediated
+
+- **Critical:** AC-C1, AC-C2, AC-C3, AC-C4, CW-C1, CW-C2, CW-C3, CW-C4, DB-C1, DB-C2, DB-C3, DB-C5, DB-C6, NP-C1, NP-C2, NP-C3, NP-C5, NP-C6, NP-C7, WH-C1, WH-C2, WH-C3, WH-C4, WH-C5, WH-C6
 - **High:** AC-H1, AC-H2, AC-H3, AC-H5, AC-H6, AC-H7, CW-H1, CW-H2, CW-H3, CW-H4, CW-H5, CW-H6, DB-H1, DB-H2, DB-H3, DB-H4, DB-H5, DB-H6, DB-H7, DB-H8, NP-H2, NP-H4, NP-H6, NP-H7, NP-H8, NP-H10, NP-H11, NP-H13, NP-H14, WH-H1, WH-H2, WH-H3, WH-H4, WH-H6, WH-H7, WH-H8
 - **Medium:** AC-M1, AC-M2, AC-M3, AC-M4, AC-M5, AC-M6, AC-M7, AC-M8, AC-M9, CW-M1, CW-M2, CW-M3, CW-M4, CW-M5, CW-M6, CW-M8, DB-M1, DB-M2, DB-M3, DB-M4, DB-M5, DB-M6, DB-M7, DB-M8, DB-M9, DB-M10, NP-M1, NP-M2, NP-M3, NP-M4, NP-M5, NP-M6, NP-M7, NP-M8, NP-M9, NP-M10, NP-M11, NP-M12, NP-M13, NP-M14, WH-M10, WH-M11, WH-M2, WH-M5, WH-M8
 
