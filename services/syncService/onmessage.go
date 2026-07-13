@@ -22,6 +22,19 @@ import (
 
 var err error
 
+// clampHeaderSpan bounds [bHeight, eHeight] so eHeight-bHeight <= NumberOfHashesInBucket
+// and bHeight <= eHeight, matching the legitimate sync batch size, so a malicious peer
+// cannot request an enormous header range. NP-M13.
+func clampHeaderSpan(bHeight, eHeight int64) (int64, int64) {
+	if eHeight < bHeight {
+		eHeight = bHeight
+	}
+	if eHeight-bHeight > common.NumberOfHashesInBucket {
+		eHeight = bHeight + common.NumberOfHashesInBucket
+	}
+	return bHeight, eHeight
+}
+
 var (
 	connectingPeers      = make(map[[6]byte]bool)
 	connectingPeersMutex sync.Mutex
@@ -539,6 +552,7 @@ func OnMessage(addr [4]byte, m []byte) {
 
 		bHeight := common.GetInt64FromByte(txn[[2]byte{'B', 'H'}][0])
 		eHeight := common.GetInt64FromByte(txn[[2]byte{'E', 'H'}][0])
+		bHeight, eHeight = clampHeaderSpan(bHeight, eHeight) // NP-M13: bound the requested span
 		logger.GetLogger().Printf("gh request: bHeight=%d, eHeight=%d, sending headers to %v", bHeight, eHeight, addr)
 		SendHeaders(addr, bHeight, eHeight)
 	default:
