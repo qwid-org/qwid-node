@@ -200,9 +200,11 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 func handleWALL(line []byte, reply *[]byte) {
 	logger.GetLogger().Println(string(line))
 	w := wallet.GetActiveWallet()
-	r, err := json.Marshal(w)
+	// NP-C5: return a redacted public projection — never the KdfSalt, the
+	// EncryptedSecretKey, the Iv, or HomePath (the offline-attack material).
+	r, err := json.Marshal(w.PublicView())
 	if err != nil {
-		logger.GetLogger().Println("Cannot marshal stat's struct")
+		logger.GetLogger().Println("Cannot marshal wallet public view")
 		return
 	}
 	*reply = r
