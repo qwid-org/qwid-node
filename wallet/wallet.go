@@ -443,7 +443,10 @@ func (w *Wallet) GetMnemonicWords(primary bool) (string, error) {
 	}
 
 	if secretLength > 64 {
-		return "", fmt.Errorf("secret must be less than 64 bytes")
+		// CW-M2: BIP39-style mnemonics cannot represent a post-quantum secret key
+		// (e.g. Falcon-512 is ~1281 bytes) — the 64-byte ceiling is intentional.
+		// Give a clear, actionable error instead of the misleading "< 64 bytes" one.
+		return "", fmt.Errorf("mnemonic backup is unavailable for keys larger than 64 bytes (post-quantum secret keys); use the encrypted wallet-file backup instead")
 	}
 	if secretLength < 64 {
 		logger.GetLogger().Println("not all mnemonic words are important. secret is less than 64 bytes")
