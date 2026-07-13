@@ -200,7 +200,13 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if Users.Exists(req.Username) {
-		JsonError(w, "Username already taken", http.StatusConflict)
+		// WH-H3: do not disclose that the username exists. Return the same generic
+		// 400 as other registration failures (not a distinct "already taken"/409),
+		// so the response is not a trivially-scriptable enumeration oracle. Bulk
+		// enumeration is further throttled by registerLimiter (5/10min/IP). The
+		// existence check is retained because the wallet directory is derived from
+		// the username and must not be overwritten.
+		JsonError(w, "Registration could not be completed. Please try different details.", http.StatusBadRequest)
 		return
 	}
 
@@ -258,7 +264,12 @@ func Register(w http.ResponseWriter, r *http.Request) {
 
 	// Register user
 	if err := Users.Create(req.Username, req.Password, walletDir, address); err != nil {
-		JsonError(w, fmt.Sprintf("Failed to register user: %v", err), http.StatusInternalServerError)
+		// WH-H3: Create also guards duplicates; on a TOCTOU race with the Exists
+		// check above it returns "user already exists". Do not surface that — log
+		// server-side and return the same generic message so this path is not a
+		// fallback enumeration oracle.
+		logger.GetLogger().Println("register: Users.Create failed:", err)
+		JsonError(w, "Registration could not be completed. Please try different details.", http.StatusBadRequest)
 		return
 	}
 
