@@ -504,12 +504,17 @@ func handleSTAK(line []byte, reply *[]byte) {
 	byt := [common.AddressLength]byte{}
 	copy(byt[:], line[:common.AddressLength])
 	n := int(line[common.AddressLength])
+	// StakingAccount is copied by value, but StakingDetails is a map. A value
+	// copy therefore still points at the live map and it must be marshalled while
+	// holding the read lock. Unlocking before Marshal allowed block processing to
+	// update StakingDetails concurrently, causing the runtime fatal error
+	// "concurrent map iteration and map write".
 	account.StakingRWMutex.RLock()
-	acc := account.StakingAccounts[n].AllStakingAccounts[byt] // value copy
+	acc := account.StakingAccounts[n].AllStakingAccounts[byt]
+	am := acc.Marshal()
 	account.StakingRWMutex.RUnlock()
 	// GetLockedAmount acquires StakingRWMutex internally — must be called outside our lock
 	locked, _ := account.GetLockedAmount(byt[:], common.GetHeight(), n)
-	am := acc.Marshal()
 	*reply = append(am, common.GetByteInt64(locked)...)
 }
 
