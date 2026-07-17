@@ -47,6 +47,9 @@ func evmTransfer(db vm.StateDB, from, to common.Address, amount *big.Int) {
 // EvaluateSC: OptData present, non-delegated recipient, and a sender that is
 // neither a multisign account nor escrow-delayed (both skip SC execution).
 func isContractCallTx(tx transactionsDefinition.Transaction, senderAcc account.Account, height int64) bool {
+	if _, ok := tx.CancellationTarget(); ok {
+		return false
+	}
 	if len(tx.TxData.OptData) == 0 {
 		return false
 	}
@@ -404,6 +407,9 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			continue
 		}
 		if len(t.TxData.OptData) == 0 {
+			continue
+		}
+		if _, ok := t.CancellationTarget(); ok {
 			continue
 		}
 

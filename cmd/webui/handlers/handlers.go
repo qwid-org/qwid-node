@@ -653,15 +653,61 @@ func CancelTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm, err := hex.DecodeString(req.TxHash)
-	if err != nil {
+	if err != nil || len(tmm) != common.HashLength {
 		jsonError(w, "Invalid transaction hash", http.StatusBadRequest)
 		return
 	}
 
 	reply := clientrpc.Call(SignMessage(append([]byte("CNCL"), tmm...)))
+	if string(reply) != "escrow cancellation transaction required" {
+		jsonResponse(w, map[string]string{"message": string(reply)})
+		return
+	}
+
+	var target common.Hash
+	target.Set(tmm)
+	tx := transactionsDefinition.Transaction{
+		TxData: transactionsDefinition.TxData{
+			Recipient: MainWallet.MainAddress,
+			Amount:    0,
+			OptData:   transactionsDefinition.CancellationOptData(target),
+		},
+		TxParam: transactionsDefinition.TxParam{
+			ChainID:     int16(23),
+			Sender:      MainWallet.MainAddress,
+			SendingTime: common.GetCurrentTimeStampInSecond(),
+			Nonce:       common.RandomNonce(),
+		},
+		GasPrice: int64(rand.Intn(0x0000000f)) + 1,
+	}
+	statsReply := clientrpc.Call(SignMessage([]byte("STAT")))
+	stats := statistics.GetStatsManager().Stats
+	if err := common.Unmarshal(statsReply, common.StatDBPrefix, &stats); err != nil {
+		jsonError(w, "Failed to get network stats", http.StatusInternalServerError)
+		return
+	}
+	tx.Height = stats.Height
+	tx.GasUsage = tx.GasUsageEstimate()
+	if err := tx.CalcHashAndSet(); err != nil {
+		jsonError(w, fmt.Sprintf("Failed to calculate cancellation hash: %v", err), http.StatusInternalServerError)
+		return
+	}
+	primary := !common.IsPaused()
+	if err := tx.Sign(MainWallet, primary); err != nil {
+		jsonError(w, fmt.Sprintf("Failed to sign cancellation: %v", err), http.StatusInternalServerError)
+		return
+	}
+	msg, err := transactionServices.GenerateTransactionMsg([]transactionsDefinition.Transaction{tx}, []byte("tx"), [2]byte{'T', 'T'})
+	if err != nil {
+		jsonError(w, fmt.Sprintf("Failed to generate cancellation message: %v", err), http.StatusInternalServerError)
+		return
+	}
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
 
 	jsonResponse(w, map[string]string{
-		"message": string(reply),
+		"success": "true",
+		"txHash":  tx.Hash.GetHex(),
+		"message": "Escrow cancellation transaction sent",
 	})
 }
 

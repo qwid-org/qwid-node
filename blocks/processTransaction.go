@@ -14,6 +14,35 @@ import (
 
 var ZerosHash = make([]byte, common.HashLength)
 
+func validateEscrowCancellation(tx transactionsDefinition.Transaction, height int64) (transactionsDefinition.Transaction, error) {
+	targetHash, ok := tx.CancellationTarget()
+	if !ok {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("not a cancellation transaction")
+	}
+	senderAddress := tx.GetSenderAddress()
+	if tx.TxData.Amount != 0 || !bytes.Equal(tx.TxData.Recipient.GetBytes(), senderAddress.GetBytes()) ||
+		tx.TxData.LockedAmount != 0 || tx.TxData.MultiSignNumber != 0 ||
+		!bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("cancellation must have zero amount and target the sender account")
+	}
+	target, exists := transactionsPool.PoolTxEscrow.GetTransactionByHash(targetHash.GetBytes())
+	if !exists {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("escrow transaction is not pending")
+	}
+	targetSender := target.GetSenderAddress()
+	if !bytes.Equal(targetSender.GetBytes(), senderAddress.GetBytes()) {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("only the escrow transaction owner can cancel it")
+	}
+	sender, exists := account.GetAccountByAddressBytes(senderAddress.GetBytes())
+	if !exists || sender.TransactionDelay <= 0 {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("cancellation sender is not an escrow account")
+	}
+	if height >= target.GetHeight()+sender.TransactionDelay {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("escrow transaction has already matured")
+	}
+	return target, nil
+}
+
 func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount int64, sumFee int64, block Block) bool {
 	fee, err := tx.CalcFee()
 	if err != nil {
@@ -195,6 +224,17 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 	account.AddTransactionsSender(address.ByteValue, tx.GetHash())
 	addressRecipient := tx.TxData.Recipient
 	account.AddTransactionsRecipient(addressRecipient.ByteValue, tx.GetHash())
+	if targetHash, isCancellation := tx.CancellationTarget(); isCancellation {
+		if _, err := validateEscrowCancellation(tx, height); err != nil {
+			return err
+		}
+		if err := AddBalance(address.ByteValue, -fee); err != nil {
+			return err
+		}
+		transactionsPool.PoolTxEscrow.RemoveTransactionByHash(targetHash.GetBytes())
+		transactionsPool.PoolTxEscrow.BanTransactionByHash(targetHash.GetBytes())
+		return nil
+	}
 	var n int
 	if tx.GetLockedAmount() > 0 {
 		n, err = account.IntDelegatedAccountFromAddress(tx.TxData.DelegatedAccountForLocking)

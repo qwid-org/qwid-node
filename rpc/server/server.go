@@ -28,7 +28,6 @@ import (
 	"github.com/wonabru/qwid-node/wallet"
 )
 
-
 type Listener struct {
 	remoteIP string
 }
@@ -544,7 +543,6 @@ func handleCNCL(byt []byte, reply *[]byte) {
 
 	if len(byt) == common.HashLength {
 		w := wallet.GetActiveWallet()
-		//TODO nice to have cancelling for any user not only owner of node
 		if transactionsPool.PoolsTx.TransactionExists(byt) {
 			tx := transactionsPool.PoolsTx.PopTransactionByHash(byt)
 			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
@@ -553,15 +551,19 @@ func handleCNCL(byt []byte, reply *[]byte) {
 				return
 			}
 			transactionsPool.PoolsTx.BanTransactionByHash(byt)
+			*reply = []byte("transaction cancelled locally")
+			return
 		}
 		if transactionsPool.PoolTxEscrow.TransactionExists(byt) {
-			tx := transactionsPool.PoolTxEscrow.PopTransactionByHash(byt)
+			tx, _ := transactionsPool.PoolTxEscrow.GetTransactionByHash(byt)
 			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
-				transactionsPool.PoolTxEscrow.AddTransaction(tx, tx.Hash)
 				*reply = []byte("you are not the owner of transaction")
 				return
 			}
-			transactionsPool.PoolTxEscrow.BanTransactionByHash(byt)
+			// Escrow has already been accepted by consensus. Do not remove only
+			// this node's copy; the WebUI must submit a signed cancellation tx.
+			*reply = []byte("escrow cancellation transaction required")
+			return
 		}
 		if transactionsPool.PoolTxMultiSign.TransactionExists(byt) {
 			tx := transactionsPool.PoolTxMultiSign.PopTransactionByHash(byt)
@@ -571,9 +573,10 @@ func handleCNCL(byt []byte, reply *[]byte) {
 				return
 			}
 			transactionsPool.PoolTxMultiSign.BanTransactionByHash(byt)
+			*reply = []byte("transaction cancelled locally")
+			return
 		}
-		//TODO to prune DB from bad transactions from time to time
-		*reply = []byte("transaction cancelled")
+		*reply = []byte("transaction not found in a cancellable pool")
 		return
 	}
 

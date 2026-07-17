@@ -264,6 +264,11 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 		total_amount := fee + amount
 		address := poolTx.GetSenderAddress()
 		recipientAddress := poolTx.TxData.Recipient
+		if _, isCancellation := poolTx.CancellationTarget(); isCancellation {
+			if _, err := validateEscrowCancellation(poolTx, block.GetHeader().Height); err != nil {
+				return 0, 0, fmt.Errorf("invalid escrow cancellation: %w", err)
+			}
+		}
 		var n int
 		if poolTx.GetLockedAmount() > 0 {
 			n, err = account.IntDelegatedAccountFromAddress(poolTx.TxData.DelegatedAccountForLocking)

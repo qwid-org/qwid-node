@@ -189,6 +189,15 @@ func (tp *TransactionPool) TransactionExists(hash []byte) bool {
 	return exists
 }
 
+func (tp *TransactionPool) GetTransactionByHash(hash []byte) (transactionsDefinition.Transaction, bool) {
+	h := [common.HashLength]byte{}
+	copy(h[:], hash)
+	tp.rwmutex.RLock()
+	defer tp.rwmutex.RUnlock()
+	tx, exists := tp.transactions[h]
+	return tx, exists
+}
+
 func (tp *TransactionPool) PopTransactionByHash(hash []byte) transactionsDefinition.Transaction {
 	h := [common.HashLength]byte{}
 	copy(h[:], hash)

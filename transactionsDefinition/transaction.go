@@ -13,6 +13,27 @@ import (
 	"github.com/wonabru/qwid-node/wallet"
 )
 
+var cancelTransactionPrefix = []byte("QWID_CANCEL_V1")
+
+// CancellationOptData returns the consensus payload for cancelling a delayed
+// escrow transaction. The payload is covered by the transaction hash/signature.
+func CancellationOptData(target common.Hash) []byte {
+	payload := make([]byte, 0, len(cancelTransactionPrefix)+common.HashLength)
+	payload = append(payload, cancelTransactionPrefix...)
+	payload = append(payload, target.GetBytes()...)
+	return payload
+}
+
+// CancellationTarget identifies a protocol cancellation transaction.
+func (tx Transaction) CancellationTarget() (common.Hash, bool) {
+	data := tx.TxData.OptData
+	if len(data) != len(cancelTransactionPrefix)+common.HashLength ||
+		!bytes.Equal(data[:len(cancelTransactionPrefix)], cancelTransactionPrefix) {
+		return common.Hash{}, false
+	}
+	return common.GetHashFromBytes(data[len(cancelTransactionPrefix):]), true
+}
+
 type Transaction struct {
 	TxData          TxData           `json:"tx_data"`
 	TxParam         TxParam          `json:"tx_param"`
@@ -453,4 +474,3 @@ func EmptyTransaction() Transaction {
 	tx.Signature = common.EmptySignature()
 	return tx
 }
-
