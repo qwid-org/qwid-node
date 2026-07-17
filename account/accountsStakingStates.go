@@ -11,6 +11,9 @@ import (
 
 type StakingAccountsType struct {
 	AllStakingAccounts map[[20]byte]StakingAccount `json:"all_staking_accounts"`
+	// StakeChangedAt is the containing block timestamp of the change that most
+	// recently established this delegated account's current total stake.
+	StakeChangedAt int64 `json:"stake_changed_at,omitempty"`
 }
 
 var StakingAccounts [256]StakingAccountsType
@@ -29,6 +32,7 @@ func (at StakingAccountsType) Marshal() []byte {
 		accb := acc.Marshal()
 		buffer.Write(common.BytesToLenAndBytes(accb)) // Marshal and write account
 	}
+	buffer.Write(common.GetByteInt64(at.StakeChangedAt))
 
 	return buffer.Bytes()
 }
@@ -60,6 +64,9 @@ func (at *StakingAccountsType) Unmarshal(data []byte) error {
 		}
 
 		at.AllStakingAccounts[address] = acc
+	}
+	if buffer.Len() >= 8 {
+		at.StakeChangedAt = common.GetInt64FromByte(buffer.Next(8))
 	}
 
 	return nil
@@ -173,4 +180,66 @@ func GetStakedInAllDelegatedAccounts() int64 {
 	}
 
 	return totalStaked
+}
+
+const MaxActiveStakingNodes = 128
+
+// IsTop128StakingNode reports whether operator controls an eligible delegated
+// account in the current staking-state snapshot. Equal delegated totals are
+// ordered by the block time at which the current total was
+// established; equal seconds are finally ordered by delegated-account ID.
+func IsTop128StakingNode(delegatedAccount int, operator common.Address) bool {
+	StakingRWMutex.RLock()
+	defer StakingRWMutex.RUnlock()
+
+	if delegatedAccount <= 0 || delegatedAccount >= len(StakingAccounts) {
+		return false
+	}
+
+	var totals [256]int64
+	for id, delegated := range StakingAccounts {
+		for _, staking := range delegated.AllStakingAccounts {
+			totals[id] += staking.StakedBalance
+		}
+	}
+
+	targetStake := totals[delegatedAccount]
+	if targetStake < common.MinStakingForNode {
+		return false
+	}
+
+	var selectedOperator [common.AddressLength]byte
+	selectedStake := int64(-1)
+	selectedSince := int64(0)
+	for address, staking := range StakingAccounts[delegatedAccount].AllStakingAccounts {
+		if !staking.OperationalAccount {
+			continue
+		}
+		if staking.StakedBalance > selectedStake ||
+			(staking.StakedBalance == selectedStake &&
+				(staking.OperationalSince < selectedSince ||
+					(staking.OperationalSince == selectedSince && bytes.Compare(address[:], selectedOperator[:]) < 0))) {
+			selectedStake = staking.StakedBalance
+			selectedSince = staking.OperationalSince
+			selectedOperator = address
+		}
+	}
+	if selectedStake < 0 || !bytes.Equal(selectedOperator[:], operator.GetBytes()) {
+		return false
+	}
+
+	targetTime := StakingAccounts[delegatedAccount].StakeChangedAt
+	rank := 1
+	for id, stake := range totals {
+		if id == delegatedAccount {
+			continue
+		}
+		candidateTime := StakingAccounts[id].StakeChangedAt
+		if stake > targetStake ||
+			(stake == targetStake && (candidateTime < targetTime ||
+				(candidateTime == targetTime && id < delegatedAccount))) {
+			rank++
+		}
+	}
+	return rank <= MaxActiveStakingNodes
 }

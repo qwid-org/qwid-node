@@ -1,7 +1,6 @@
 package nonceServices
 
 import (
-	"bytes"
 	"runtime/debug"
 
 	"github.com/wonabru/qwid-node/logger"
@@ -129,8 +128,8 @@ func OnMessage(addr [4]byte, m []byte) {
 		mainAddress := transaction.TxParam.Sender
 
 		// checking if enough coins staked
-		if _, sumStaked, operationalAcc := account.GetStakedInDelegatedAccount(n); int64(sumStaked) < common.MinStakingForNode || !bytes.Equal(operationalAcc.Address[:], mainAddress.GetBytes()) {
-			logger.GetLogger().Println("not enough staked coins to be a node or not valid operational account", sumStaked, common.MinStakingForNode, operationalAcc.Address[:5], mainAddress.GetBytes()[:5])
+		if !account.IsTop128StakingNode(n, mainAddress) {
+			logger.GetLogger().Println("sender is not an eligible top-128 staking node", n, mainAddress.GetBytes()[:5])
 			tcpip.ReduceAndCheckIfBanIP(addr)
 			return
 		}

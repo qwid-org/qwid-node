@@ -17,8 +17,12 @@ type StakingAccount struct {
 	DelegatedAccount   [common.AddressLength]byte `json:"delegated_account"`
 	Address            [common.AddressLength]byte `json:"address"`
 	OperationalAccount bool                       `json:"operational_account"`
-	LastStakeHeight    int64                      `json:last_stake_height,omitempty`
-	StakingDetails     map[int64][]StakingDetail  `json:"staking_details,omitempty"` // block number as key of map
+	// OperationalSince is the containing block's timestamp (Unix seconds) of
+	// the first operator signal. It is consensus data used to resolve equal
+	// operator stakes according to the whitepaper's "fastest signal" rule.
+	OperationalSince int64                     `json:"operational_since,omitempty"`
+	LastStakeHeight  int64                     `json:last_stake_height,omitempty`
+	StakingDetails   map[int64][]StakingDetail `json:"staking_details,omitempty"` // block number as key of map
 }
 
 type StakingDetail struct {
@@ -53,7 +57,7 @@ func lastStakeBlock(accb StakingAccount) (hmax int64) {
 	return accb.LastStakeHeight
 }
 
-func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operational bool, lockedAmount int64, releasePerBlock int64) error {
+func Stake(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int, operational bool, lockedAmount int64, releasePerBlock int64) error {
 	if len(accb) != common.AddressLength {
 		return fmt.Errorf("wrong address length, must be %v", common.AddressLength)
 	}
@@ -85,6 +89,9 @@ func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operat
 	// in order for someone else not to spoil to be operator
 	if lockedAmount == 0 && acc.OperationalAccount == false {
 		acc.OperationalAccount = operational
+		if operational {
+			acc.OperationalSince = stakingTime
+		}
 	}
 	acc.StakedBalance += amount
 	acc.LastStakeHeight = height
@@ -96,7 +103,7 @@ func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operat
 	sd := StakingDetail{
 		Amount:      amount,
 		Reward:      0,
-		LastUpdated: time.Now().Unix(),
+		LastUpdated: stakingTime,
 	}
 	// AC-C3: only lazily initialize the map when nil; never replace it, which
 	// would erase the staking history recorded at all other heights.
@@ -111,10 +118,11 @@ func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operat
 	copy(acc.DelegatedAccount[:], da.GetBytes())
 	copy(acc.Address[:], accb[:])
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
+	StakingAccounts[delegatedAccount].StakeChangedAt = stakingTime
 	return nil
 }
 
-func Unstake(accb []byte, amount int64, height int64, delegatedAccount int) error {
+func Unstake(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int) error {
 	if len(accb) != common.AddressLength {
 		return fmt.Errorf("wrong address length, must be %v", common.AddressLength)
 	}
@@ -176,10 +184,11 @@ func Unstake(accb []byte, amount int64, height int64, delegatedAccount int) erro
 	acc.LastStakeHeight = height
 	if acc.StakedBalance == 0 {
 		acc.OperationalAccount = false
+		acc.OperationalSince = 0
 	}
 	sd := StakingDetail{
 		Amount:      amount,
-		LastUpdated: time.Now().Unix(),
+		LastUpdated: stakingTime,
 	}
 	// AC-C3: only lazily initialize the map when nil; never replace it, which
 	// would erase the staking history recorded at all other heights.
@@ -192,6 +201,7 @@ func Unstake(accb []byte, amount int64, height int64, delegatedAccount int) erro
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
 
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
+	StakingAccounts[delegatedAccount].StakeChangedAt = stakingTime
 	return nil
 }
 
@@ -299,6 +309,8 @@ func (sa StakingAccount) Marshal() []byte {
 			buffer.Write(common.GetByteInt64(detail.LastUpdated))
 		}
 	}
+	// Appended for backward-compatible decoding of existing snapshots.
+	buffer.Write(common.GetByteInt64(sa.OperationalSince))
 
 	return buffer.Bytes()
 }
@@ -362,6 +374,9 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 
 		sa.StakingDetails[key] = details
 	}
+	if buffer.Len() >= 8 {
+		sa.OperationalSince = common.GetInt64FromByte(buffer.Next(8))
+	}
 	return nil
 }
 
@@ -382,6 +397,7 @@ func GetStakedInDelegatedAccount(n int) ([]Account, int64, Account) {
 		TransactionsRecipient: make([]common.Hash, 0),
 	}
 	accs := []Account{}
+	operatorSince := int64(0)
 	for _, sa := range StakingAccounts[n].AllStakingAccounts {
 		acc := Account{
 			Balance:               sa.StakedBalance,
@@ -393,8 +409,12 @@ func GetStakedInDelegatedAccount(n int) ([]Account, int64, Account) {
 			TransactionsRecipient: make([]common.Hash, 0),
 		}
 		copy(acc.Address[:], sa.Address[:])
-		if intAcc.Balance < sa.StakedBalance && sa.OperationalAccount {
+		if sa.OperationalAccount && (intAcc.Balance < sa.StakedBalance ||
+			(intAcc.Balance == sa.StakedBalance &&
+				(sa.OperationalSince < operatorSince ||
+					(sa.OperationalSince == operatorSince && bytes.Compare(sa.Address[:], intAcc.Address[:]) < 0)))) {
 			intAcc.Balance = sa.StakedBalance
+			operatorSince = sa.OperationalSince
 			copy(intAcc.Address[:], sa.Address[:])
 		}
 		sum += sa.StakedBalance

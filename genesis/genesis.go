@@ -165,6 +165,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 			DelegatedAccount:   delAddrb,
 			Address:            addrb,
 			OperationalAccount: stkTx.OperationalAccount,
+			OperationalSince:   genesis.Timestamp,
 			LockedInitBlock:    []int64{0},
 			LockedAmount:       []int64{stkTx.LockedAmount},
 			ReleasePerBlock:    []int64{stkTx.ReleasedPerBlock},
@@ -182,6 +183,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 			logger.GetLogger().Fatal("cannot decode pubkey from string in genesis block")
 		}
 		account.StakingAccounts[stkTx.DelegatedAccount].AllStakingAccounts[addrb] = as
+		account.StakingAccounts[stkTx.DelegatedAccount].StakeChangedAt = genesis.Timestamp
 	}
 	err := account.StoreStakingAccounts(0)
 	if err != nil {

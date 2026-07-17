@@ -46,6 +46,12 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 
 func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*transactionsPool.MerkleTree, error) {
 	blockHeight := newBlock.GetHeader().Height
+	if blockHeight > 0 && !account.IsTop128StakingNode(
+		mustDelegatedAccountID(newBlock.GetHeader().DelegatedAccount),
+		newBlock.GetHeader().OperatorAccount,
+	) {
+		return nil, fmt.Errorf("block producer is not an eligible top-128 staking node")
+	}
 	if newBlock.GetBlockSupply() > common.MaxTotalSupply {
 		return nil, fmt.Errorf("supply is too high")
 	}
@@ -172,6 +178,14 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 		}
 	}
 	return merkleTrie, nil
+}
+
+func mustDelegatedAccountID(address common.Address) int {
+	id, err := account.IntDelegatedAccountFromAddress(address)
+	if err != nil {
+		return -1
+	}
+	return id
 }
 
 func IsAllTransactions(block Block) [][]byte {
@@ -340,7 +354,7 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 		// 	return fmt.Errorf("transaction height is wrong: ProcessBlockTransfers")
 		// }
 
-		err = ProcessTransaction(poolTx, block.GetHeader().Height)
+		err = ProcessTransaction(poolTx, block.GetHeader().Height, block.GetBlockTimeStamp())
 		if err != nil {
 			// remove bad transaction from pool
 			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)

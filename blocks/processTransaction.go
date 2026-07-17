@@ -184,7 +184,7 @@ func ProcessMultiSignAndEscrow(tx transactionsDefinition.Transaction) error {
 	return nil
 }
 
-func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) error {
+func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blockTime int64) error {
 	fee, err := tx.CalcFee()
 	if err != nil {
 		return err
@@ -209,7 +209,7 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 
 			if tx.GetLockedAmount() > 0 {
 				if amount >= common.MinStakingUser {
-					err := account.Stake(addressRecipient.GetBytes(), amount, height, n, operational, tx.GetLockedAmount(), tx.GetReleasePerBlock())
+					err := account.Stake(addressRecipient.GetBytes(), amount, height, blockTime, n, operational, tx.GetLockedAmount(), tx.GetReleasePerBlock())
 					if err != nil {
 						return err
 					}
@@ -222,12 +222,12 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 				}
 			} else {
 				if amount >= common.MinStakingUser {
-					err := account.Stake(address.GetBytes(), amount, height, n, operational, 0, 0)
+					err := account.Stake(address.GetBytes(), amount, height, blockTime, n, operational, 0, 0)
 					if err != nil {
 						return err
 					}
 				} else if amount < 0 {
-					err := account.Unstake(address.GetBytes(), amount, height, n)
+					err := account.Unstake(address.GetBytes(), amount, height, blockTime, n)
 					if err != nil {
 						return err
 					}
