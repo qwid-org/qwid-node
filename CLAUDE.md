@@ -133,7 +133,7 @@ Genesis config: `~/.qwid/genesis/config/genesis.json` (copy from `genesis/config
 - Chain ID: 23
 - Block interval: 10 seconds
 - Max transactions per block: 5000
-- Max transaction pool: 10,000
+- Max transaction pool: 50,000
 - Max gas per block: 13,700,000
 - Max peers: 6
 - Decimals: 8

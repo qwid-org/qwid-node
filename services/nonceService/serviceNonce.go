@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/blocks"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
@@ -221,6 +222,27 @@ func sendNonceMsgInLoopSelf() {
 	}
 }
 
+// canProduce reports whether this node is currently an eligible block producer:
+// its operator pubkey is registered on-chain (so peers can verify the blocks it
+// signs) and it is a staked top-128 validator. A node that is not (yet) a
+// registered, staked validator must not emit nonces — peers cannot verify them
+// and would otherwise reject/ban us.
+func canProduce() bool {
+	w := wallet.GetActiveWallet()
+	if w == nil {
+		return false
+	}
+	operator := w.MainAddress
+	if _, err := pubkeys.LoadPubKeyWithPrimary(operator, true); err != nil {
+		return false
+	}
+	delID, err := account.IntDelegatedAccountFromAddress(common.GetDelegatedAccount())
+	if err != nil {
+		return false
+	}
+	return account.IsTop128StakingNode(delID, operator)
+}
+
 func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
 	h := common.GetHeight()
 	if h < common.CurrentHeightOfNetwork {
@@ -228,6 +250,9 @@ func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
 	}
 	isync := common.IsSyncing.Load()
 	if isync == true {
+		return false
+	}
+	if !canProduce() {
 		return false
 	}
 	n, err := generateNonceMsg(topic)
@@ -245,6 +270,9 @@ func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
 func sendNonceMsgSelf(ip [4]byte, topic [2]byte) bool {
 	h := common.GetHeight()
 	if h < common.CurrentHeightOfNetwork {
+		return false
+	}
+	if !canProduce() {
 		return false
 	}
 	n, err := generateNonceMsg(topic)

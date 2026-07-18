@@ -10,6 +10,7 @@ import (
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/message"
 	"github.com/wonabru/qwid-node/oracles"
+	"github.com/wonabru/qwid-node/pubkeys"
 	"github.com/wonabru/qwid-node/services"
 	"github.com/wonabru/qwid-node/services/transactionServices"
 	"github.com/wonabru/qwid-node/statistics"
@@ -72,6 +73,17 @@ func OnMessage(addr [4]byte, m []byte) {
 		//KU TEMP TODO
 		isValid = transaction.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
 		if isValid == false {
+			// Distinguish an unregistered/unknown sender (we may simply be behind,
+			// or the sender has not registered its pubkey on-chain yet) from a
+			// genuinely bad signature. Only the latter is malicious and warrants a
+			// ban; banning on a missing pubkey would ban our own sync source.
+			sender := transaction.GetSenderAddress()
+			sigb := transaction.GetSignature().GetBytes()
+			primary := len(sigb) > 0 && sigb[0] == 0
+			if _, perr := pubkeys.LoadPubKeyWithPrimary(sender, primary); perr != nil {
+				logger.GetLogger().Println("nonce from sender with unregistered pubkey, ignoring (not banning)")
+				return
+			}
 			logger.GetLogger().Println("nonce signature is invalid")
 			tcpip.ReduceAndCheckIfBanIP(addr)
 			return
