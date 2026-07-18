@@ -78,7 +78,7 @@ func UpdateAccountStats() {
 	uncRewards := 0.0
 	locks := 0.0
 	var stakeAccs [256]account.StakingAccount
-	for i := 1; i < 5; i++ { // should be 256
+	for i := 1; i < 256; i++ {
 		if MainWallet.Check() == false {
 			return
 		}

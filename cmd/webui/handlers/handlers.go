@@ -372,7 +372,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	locks := 0.0
 	stakingDetails := []StakingDetail{}
 
-	for i := 1; i < 5; i++ {
+	for i := 1; i < 256; i++ {
 		inb = append([]byte("STAK"), MainWallet.MainAddress.GetBytes()...)
 		inb = append(inb, byte(i))
 		re = clientrpc.Call(SignMessage(inb))
