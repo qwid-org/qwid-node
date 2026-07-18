@@ -227,20 +227,28 @@ func sendNonceMsgInLoopSelf() {
 // signs) and it is a staked top-128 validator. A node that is not (yet) a
 // registered, staked validator must not emit nonces — peers cannot verify them
 // and would otherwise reject/ban us.
+// isEligibleProducer is the testable core of canProduce: given the operator
+// address, its delegated-account id, and whether its pubkey is registered
+// on-chain, report whether it may produce blocks.
+func isEligibleProducer(operator common.Address, delID int, pubkeyRegistered bool) bool {
+	if !pubkeyRegistered {
+		return false
+	}
+	return account.IsTop128StakingNode(delID, operator)
+}
+
 func canProduce() bool {
 	w := wallet.GetActiveWallet()
 	if w == nil {
 		return false
 	}
 	operator := w.MainAddress
-	if _, err := pubkeys.LoadPubKeyWithPrimary(operator, true); err != nil {
-		return false
-	}
+	_, pkErr := pubkeys.LoadPubKeyWithPrimary(operator, true)
 	delID, err := account.IntDelegatedAccountFromAddress(common.GetDelegatedAccount())
 	if err != nil {
 		return false
 	}
-	return account.IsTop128StakingNode(delID, operator)
+	return isEligibleProducer(operator, delID, pkErr == nil)
 }
 
 func sendNonceMsg(ip [4]byte, topic [2]byte) bool {

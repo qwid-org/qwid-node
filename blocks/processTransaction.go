@@ -51,12 +51,12 @@ func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount in
 	}
 	amount := tx.TxData.Amount
 	address := tx.GetSenderAddress()
-	opacc := block.BaseBlock.BaseHeader.OperatorAccount
 	operational := len(tx.TxData.OptData) > 0
-	if bytes.Equal(address.GetBytes(), opacc.GetBytes()) && operational {
-		logger.GetLogger().Println("operational account cannot set transactions with set to be operational account second time: CheckStakingTransaction")
-		return false
-	}
+	// An operator including its own operational staking transaction is safe:
+	// account.Stake sets OperationalAccount only when it is currently false, so a
+	// redundant "operational" flag is a no-op. Rejecting it outright (as before)
+	// blocked a validator from adding stake in its own block and prevented a new
+	// operator from bootstrapping into operational status.
 	acc, exist := account.GetAccountByAddressBytes(address.GetBytes())
 	if !exist || !bytes.Equal(acc.Address[:], address.GetBytes()) {
 		logger.GetLogger().Println("no account found in check staking transaction: CheckStakingTransaction")
