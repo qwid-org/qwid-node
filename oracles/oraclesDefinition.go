@@ -28,7 +28,61 @@ var (
 
 	RandOracles        = make(map[uint8]RandOracle)
 	RandOraclesRWMutex sync.RWMutex
+
+	// oracleProofs retains the raw signed nonce-transaction bytes per delegated
+	// id so a block producer can embed them as provenance proofs for the
+	// aggregated oracle values.
+	oracleProofs        = make(map[uint8]oracleProof)
+	oracleProofsRWMutex sync.RWMutex
 )
+
+type oracleProof struct {
+	height  int64
+	txBytes []byte
+}
+
+// SaveOracleProof stores the signed nonce transaction backing a delegated
+// account's oracle submission, keeping only the most recent height (mirroring
+// SavePriceOracle/SaveRandOracle).
+func SaveOracleProof(delegatedAccount common.Address, height int64, txBytes []byte) error {
+	id, err := common.GetIDFromDelegatedAccountAddress(delegatedAccount)
+	if err != nil {
+		return err
+	}
+	if (id <= 0) || (id >= 256) {
+		return fmt.Errorf("delegated account is invalid: %d", id)
+	}
+	oracleProofsRWMutex.Lock()
+	defer oracleProofsRWMutex.Unlock()
+
+	p, exists := oracleProofs[uint8(id)]
+	if !exists || p.height <= height {
+		cp := make([]byte, len(txBytes))
+		copy(cp, txBytes)
+		oracleProofs[uint8(id)] = oracleProof{height: height, txBytes: cp}
+	}
+	return nil
+}
+
+// GenerateOracleProofs returns the stored proof transactions for delegated
+// accounts whose submission is still fresh at height, in strictly ascending id
+// order (matching GeneratePriceData/GenerateRandData).
+func GenerateOracleProofs(height int64) [][]byte {
+	oracleProofsRWMutex.RLock()
+	defer oracleProofsRWMutex.RUnlock()
+	ids := make([]uint8, 0, len(oracleProofs))
+	for id, p := range oracleProofs {
+		if height <= p.height+common.OraclesHeightDistance {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	out := make([][]byte, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, oracleProofs[id].txBytes)
+	}
+	return out
+}
 
 func SavePriceOracle(price int64, height int64, delegatedAccount common.Address, staked int64) error {
 	id, err := common.GetIDFromDelegatedAccountAddress(delegatedAccount)
@@ -88,8 +142,13 @@ func GeneratePriceData(height int64) ([]byte, []int64, int64) {
 	staked := int64(0)
 	PriceOraclesRWMutex.RLock()
 	defer PriceOraclesRWMutex.RUnlock()
-	for i, po := range PriceOracles {
-
+	ids := make([]uint8, 0, len(PriceOracles))
+	for i := range PriceOracles {
+		ids = append(ids, i)
+	}
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	for _, i := range ids {
+		po := PriceOracles[i]
 		if height <= po.Height+common.OraclesHeightDistance && po.Price > 0 {
 			priceData = append(priceData, i)
 			priceData = append(priceData, common.GetByteInt64(po.Height)...)
@@ -111,8 +170,16 @@ func ParsePriceData(priceData []byte) (map[uint8]PriceOracle, []int64, int64, er
 		return nil, nil, 0, fmt.Errorf("invalid priceData length: %d", dataLen)
 	}
 
+	prevID := -1
 	for i := 0; i < dataLen; i += 17 {
 		id := priceData[i]
+		// Require strictly ascending delegated ids. This makes the aggregation
+		// canonical (no producer-controlled ordering) and forbids repeating one
+		// id to inflate the represented stake past the 2/3 threshold.
+		if int(id) <= prevID {
+			return nil, nil, 0, fmt.Errorf("priceData delegated ids must be strictly ascending, got %d after %d", id, prevID)
+		}
+		prevID = int(id)
 		height := common.GetInt64FromByte(priceData[i+1 : i+9])
 		price := common.GetInt64FromByte(priceData[i+9 : i+17])
 		prices = append(prices, price)
@@ -138,8 +205,16 @@ func ParseRandData(randData []byte) (map[uint8]RandOracle, []byte, int64, error)
 		return nil, nil, 0, fmt.Errorf("invalid randData length: %d", dataLen)
 	}
 
+	prevID := -1
 	for i := 0; i < dataLen; i += 17 {
 		id := randData[i]
+		// Require strictly ascending delegated ids so the hashed proposal order
+		// is canonical (removes producer ordering-grinding on the randomness) and
+		// no id can be repeated to inflate the represented stake.
+		if int(id) <= prevID {
+			return nil, nil, 0, fmt.Errorf("randData delegated ids must be strictly ascending, got %d after %d", id, prevID)
+		}
+		prevID = int(id)
 		height := common.GetInt64FromByte(randData[i+1 : i+9])
 		rand := common.GetInt64FromByte(randData[i+9 : i+17])
 		rands = append(rands, randData[i+9:i+17]...)
@@ -161,7 +236,13 @@ func GenerateRandData(height int64) ([]byte, []byte, int64) {
 	staked := int64(0)
 	RandOraclesRWMutex.RLock()
 	defer RandOraclesRWMutex.RUnlock()
-	for i, po := range RandOracles {
+	ids := make([]uint8, 0, len(RandOracles))
+	for i := range RandOracles {
+		ids = append(ids, i)
+	}
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	for _, i := range ids {
+		po := RandOracles[i]
 		if height <= po.Height+common.OraclesHeightDistance && po.Rand > 0 {
 			randData = append(randData, i)
 			randData = append(randData, common.GetByteInt64(po.Height)...)

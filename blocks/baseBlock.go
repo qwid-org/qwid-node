@@ -33,6 +33,43 @@ type BaseBlock struct {
 	RandOracle       int64       `json:"rand_oracle"`
 	PriceOracleData  []byte      `json:"price_oracle_data"`
 	RandOracleData   []byte      `json:"rand_oracle_data"`
+	// OracleProofs carries the signed oracle nonce transactions backing the
+	// PriceOracleData/RandOracleData entries, so validators can re-verify their
+	// provenance instead of trusting the producer's reconstructed triples.
+	OracleProofs [][]byte `json:"oracle_proofs"`
+}
+
+// bytesSliceToBytes length-prefixes a slice of byte slices for block encoding.
+func bytesSliceToBytes(items [][]byte) []byte {
+	out := common.GetByteInt32(int32(len(items)))
+	for _, it := range items {
+		out = append(out, common.BytesToLenAndBytes(it)...)
+	}
+	return out
+}
+
+// bytesSliceFromBytes reverses bytesSliceToBytes, returning the decoded items
+// and the remaining bytes.
+func bytesSliceFromBytes(b []byte) ([][]byte, []byte, error) {
+	if len(b) < 4 {
+		return nil, nil, fmt.Errorf("not enough bytes to decode byte-slice length")
+	}
+	n := common.GetInt32FromByte(b[:4])
+	b = b[4:]
+	if n < 0 {
+		return nil, nil, fmt.Errorf("negative byte-slice count: %d", n)
+	}
+	items := make([][]byte, 0, n)
+	for i := int32(0); i < n; i++ {
+		var it []byte
+		var err error
+		it, b, err = common.BytesWithLenToBytes(b)
+		if err != nil {
+			return nil, nil, err
+		}
+		items = append(items, it)
+	}
+	return items, b, nil
 }
 
 func FromBytesToEncryptionConfig(bb []byte, primary bool) (oqs.ConfigEnc, error) {
@@ -203,6 +240,7 @@ func (bb *BaseBlock) GetBytes() []byte {
 	b = append(b, common.GetByteInt64(bb.RandOracle)...)
 	b = append(b, common.BytesToLenAndBytes(bb.PriceOracleData)...)
 	b = append(b, common.BytesToLenAndBytes(bb.RandOracleData)...)
+	b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
 	return b
 }
 
@@ -226,6 +264,10 @@ func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
 		return nil, err
 	}
 	bb.RandOracleData, b, err = common.BytesWithLenToBytes(b[:])
+	if err != nil {
+		return nil, err
+	}
+	bb.OracleProofs, b, err = bytesSliceFromBytes(b[:])
 	if err != nil {
 		return nil, err
 	}

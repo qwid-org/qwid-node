@@ -160,6 +160,12 @@ func main() {
 	// Initialize statistics
 	statistics.InitStatsManager()
 
+	// Restore pending escrow transactions so a restart between an escrow's
+	// acceptance and its maturity still settles it (avoids consensus divergence).
+	if err := transactionsPool.LoadEscrowPoolFromDB(); err != nil {
+		logger.GetLogger().Println("could not load persisted escrow pool", err)
+	}
+
 	//Load Main Blockchain
 	services.SetBlockHeightAfterCheck()
 

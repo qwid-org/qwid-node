@@ -25,6 +25,38 @@ func buildMinimalBaseHeader() BaseHeader {
 	}
 }
 
+func TestBaseBlockOracleProofsRoundTrip(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+
+	orig := BaseBlock{
+		BaseHeader:       buildMinimalBaseHeader(),
+		BlockHeaderHash:  common.Hash{},
+		BlockTimeStamp:   1000,
+		RewardPercentage: 200,
+		Supply:           123,
+		PriceOracle:      100000000,
+		RandOracle:       777,
+		PriceOracleData:  []byte{2, 0, 0, 0, 0, 0, 0, 0, 10},
+		RandOracleData:   []byte{5, 0, 0, 0, 0, 0, 0, 0, 20},
+		OracleProofs:     [][]byte{{1, 2, 3}, {}, {9, 9, 9, 9}},
+	}
+
+	// A trailing marker stands in for the bytes Block.GetFromBytes consumes after
+	// the BaseBlock, so we can confirm GetFromBytes leaves exactly the remainder.
+	encoded := orig.GetBytes()
+	trailer := []byte{0xAA, 0xBB}
+	encoded = append(encoded, trailer...)
+
+	var decoded BaseBlock
+	rest, err := decoded.GetFromBytes(encoded)
+	assert.NoError(t, err)
+	assert.Equal(t, orig.OracleProofs, decoded.OracleProofs)
+	assert.Equal(t, orig.PriceOracleData, decoded.PriceOracleData)
+	assert.Equal(t, orig.RandOracleData, decoded.RandOracleData)
+	assert.Equal(t, trailer, rest, "GetFromBytes must consume exactly the BaseBlock bytes")
+}
+
 func TestBaseHeaderGetBytesWithoutSignature(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()

@@ -107,6 +107,12 @@ func OnMessage(addr [4]byte, m []byte) {
 		if err != nil {
 			logger.GetLogger().Println("could not save rand oracle", err)
 		}
+		// Retain the signed nonce transaction so it can be embedded in the block
+		// as a provenance proof for the oracle values above.
+		err = oracles.SaveOracleProof(txDelAcc, nonceHeight, transaction.GetBytes())
+		if err != nil {
+			logger.GetLogger().Println("could not save oracle proof", err)
+		}
 
 		vb, b2, err := common.BytesWithLenToBytes(optData[16:])
 		if err != nil {

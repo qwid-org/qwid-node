@@ -96,6 +96,14 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
 		return nil, fmt.Errorf("rand oracle check fails")
 	}
+	// Bind the embedded oracle values to signed nonce transactions: every price
+	// and rand entry must be backed by a signature-verified, fresh proof so a
+	// producer cannot fabricate values attributed to other validators.
+	if blockHeight > 0 {
+		if err := AuthenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData); err != nil {
+			return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
+		}
+	}
 	if len(newBlock.BaseBlock.BaseHeader.Encryption1[:]) == 0 || len(newBlock.BaseBlock.BaseHeader.Encryption2[:]) == 0 {
 		return nil, fmt.Errorf("encryption opt data should be always present in block")
 	}
@@ -109,6 +117,17 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	err = validateBlockTimestamp(newBlock, lastBlock, forceShouldCheck)
 	if err != nil {
 		return nil, err
+	}
+	// Recompute the expected difficulty from the parent block and the committed
+	// timestamps and reject any block that declares a different value. Without
+	// this a producer could declare an arbitrarily low difficulty (consensus).
+	if blockHeight > 0 && !ValidDifficulty(
+		newBlock.GetHeader().Difficulty,
+		lastBlock.GetHeader().Difficulty,
+		lastBlock.GetBlockTimeStamp(),
+		newBlock.GetBlockTimeStamp(),
+	) {
+		return nil, fmt.Errorf("declared difficulty does not match expected difficulty derived from parent block")
 	}
 	if !common.IsSyncing.Load() && !bytes.Equal(newBlock.BaseBlock.BaseHeader.Encryption1[:], lastBlock.BaseBlock.BaseHeader.Encryption1[:]) {
 		enc1, err := FromBytesToEncryptionConfig(newBlock.BaseBlock.BaseHeader.Encryption1[:], true)

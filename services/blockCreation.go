@@ -79,8 +79,10 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	reward := account.GetReward(lastBlock.GetBlockSupply())
 	supply := lastBlock.GetBlockSupply() + reward
 
-	sendingTimeTransaction := nonceTx[0].GetParam().SendingTime
-	ti := sendingTimeTransaction - lastBlock.GetBlockTimeStamp()
+	// Derive difficulty from the block's own committed timestamp relative to the
+	// parent so validators can recompute and verify it (see blocks.ValidDifficulty).
+	blockTimeStamp := common.GetCurrentTimeStampInSecond()
+	ti := blockTimeStamp - lastBlock.GetBlockTimeStamp()
 	bblock := lastBlock.GetBaseBlock()
 	diff := blocks.AdjustDifficulty(bblock.BaseHeader.Difficulty, ti)
 	sendingTimeMessage := common.GetByteInt64(nonceTx[0].GetParam().SendingTime)
@@ -120,13 +122,14 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	bb := blocks.BaseBlock{
 		BaseHeader:       bh,
 		BlockHeaderHash:  bhHash,
-		BlockTimeStamp:   common.GetCurrentTimeStampInSecond(),
+		BlockTimeStamp:   blockTimeStamp,
 		RewardPercentage: common.GetMyRewardPercentage(),
 		Supply:           supply,
 		PriceOracle:      priceOracle,
 		RandOracle:       randOracle,
 		PriceOracleData:  priceOracleData,
 		RandOracleData:   randOracleData,
+		OracleProofs:     oracles.GenerateOracleProofs(heightTransaction),
 	}
 
 	bl := blocks.Block{

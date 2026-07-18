@@ -231,7 +231,7 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 		if err := AddBalance(address.ByteValue, -fee); err != nil {
 			return err
 		}
-		transactionsPool.PoolTxEscrow.RemoveTransactionByHash(targetHash.GetBytes())
+		transactionsPool.RemoveEscrowTransaction(targetHash.GetBytes())
 		transactionsPool.PoolTxEscrow.BanTransactionByHash(targetHash.GetBytes())
 		return nil
 	}
@@ -324,7 +324,7 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 		}
 		if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 			tx.Height = height
-			transactionsPool.PoolTxEscrow.AddTransaction(tx, tx.Hash)
+			transactionsPool.AddEscrowTransaction(tx)
 
 		} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 			//TODO MultiSignNumber
@@ -519,14 +519,14 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 				logger.GetLogger().Printf("  escrow tx[%d]: moving to multisign pool", i)
 				if transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.Hash) {
-					transactionsPool.PoolTxEscrow.RemoveTransactionByHash(tx.Hash.GetBytes())
+					transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				}
 			} else {
 				logger.GetLogger().Printf("  escrow tx[%d]: EXECUTING (delay passed or no delay)", i)
 				if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 					transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.TxParam.MultiSignTx)
 				}
-				transactionsPool.PoolTxEscrow.RemoveTransactionByHash(tx.Hash.GetBytes())
+				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				err = AddBalance(address.ByteValue, -amount)
 				if err != nil {
 					// this can happen very rare. Only when escrow is multisign account

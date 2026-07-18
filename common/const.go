@@ -105,6 +105,7 @@ var (
 	TokenDetailsDBPrefix             = [2]byte{'T', 'D'}
 	DexAccountsDBPrefix              = [2]byte{'D', 'A'}
 	BadTransactionDBPrefix           = [2]byte{'B', 'T'}
+	EscrowPoolDBPrefix               = [2]byte{'E', 'P'}
 )
 
 var chainID = int16(23)

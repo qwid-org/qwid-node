@@ -113,6 +113,41 @@ func TestValidProof(t *testing.T) {
 	})
 }
 
+func TestValidDifficulty(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+
+	const parentDifficulty = int32(1000)
+	const parentTime = int64(1_000_000)
+
+	t.Run("declared difficulty matching the expected value is accepted", func(t *testing.T) {
+		// normal interval keeps difficulty unchanged
+		newTime := parentTime + int64(common.BlockTimeInterval)
+		assert.True(t, ValidDifficulty(parentDifficulty, parentDifficulty, parentTime, newTime))
+	})
+
+	t.Run("declared difficulty lower than expected is rejected", func(t *testing.T) {
+		// The attack the review describes: a producer declares an arbitrarily
+		// low difficulty for a normal-interval block to weaken proof-of-work.
+		newTime := parentTime + int64(common.BlockTimeInterval)
+		forged := parentDifficulty - 10*int32(common.DifficultyChange)
+		assert.False(t, ValidDifficulty(forged, parentDifficulty, parentTime, newTime))
+	})
+
+	t.Run("correctly decreased difficulty for a slow block is accepted", func(t *testing.T) {
+		newTime := parentTime + int64(float64(common.BlockTimeInterval)*1.5+1)
+		expected := parentDifficulty - int32(common.DifficultyChange)
+		assert.True(t, ValidDifficulty(expected, parentDifficulty, parentTime, newTime))
+	})
+
+	t.Run("stale decreased difficulty for a fast block is rejected", func(t *testing.T) {
+		// Fast block must increase difficulty; declaring a decreased value fails.
+		newTime := parentTime + int64(float64(common.BlockTimeInterval)/2.0-1)
+		forged := parentDifficulty - int32(common.DifficultyChange)
+		assert.False(t, ValidDifficulty(forged, parentDifficulty, parentTime, newTime))
+	})
+}
+
 func TestCheckProofOfSynergy(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
