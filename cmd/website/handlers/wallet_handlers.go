@@ -81,35 +81,42 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	locks := 0.0
 	stakingDetails := []StakingDetail{}
 
-	for i := 1; i < 256; i++ {
-		inb = append([]byte("STAK"), wl.MainAddress.GetBytes()...)
-		inb = append(inb, byte(i))
-		re = clientrpc.Call(SignMessage(inb))
-		if bytes.Equal(re, []byte("Timeout")) {
-			continue
-		}
+	// One ACCS call returns the stake across all delegated accounts at once.
+	inb = append([]byte("ACCS"), wl.MainAddress.GetBytes()...)
+	re = clientrpc.Call(SignMessage(inb))
+	if !bytes.Equal(re, []byte("Timeout")) && len(re) >= 4 {
+		count := int(common.GetInt32FromByte(re[:4]))
+		b := re[4:]
+		for j := 0; j < count; j++ {
+			blob, rest, err := common.BytesWithLenToBytes(b)
+			if err != nil {
+				break
+			}
+			b = rest
+			if len(blob) < 8 {
+				continue
+			}
+			var stakeAcc account.StakingAccount
+			if err := stakeAcc.Unmarshal(blob[:len(blob)-8]); err != nil {
+				continue
+			}
+			stakedAmount := account.Int64toFloat64(stakeAcc.StakedBalance)
+			rewardsAmount := account.Int64toFloat64(stakeAcc.StakingRewards)
+			lockedAmount := account.Int64toFloat64(common.GetInt64FromByte(blob[len(blob)-8:]))
 
-		var stakeAcc account.StakingAccount
-		if err := stakeAcc.Unmarshal(re[:len(re)-8]); err != nil {
-			continue
-		}
+			stake += stakedAmount
+			rewards += rewardsAmount
+			locks += lockedAmount
 
-		stakedAmount := account.Int64toFloat64(stakeAcc.StakedBalance)
-		rewardsAmount := account.Int64toFloat64(stakeAcc.StakingRewards)
-		lockedAmount := account.Int64toFloat64(common.GetInt64FromByte(re[len(re)-8:]))
-
-		stake += stakedAmount
-		rewards += rewardsAmount
-		locks += lockedAmount
-
-		if stakeAcc.StakedBalance > 0 || stakeAcc.StakingRewards > 0 {
-			a := common.Address{}
-			a.Init(stakeAcc.DelegatedAccount[:])
-			stakingDetails = append(stakingDetails, StakingDetail{
-				DelegatedAddress: a.GetHex(),
-				Staked:           stakedAmount,
-				Rewards:          rewardsAmount,
-			})
+			if stakeAcc.StakedBalance > 0 || stakeAcc.StakingRewards > 0 {
+				a := common.Address{}
+				a.Init(stakeAcc.DelegatedAccount[:])
+				stakingDetails = append(stakingDetails, StakingDetail{
+					DelegatedAddress: a.GetHex(),
+					Staked:           stakedAmount,
+					Rewards:          rewardsAmount,
+				})
+			}
 		}
 	}
 

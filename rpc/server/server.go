@@ -170,6 +170,8 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 		handleDETS(byt, reply)
 	case "STAK":
 		handleSTAK(byt, reply)
+	case "ACCS":
+		handleACCS(byt, reply)
 	case "ADEX":
 		handleADEX(byt, reply)
 	case "LTKN":
@@ -517,18 +519,46 @@ func handleSTAK(line []byte, reply *[]byte) {
 	*reply = append(am, common.GetByteInt64(locked)...)
 }
 
-//func handleACCS(line []byte, reply *[]byte) {
-//
-//	byt := [common.AddressLength]byte{}
-//	copy(byt[:], line[:common.AddressLength])
-//	for i:=0;i<256;i++ {
-//		if common.ContainsKeyInMap(account.StakingAccounts[i].AllStakingAccounts, byt) {
-//			acc := account.StakingAccounts[i].AllStakingAccounts[byt]
-//			am := acc.Marshal()
-//		}
-//	}
-//	*reply = am
-//}
+// handleACCS returns an address's staking accounts across ALL delegated accounts
+// in a single response, so clients need one RPC instead of 255 STAK calls.
+// Response: a 4-byte little-endian entry count, then per entry a length-prefixed
+// blob = marshaled StakingAccount followed by its 8-byte locked amount.
+func handleACCS(line []byte, reply *[]byte) {
+	if len(line) < common.AddressLength {
+		*reply = []byte("invalid ACCS request length")
+		return
+	}
+	byt := [common.AddressLength]byte{}
+	copy(byt[:], line[:common.AddressLength])
+
+	// StakingDetails is a map, so Marshal must run under the read lock (see
+	// handleSTAK). GetLockedAmount takes the lock itself, so collect the marshaled
+	// accounts first and query locked amounts after releasing the lock.
+	type stakeEntry struct {
+		id        int
+		marshaled []byte
+	}
+	entries := []stakeEntry{}
+	account.StakingRWMutex.RLock()
+	for i := 1; i < 256; i++ {
+		acc := account.StakingAccounts[i].AllStakingAccounts[byt]
+		if acc.StakedBalance > 0 || acc.StakingRewards > 0 {
+			entries = append(entries, stakeEntry{id: i, marshaled: acc.Marshal()})
+		}
+	}
+	account.StakingRWMutex.RUnlock()
+
+	h := common.GetHeight()
+	out := common.GetByteInt32(int32(len(entries)))
+	for _, e := range entries {
+		locked, _ := account.GetLockedAmount(byt[:], h, e.id)
+		blob := make([]byte, 0, len(e.marshaled)+8)
+		blob = append(blob, e.marshaled...)
+		blob = append(blob, common.GetByteInt64(locked)...)
+		out = append(out, common.BytesToLenAndBytes(blob)...)
+	}
+	*reply = out
+}
 
 func handleTRAN(byt []byte, reply *[]byte) {
 
