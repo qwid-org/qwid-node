@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,18 @@ import (
 	"github.com/wonabru/qwid-node/wallet"
 	"golang.org/x/crypto/hkdf"
 )
+
+// isHandshakeProtocolViolation separates authenticated protocol abuse from
+// ordinary transport failures. EOF, reset, timeout and broken pipe are normal
+// network conditions and must never ban an otherwise valid peer.
+func isHandshakeProtocolViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "signature invalid") ||
+		strings.Contains(msg, "frame length") && strings.Contains(msg, "exceeds")
+}
 
 var handshakeDomainTag = []byte("QWID-P2P-HS-v1")
 

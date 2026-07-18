@@ -212,8 +212,6 @@ func StartSubscribingTransactionMsg(ip [4]byte) {
 		case <-tcpip.Quit:
 			logger.GetLogger().Printf("Received quit signal for peer %v", ip)
 			services.QUIT.Store(true)
-		default:
-			time.Sleep(time.Millisecond * 100) // Reduced sleep time
 		}
 	}
 }

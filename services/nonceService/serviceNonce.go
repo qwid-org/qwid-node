@@ -375,9 +375,6 @@ func StartSubscribingNonceMsg(ip [4]byte) {
 			}
 		case <-tcpip.Quit:
 			services.QUIT.Store(true)
-		default:
-			// Optional: Add a small sleep to prevent busy-waiting
-			time.Sleep(time.Millisecond)
 		}
 	}
 }

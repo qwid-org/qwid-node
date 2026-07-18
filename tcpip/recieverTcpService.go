@@ -26,6 +26,11 @@ var (
 	PeersCount          = 0
 	waitChan            = make(chan []byte)
 	tcpConnections      = make(map[[2]byte]map[[4]byte]net.Conn)
+	// acceptedConnections identifies entries installed by the listener.  An
+	// outbound connection may temporarily occupy tcpConnections until the peer's
+	// matching inbound stream arrives; replacing that entry must not close the
+	// outbound stream because its receive loop is still using it.
+	acceptedConnections = make(map[[2]byte]map[[4]byte]net.Conn)
 	PeersMutex          = &sync.RWMutex{}
 	Quit                chan os.Signal
 	TransactionTopic    = [2]byte{'T', 'T'}
@@ -56,6 +61,7 @@ func init() {
 	logger.GetLogger().Println("Discover MyIP: ", MyIP)
 	for k := range Ports {
 		tcpConnections[k] = map[[4]byte]net.Conn{}
+		acceptedConnections[k] = map[[4]byte]net.Conn{}
 	}
 	// Get NODE_IP environment variable
 	ips := os.Getenv("NODE_IP")
@@ -227,13 +233,11 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 	if hsErr != nil {
 		logger.GetLogger().Println("inbound handshake failed:", hsErr)
 		tcpConn.Close()
-		// NP-C3: a failed handshake is an unambiguous bad-signature/protocol
-		// violation signal (no benign cause), so ban immediately instead of
-		// the softer ReduceTrustRegisterPeer, which is a no-op for a
-		// first-contact IP not yet in validPeersConnected. BanIP takes its
-		// own locks (TryLocks PeersMutex), so it must not be called while
-		// holding PeersMutex.
-		BanIP(ip)
+		// Ban only authenticated protocol abuse. A peer that disconnects during
+		// handshake may simply have restarted or lost connectivity.
+		if isHandshakeProtocolViolation(hsErr) {
+			BanIP(ip)
+		}
 		return nil, fmt.Errorf("inbound handshake failed: %w", hsErr)
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
@@ -425,7 +429,13 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 		tcpConnections[topic] = make(map[[4]byte]net.Conn)
 	}
 
-	// Check if we already have a connection for this peer
+	if _, ok := acceptedConnections[topic]; !ok {
+		acceptedConnections[topic] = make(map[[4]byte]net.Conn)
+	}
+
+	// Replace only an older accepted/send stream. The generic map can currently
+	// contain the peer's outbound/read stream; closing it here caused the
+	// handshake -> EOF -> reconnect -> ban storm during simultaneous dialing.
 	if oldConn, ok := tcpConnections[topic][ip]; ok {
 		// For a self/loopback connection (the genesis node dialing its own
 		// listener, e.g. the self-nonce topic) the "old" entry is the dial-side
@@ -435,7 +445,7 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 		// live receive loop and send both ends into an endless reconnect loop.
 		// So only close a genuinely distinct old connection to a remote peer;
 		// for self, just replace the map value (LoopSend then writes to A).
-		if !isSelfIP(ip) {
+		if previousAccepted, accepted := acceptedConnections[topic][ip]; accepted && oldConn == previousAccepted && oldConn != tcpConn && !isSelfIP(ip) {
 			// Close the old connection before replacing it, so the other node's
 			// outbound receive loop gets a clean EOF instead of lingering and
 			// triggering repeated reconnections.
@@ -445,6 +455,7 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 
 	// Register the accepted connection for sending
 	tcpConnections[topic][ip] = tcpConn
+	acceptedConnections[topic][ip] = tcpConn
 	peersConnected[topicipBytes] = topic
 	validPeersConnected[ip] = common.ConnectionMaxTries
 	nodePeersConnected[ip] = common.ConnectionMaxTries

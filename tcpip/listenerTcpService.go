@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/wonabru/qwid-node/common"
@@ -12,6 +13,33 @@ import (
 )
 
 var ChanPeer = make(chan []byte, 50)
+
+var (
+	dialingMutex sync.Mutex
+	dialing      = make(map[[6]byte]struct{})
+)
+
+func beginDial(topic [2]byte, ip [4]byte) bool {
+	var key [6]byte
+	copy(key[:2], topic[:])
+	copy(key[2:], ip[:])
+	dialingMutex.Lock()
+	defer dialingMutex.Unlock()
+	if _, exists := dialing[key]; exists {
+		return false
+	}
+	dialing[key] = struct{}{}
+	return true
+}
+
+func endDial(topic [2]byte, ip [4]byte) {
+	var key [6]byte
+	copy(key[:2], topic[:])
+	copy(key[2:], ip[:])
+	dialingMutex.Lock()
+	delete(dialing, key)
+	dialingMutex.Unlock()
+}
 
 func StartNewListener(topic [2]byte) {
 
@@ -113,6 +141,24 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 }
 
 func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
+	if !beginDial(topic, ip) {
+		logger.GetLogger().Printf("connection already active or pending for topic %c%c peer %v", topic[0], topic[1], ip)
+		select {
+		case receiveChan <- []byte("EXIT"):
+		default:
+		}
+		return
+	}
+	defer endDial(topic, ip)
+	// Every terminal path must release the subscriber. Previously resolve,
+	// rate-limit, dial and handshake failures returned silently, leaving a busy
+	// subscriber goroutine behind and enabling overlapping retry lifecycles.
+	defer func() {
+		select {
+		case receiveChan <- []byte("EXIT"):
+		default:
+		}
+	}()
 	ipport := fmt.Sprintf("%d.%d.%d.%d:%d", ip[0], ip[1], ip[2], ip[3], Ports[topic])
 	if bytes.Equal(ip[:], []byte{127, 0, 0, 1}) {
 		ipport = fmt.Sprintf(":%d", Ports[topic])
@@ -139,15 +185,6 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		logger.GetLogger().Printf("Connection attempt %d to %s failed: %v", i+1, ipport, err)
 
 		time.Sleep(time.Second * 2)
-		PeersMutex.Lock()
-		ReduceTrustRegisterPeer(ip)
-		trust, ok := validPeersConnected[ip]
-		PeersMutex.Unlock()
-		if ok && trust <= 0 {
-			BanIP(ip)
-		} else if i == maxRetries-1 {
-			BanIP(ip)
-		}
 
 	}
 
@@ -173,13 +210,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	if hsErr != nil {
 		logger.GetLogger().Println("outbound handshake failed with", ipport, ":", hsErr)
 		tcpConn.Close()
-		// NP-C3: a failed handshake is an unambiguous bad-signature/protocol
-		// violation signal (no benign cause), so ban immediately instead of
-		// the softer ReduceTrustRegisterPeer, which is a no-op for a
-		// first-contact IP not yet in validPeersConnected. BanIP respects the
-		// whitelist and takes its own locks, so it must not be called while
-		// holding PeersMutex.
-		BanIP(ip)
+		// Only authenticated protocol abuse is bannable. EOF, reset and timeout
+		// are ordinary transport failures and end this lifecycle without a ban.
+		if isHandshakeProtocolViolation(hsErr) {
+			BanIP(ip)
+		}
 		return
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
@@ -267,7 +302,6 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		}
 	}()
 
-
 	rTopic := map[[2]byte][]byte{}
 
 	for {
@@ -302,7 +336,9 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					if _, sKeys, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
 						logger.GetLogger().Println("re-dial handshake failed with", ipport, ":", hsErr)
 						tcpConn.Close()
-						BanIP(ip)
+						if isHandshakeProtocolViolation(hsErr) {
+							BanIP(ip)
+						}
 						receiveChan <- []byte("EXIT")
 						return
 					} else {
@@ -429,6 +465,9 @@ func CloseAndRemoveConnection(tcpConn net.Conn) [][]byte {
 				tcpConn.Close()
 				copy(topicipBytes[:], append(topic[:], peerIP[:]...))
 				delete(tcpConnections[topic], peerIP)
+				if accepted, ok := acceptedConnections[topic][peerIP]; ok && accepted == tcpConn {
+					delete(acceptedConnections[topic], peerIP)
+				}
 				delete(peersConnected, topicipBytes)
 				delete(oldPeers, topicipBytes)
 				// If no more topic connections remain for this IP, remove from peer maps
