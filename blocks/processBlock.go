@@ -44,14 +44,32 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 	return nil
 }
 
-func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*transactionsPool.MerkleTree, error) {
+// VerifyStakeDependent runs the block checks that depend on the staking snapshot
+// — the top-128 producer eligibility and the oracle 2/3-stake thresholds. It must
+// be called at block-application time, when the in-memory staking state reflects
+// height-1 (the block's parent). Running these inside CheckBaseBlock was wrong for
+// batched sync, where every batched block was verified against the same start-of-
+// batch snapshot instead of its own parent's.
+func VerifyStakeDependent(newBlock Block) error {
 	blockHeight := newBlock.GetHeader().Height
 	if blockHeight > 0 && !account.IsTop128StakingNode(
 		mustDelegatedAccountID(newBlock.GetHeader().DelegatedAccount),
 		newBlock.GetHeader().OperatorAccount,
 	) {
-		return nil, fmt.Errorf("block producer is not an eligible top-128 staking node")
+		return fmt.Errorf("block producer is not an eligible top-128 staking node")
 	}
+	totalStaked := account.GetStakedInAllDelegatedAccounts()
+	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
+		return fmt.Errorf("price oracle check fails")
+	}
+	if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
+		return fmt.Errorf("rand oracle check fails")
+	}
+	return nil
+}
+
+func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*transactionsPool.MerkleTree, error) {
+	blockHeight := newBlock.GetHeader().Height
 	if newBlock.GetBlockSupply() > common.MaxTotalSupply {
 		return nil, fmt.Errorf("supply is too high")
 	}
@@ -85,17 +103,10 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	if newBlock.GetHeader().Height > 0 && !bytes.Equal(merkleTrie.GetRootHash(), rootMerkleTrie.GetBytes()) {
 		return nil, fmt.Errorf("root merkleTrie hash check fails")
 	}
-	totalStaked := account.GetStakedInAllDelegatedAccounts()
-	// AC-C4 (CONSENSUS): verify oracles even while syncing. The checks are
-	// deterministic in the block's own oracle data and the replay-reconstructed
-	// staked total, so legitimately produced blocks still pass, while a malicious
-	// sync peer can no longer inject blocks with fabricated oracle values.
-	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
-		return nil, fmt.Errorf("price oracle check fails")
-	}
-	if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
-		return nil, fmt.Errorf("rand oracle check fails")
-	}
+	// NOTE: the oracle 2/3-stake thresholds and the top-128 producer check depend
+	// on the staking snapshot and are enforced in VerifyStakeDependent at block-
+	// application time (see its doc comment). Only the stake-independent proof
+	// authentication below stays here, so it still runs during batched sync.
 	// Bind the embedded oracle values to signed nonce transactions: every price
 	// and rand entry must be backed by a signature-verified, fresh proof so a
 	// producer cannot fabricate values attributed to other validators.
@@ -114,6 +125,9 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	if forceShouldCheck == false {
 		shouldCheck = false
 	}
+	// totalStaked is used by the encryption pause/replace voting checks below,
+	// which only run when shouldCheck is true (the live path, correct snapshot).
+	totalStaked := account.GetStakedInAllDelegatedAccounts()
 	err = validateBlockTimestamp(newBlock, lastBlock, forceShouldCheck)
 	if err != nil {
 		return nil, err
@@ -492,6 +506,11 @@ func EvaluateSmartContracts(bl *Block) bool {
 func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *transactionsPool.MerkleTree, checkFinal bool) error {
 
 	defer RemoveAllTransactionsRelatedToBlock(*newBlock)
+	// Stake-snapshot-dependent checks, run against the parent (height-1) state
+	// that is in memory before this block's transactions are applied.
+	if err := VerifyStakeDependent(*newBlock); err != nil {
+		return err
+	}
 	n, err := account.IntDelegatedAccountFromAddress(newBlock.GetHeader().DelegatedAccount)
 	if err != nil || n < 1 || n > 255 {
 		return fmt.Errorf("wrong delegated account: CheckBlockAndTransactions")
@@ -544,6 +563,11 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *transactionsPool.MerkleTree, checkWhenNotSync bool) error {
 
 	defer RemoveAllTransactionsRelatedToBlock(*newBlock)
+	// Stake-snapshot-dependent checks, run against the parent (height-1) state
+	// that is in memory before this block's transactions are applied.
+	if err := VerifyStakeDependent(*newBlock); err != nil {
+		return err
+	}
 	n, err := account.IntDelegatedAccountFromAddress(newBlock.GetHeader().DelegatedAccount)
 	if err != nil || n < 1 || n > 255 {
 		return fmt.Errorf("wrong delegated account: CheckBlockAndTransferFunds")
