@@ -23,7 +23,7 @@ var (
 	BlockTimeInterval              float32 = 10 // 10 sec.
 	MaxBlockTimeInterval           int64   = 2000
 	MinNumberOfBlocksInStake       int64   = 36
-	MaxBlockForwardInTime          int64   = 60
+	MaxBlockForwardInTime          int64   = 15
 	DifficultyChange               float32 = 10
 	MaxGasUsage                    int64   = 13700000 // circa 6.5k transactions in block
 	MaxGasPrice                    int64   = 100000

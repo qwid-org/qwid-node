@@ -3,11 +3,11 @@ package transactionsPool
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/database"
 	"github.com/wonabru/qwid-node/logger"
 	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/stretchr/testify/assert"
 )
 
 // buildEscrowTx returns a serializable delayed transaction for persistence tests.
@@ -53,11 +53,19 @@ func withInMemoryDB(t *testing.T) func() {
 	}
 }
 
+func allowSyntheticEscrowSignatures(t *testing.T) {
+	t.Helper()
+	saved := verifyPersistedEscrow
+	verifyPersistedEscrow = func(*transactionsDefinition.Transaction) bool { return true }
+	t.Cleanup(func() { verifyPersistedEscrow = saved })
+}
+
 func TestEscrowPoolPersistsAcrossReload(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
 	cleanup := withInMemoryDB(t)
 	defer cleanup()
+	allowSyntheticEscrowSignatures(t)
 
 	PoolTxEscrow = NewTransactionPool(common.MaxTransactionInPool, 1)
 	tx := buildEscrowTx(7)
@@ -80,6 +88,7 @@ func TestRemoveEscrowTransactionDeletesFromDB(t *testing.T) {
 	defer logger.CloseLogger()
 	cleanup := withInMemoryDB(t)
 	defer cleanup()
+	allowSyntheticEscrowSignatures(t)
 
 	PoolTxEscrow = NewTransactionPool(common.MaxTransactionInPool, 1)
 	tx := buildEscrowTx(9)
@@ -93,4 +102,36 @@ func TestRemoveEscrowTransactionDeletesFromDB(t *testing.T) {
 	PoolTxEscrow = NewTransactionPool(common.MaxTransactionInPool, 1)
 	assert.NoError(t, LoadEscrowPoolFromDB())
 	assert.False(t, PoolTxEscrow.HasTransaction(hash), "removed escrow must not be restored from DB")
+}
+
+func TestDuplicateRemovalDeletesPersistedEscrow(t *testing.T) {
+	cleanup := withInMemoryDB(t)
+	defer cleanup()
+	allowSyntheticEscrowSignatures(t)
+
+	PoolTxEscrow = NewTransactionPool(common.MaxTransactionInPool, 1)
+	tx := buildEscrowTx(11)
+	hash := tx.GetHash().GetBytes()
+	assert.True(t, AddEscrowTransaction(tx))
+
+	RemoveDuplicateTransactionByHash(hash)
+	PoolTxEscrow = NewTransactionPool(common.MaxTransactionInPool, 1)
+	assert.NoError(t, LoadEscrowPoolFromDB())
+	assert.False(t, PoolTxEscrow.HasTransaction(hash))
+}
+
+func TestLoadEscrowPoolRejectsInvalidSignature(t *testing.T) {
+	cleanup := withInMemoryDB(t)
+	defer cleanup()
+
+	PoolTxEscrow = NewTransactionPool(common.MaxTransactionInPool, 1)
+	tx := buildEscrowTx(12)
+	assert.NoError(t, tx.StoreToDBPoolTx(common.EscrowPoolDBPrefix[:]))
+	saved := verifyPersistedEscrow
+	verifyPersistedEscrow = func(*transactionsDefinition.Transaction) bool { return false }
+	t.Cleanup(func() { verifyPersistedEscrow = saved })
+
+	assert.NoError(t, LoadEscrowPoolFromDB())
+	assert.False(t, PoolTxEscrow.HasTransaction(tx.GetHash().GetBytes()))
+	assert.False(t, transactionsDefinition.CheckFromDBPoolTx(common.EscrowPoolDBPrefix[:], tx.GetHash().GetBytes()))
 }

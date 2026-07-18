@@ -1,11 +1,12 @@
 package blocks
 
 import (
+	"math"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
-	"github.com/stretchr/testify/assert"
 )
 
 // buildMinimalBaseHeader creates a BaseHeader with minimal valid data for serialization tests.
@@ -23,6 +24,33 @@ func buildMinimalBaseHeader() BaseHeader {
 		SignatureMessage: []byte{1, 2, 3},
 		Signature:        sig,
 	}
+}
+
+func TestBytesSliceFromBytesRejectsHostileCountsAndSizes(t *testing.T) {
+	t.Run("huge count", func(t *testing.T) {
+		_, _, err := bytesSliceFromBytes(common.GetByteInt32(math.MaxInt32))
+		assert.Error(t, err)
+	})
+
+	t.Run("count cannot fit remaining prefixes", func(t *testing.T) {
+		_, _, err := bytesSliceFromBytes(common.GetByteInt32(2))
+		assert.Error(t, err)
+	})
+
+	t.Run("oversized proof", func(t *testing.T) {
+		encoded := common.GetByteInt32(1)
+		encoded = append(encoded, common.GetByteInt32(MaxOracleProofSize+1)...)
+		_, _, err := bytesSliceFromBytes(encoded)
+		assert.Error(t, err)
+	})
+}
+
+func FuzzBytesSliceFromBytes(f *testing.F) {
+	f.Add([]byte{0, 0, 0, 0})
+	f.Add(common.GetByteInt32(math.MaxInt32))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		_, _, _ = bytesSliceFromBytes(b)
+	})
 }
 
 func TestBaseBlockOracleProofsRoundTrip(t *testing.T) {
@@ -55,6 +83,24 @@ func TestBaseBlockOracleProofsRoundTrip(t *testing.T) {
 	assert.Equal(t, orig.PriceOracleData, decoded.PriceOracleData)
 	assert.Equal(t, orig.RandOracleData, decoded.RandOracleData)
 	assert.Equal(t, trailer, rest, "GetFromBytes must consume exactly the BaseBlock bytes")
+}
+
+func TestBaseBlockLegacyEncodingLeavesFollowingBlockFieldsUntouched(t *testing.T) {
+	orig := BaseBlock{
+		BaseHeader:      buildMinimalBaseHeader(),
+		PriceOracleData: []byte{},
+		RandOracleData:  []byte{},
+		OracleProofs:    [][]byte{{1, 2, 3}},
+	}
+	orig.BaseHeader.Height = OracleProofsActivationHeight - 1
+	trailer := make([]byte, 40) // legacy BlockHash + BlockFee
+	trailer[0] = 0x7f
+
+	var decoded BaseBlock
+	rest, err := decoded.GetFromBytes(append(orig.GetBytes(), trailer...))
+	assert.NoError(t, err)
+	assert.Nil(t, decoded.OracleProofs)
+	assert.Equal(t, trailer, rest)
 }
 
 func TestBaseHeaderGetBytesWithoutSignature(t *testing.T) {

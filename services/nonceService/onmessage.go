@@ -95,6 +95,15 @@ func OnMessage(addr [4]byte, m []byte) {
 		if err != nil {
 			return
 		}
+		// Authorize the sender before mutating any oracle or voting state.  The
+		// recipient is supplied by the sender, so a valid signature alone does not
+		// prove that the sender controls the delegated account named there.
+		mainAddress := transaction.GetSenderAddress()
+		if !account.IsTop128StakingNode(n, mainAddress) {
+			logger.GetLogger().Println("sender is not an eligible top-128 staking node", n, mainAddress.GetBytes()[:5])
+			tcpip.ReduceAndCheckIfBanIP(addr)
+			return
+		}
 		//delMy := common.GetDelegatedAccount()
 		//if addr != tcpip.MyIP && bytes.Equal(txDelAcc.GetBytes(), delMy.GetBytes()) && addr != [4]byte{0, 0, 0, 0} {
 		//	MyIP2 = addr
@@ -141,15 +150,6 @@ func OnMessage(addr [4]byte, m []byte) {
 		err = voting.SaveVotesEncryption2(vb[:], nonceHeight, txDelAcc, stakedInDelAccInt)
 		if err != nil {
 			logger.GetLogger().Println("could not save voting, 2", err)
-		}
-
-		mainAddress := transaction.TxParam.Sender
-
-		// checking if enough coins staked
-		if !account.IsTop128StakingNode(n, mainAddress) {
-			logger.GetLogger().Println("sender is not an eligible top-128 staking node", n, mainAddress.GetBytes()[:5])
-			tcpip.ReduceAndCheckIfBanIP(addr)
-			return
 		}
 
 		lastBlock, err := blocks.LoadBlock(h)

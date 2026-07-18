@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
 	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/stretchr/testify/assert"
 )
 
 // oracleTriple builds the 17-byte on-block encoding of one oracle entry:
@@ -181,4 +181,25 @@ func TestAuthenticateOracleProofsPropagatesDecodeError(t *testing.T) {
 	proofs := [][]byte{{0xff}} // decoder fails on 0xff
 	err := authenticateOracleProofs(12, proofs, nil, nil, decoderFor(txs, 0xff))
 	assert.Error(t, err)
+}
+
+func TestAuthorizeOracleProofSigners(t *testing.T) {
+	txs := map[byte]*transactionsDefinition.Transaction{
+		1: nonceTxFor(2, 10, 100, 500),
+	}
+	txs[1].TxParam.Sender = stakeOperator(7)
+
+	t.Run("authorized operator passes", func(t *testing.T) {
+		err := authorizeOracleProofSigners([][]byte{{1}}, decoderFor(txs, 0xff), func(id int, sender common.Address) bool {
+			return id == 2 && sender == stakeOperator(7)
+		})
+		assert.NoError(t, err)
+	})
+
+	t.Run("signer of another delegated account is rejected", func(t *testing.T) {
+		err := authorizeOracleProofSigners([][]byte{{1}}, decoderFor(txs, 0xff), func(id int, sender common.Address) bool {
+			return false
+		})
+		assert.Error(t, err)
+	})
 }

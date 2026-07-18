@@ -58,6 +58,11 @@ func VerifyStakeDependent(newBlock Block) error {
 	) {
 		return fmt.Errorf("block producer is not an eligible top-128 staking node")
 	}
+	if blockHeight >= OracleProofsActivationHeight {
+		if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
+			return fmt.Errorf("oracle proof authorization fails: %w", err)
+		}
+	}
 	totalStaked := account.GetStakedInAllDelegatedAccounts()
 	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
 		return fmt.Errorf("price oracle check fails")
@@ -110,7 +115,7 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// Bind the embedded oracle values to signed nonce transactions: every price
 	// and rand entry must be backed by a signature-verified, fresh proof so a
 	// producer cannot fabricate values attributed to other validators.
-	if blockHeight > 0 {
+	if blockHeight >= OracleProofsActivationHeight {
 		if err := AuthenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData); err != nil {
 			return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
 		}
@@ -135,7 +140,7 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// Recompute the expected difficulty from the parent block and the committed
 	// timestamps and reject any block that declares a different value. Without
 	// this a producer could declare an arbitrarily low difficulty (consensus).
-	if blockHeight > 0 && !ValidDifficulty(
+	if blockHeight >= TimestampDifficultyActivationHeight && !ValidDifficulty(
 		newBlock.GetHeader().Difficulty,
 		lastBlock.GetHeader().Difficulty,
 		lastBlock.GetBlockTimeStamp(),

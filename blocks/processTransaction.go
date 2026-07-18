@@ -526,7 +526,6 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 				if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 					transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.TxParam.MultiSignTx)
 				}
-				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				err = AddBalance(address.ByteValue, -amount)
 				if err != nil {
 					// this can happen very rare. Only when escrow is multisign account
@@ -539,6 +538,7 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 				if err != nil {
 					return err
 				}
+				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				logger.GetLogger().Printf("  escrow tx[%d]: balance transferred %d from %s to %s", i, amount, address.GetHex()[:16], addressRecipient.GetHex()[:16])
 			}
 		}

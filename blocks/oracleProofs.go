@@ -25,6 +25,8 @@ const oracleOptDataMinLen = 8 + common.HashLength + 16
 // nonce transaction only if it deserializes and its signature verifies.
 type verifiedDecoder func(proof []byte) (*transactionsDefinition.Transaction, error)
 
+type oracleProofAuthorizer func(id int, sender common.Address) bool
+
 // extractOracleSubmission pulls the delegated id and signed (height, price,
 // rand) out of a decoded oracle nonce transaction. It does not check the
 // signature; that is the decoder's responsibility.
@@ -123,4 +125,42 @@ func AuthenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData, ran
 		}
 		return &decoded, nil
 	})
+}
+
+// authorizeOracleProofSigners binds every delegated id named by a proof to the
+// operational account selected by the staking snapshot. Signature validity is
+// checked separately by AuthenticateOracleProofs; keeping this check in the
+// stake-dependent phase makes it use the parent state during block application.
+func authorizeOracleProofSigners(proofs [][]byte, decode verifiedDecoder, authorize oracleProofAuthorizer) error {
+	for _, pb := range proofs {
+		tx, err := decode(pb)
+		if err != nil {
+			return err
+		}
+		id, _, err := extractOracleSubmission(tx)
+		if err != nil {
+			return err
+		}
+		if !authorize(int(id), tx.GetSenderAddress()) {
+			return fmt.Errorf("oracle proof signer is not the authorized operator for delegated id %d", id)
+		}
+	}
+	return nil
+}
+
+// AuthorizeOracleProofSigners validates proof authority against the current
+// staking snapshot. It must be called while that snapshot represents the
+// proof-carrying block's parent.
+func AuthorizeOracleProofSigners(proofs [][]byte) error {
+	return authorizeOracleProofSigners(proofs, func(pb []byte) (*transactionsDefinition.Transaction, error) {
+		var tx transactionsDefinition.Transaction
+		decoded, rest, err := tx.GetFromBytes(pb)
+		if err != nil {
+			return nil, fmt.Errorf("cannot decode oracle proof for authorization: %w", err)
+		}
+		if len(rest) != 0 {
+			return nil, fmt.Errorf("oracle proof has %d trailing bytes", len(rest))
+		}
+		return &decoded, nil
+	}, account.IsTop128StakingNode)
 }

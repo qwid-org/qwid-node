@@ -2,6 +2,7 @@ package blocks
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/crypto/oqs"
@@ -39,6 +40,20 @@ type BaseBlock struct {
 	OracleProofs [][]byte `json:"oracle_proofs"`
 }
 
+const (
+	// Consensus upgrades activate at the first height after the currently
+	// published network height (23). Blocks below these heights retain their
+	// historical encoding and validation rules.
+	OracleProofsActivationHeight        int64 = 24
+	TimestampDifficultyActivationHeight int64 = 24
+
+	// There are only 255 encodable delegated ids (with zero reserved). Keep
+	// parser limits explicit so peer-controlled counts cannot drive allocations.
+	MaxOracleProofs     int32 = 255
+	MaxOracleProofSize        = 1 << 20
+	MaxOracleProofBytes       = 16 << 20
+)
+
 // bytesSliceToBytes length-prefixes a slice of byte slices for block encoding.
 func bytesSliceToBytes(items [][]byte) []byte {
 	out := common.GetByteInt32(int32(len(items)))
@@ -59,8 +74,29 @@ func bytesSliceFromBytes(b []byte) ([][]byte, []byte, error) {
 	if n < 0 {
 		return nil, nil, fmt.Errorf("negative byte-slice count: %d", n)
 	}
+	if n > MaxOracleProofs {
+		return nil, nil, fmt.Errorf("byte-slice count %d exceeds limit %d", n, MaxOracleProofs)
+	}
+	// Every item needs at least its four-byte length prefix. Check this before
+	// allocating the slice, otherwise a four-byte hostile input can request many
+	// gigabytes of capacity.
+	if int64(n) > int64(len(b))/4 {
+		return nil, nil, fmt.Errorf("byte-slice count %d cannot fit in %d bytes", n, len(b))
+	}
 	items := make([][]byte, 0, n)
+	total := 0
 	for i := int32(0); i < n; i++ {
+		if len(b) < 4 {
+			return nil, nil, fmt.Errorf("not enough bytes for item %d length", i)
+		}
+		itemLen := int64(binary.BigEndian.Uint32(b[:4]))
+		if itemLen > MaxOracleProofSize {
+			return nil, nil, fmt.Errorf("byte-slice item %d length %d is invalid", i, itemLen)
+		}
+		total += int(itemLen)
+		if total > MaxOracleProofBytes {
+			return nil, nil, fmt.Errorf("byte-slice payload exceeds limit %d", MaxOracleProofBytes)
+		}
 		var it []byte
 		var err error
 		it, b, err = common.BytesWithLenToBytes(b)
@@ -240,7 +276,9 @@ func (bb *BaseBlock) GetBytes() []byte {
 	b = append(b, common.GetByteInt64(bb.RandOracle)...)
 	b = append(b, common.BytesToLenAndBytes(bb.PriceOracleData)...)
 	b = append(b, common.BytesToLenAndBytes(bb.RandOracleData)...)
-	b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
+	if bb.BaseHeader.Height >= OracleProofsActivationHeight {
+		b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
+	}
 	return b
 }
 
@@ -267,9 +305,13 @@ func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	bb.OracleProofs, b, err = bytesSliceFromBytes(b[:])
-	if err != nil {
-		return nil, err
+	if bb.BaseHeader.Height >= OracleProofsActivationHeight {
+		bb.OracleProofs, b, err = bytesSliceFromBytes(b[:])
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		bb.OracleProofs = nil
 	}
 	return b[:], nil
 }
