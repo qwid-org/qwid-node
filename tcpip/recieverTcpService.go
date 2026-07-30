@@ -111,6 +111,25 @@ func init() {
 	logger.GetLogger().Printf("Successfully set NODE_IP to %d.%d.%d.%d", int(MyIP[0]), int(MyIP[1]), int(MyIP[2]), int(MyIP[3]))
 	validPeersConnected[MyIP] = 100
 	validPeersConnected[MyIPSelfNonce] = 100
+	// Get BLACKLIST_IP environment variable (comma-separated, permanent bans)
+	ips = os.Getenv("BLACKLIST_IP")
+	if ips != "" {
+		for _, ipStr := range strings.Split(ips, ",") {
+			ipStr = strings.TrimSpace(ipStr)
+			ip = net.ParseIP(ipStr)
+			if ip == nil {
+				logger.GetLogger().Printf("Warning: Failed to parse BLACKLIST_IP '%s' as an IP address\n", ipStr)
+				continue
+			}
+			ip4 = ip.To4()
+			if ip4 == nil {
+				logger.GetLogger().Printf("Warning: failed to parse BLACKLIST_IP '%s' as 4 byte format\n", ipStr)
+				continue
+			}
+			logger.GetLogger().Printf("Permanently blacklisting IP %s", ipStr)
+			AddBlackListIPs([4]byte(ip4))
+		}
+	}
 	// Get WHITELIST_IP environment variable
 	ips = os.Getenv("WHITELIST_IP")
 	if ips == "" {

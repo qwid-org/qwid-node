@@ -14,10 +14,12 @@ import (
 var bannedIP map[[4]byte]int64
 var bannedIPMutex sync.RWMutex
 var whiteListIPs map[[4]byte]bool
+var blackListIPs map[[4]byte]bool
 
 func init() {
 	bannedIP = map[[4]byte]int64{}
 	whiteListIPs = map[[4]byte]bool{}
+	blackListIPs = map[[4]byte]bool{}
 }
 
 // NP-C1: whiteListIPs is guarded by bannedIPMutex (the same lock as bannedIP),
@@ -26,6 +28,15 @@ func AddWhiteListIPs(ip [4]byte) {
 	bannedIPMutex.Lock()
 	defer bannedIPMutex.Unlock()
 	whiteListIPs[ip] = true
+}
+
+// AddBlackListIPs permanently bans ip (configured via BLACKLIST_IP in .env).
+// A blacklisted IP is rejected on inbound accept, outbound dial and peer
+// discovery, never expires, and takes precedence over the whitelist.
+func AddBlackListIPs(ip [4]byte) {
+	bannedIPMutex.Lock()
+	defer bannedIPMutex.Unlock()
+	blackListIPs[ip] = true
 }
 
 // isWhitelisted reports whether ip is whitelisted, taking the read lock.
@@ -38,6 +49,9 @@ func isWhitelisted(ip [4]byte) bool {
 func IsIPBanned(ip [4]byte) bool {
 	bannedIPMutex.Lock()
 	defer bannedIPMutex.Unlock()
+	if blackListIPs[ip] {
+		return true
+	}
 	if whiteListIPs[ip] {
 		return false
 	}

@@ -110,6 +110,7 @@ DELEGATED_ACCOUNT=1          # Staking account (1-254, use 1 for genesis node)
 REWARD_PERCENTAGE=200        # Operator reward (0-500, where 500=50%)
 NODE_IP=<your_external_ip>
 WHITELIST_IP=<optional_ip>   # IP to EXEMPT from banning/rate-limiting (never banned)
+BLACKLIST_IP=<optional_ips>  # Comma-separated IPs to PERMANENTLY ban (no inbound/outbound/discovery connections; overrides whitelist)
 HEIGHT_OF_NETWORK=<current_height>  # For faster initial sync
 RPC_BIND_ADDRESS=<host>      # Optional. wallet<->node RPC bind host; default 127.0.0.1 (loopback only, NP-C4). Override only if wallet/UI runs on a different host — exposes unauthenticated RPC (e.g. TRAN).
 NODE_IP_SELF_NONCE=<ip>      # Optional. IP for the self-nonce connection; unset = default local behaviour.

@@ -170,6 +170,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		return
 	}
 
+	if IsIPBanned(ip) {
+		logger.GetLogger().Printf("peer %s is banned or blacklisted; skipping dial", ipport)
+		return
+	}
+
 	if !AllowConnectionFromIP(ip) {
 		logger.GetLogger().Printf("connection rate limit exceeded for %s; skipping dial", ipport)
 		return
