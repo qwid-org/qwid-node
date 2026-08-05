@@ -112,8 +112,12 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		return true, claimedHeight
 	}
 
-	// Not enough peers confirm - only sync up to a safe limit
-	safeHeight := localHeight + MaxHeightJumpWithoutConsensus
+	// Not enough peers confirm - only sync up to a safe limit. One batch worth of
+	// blocks (NumberOfHashesInBucket, the span clampHeaderSpan already allows) so
+	// a node that is tens of thousands of blocks behind a single peer still
+	// catches up in reasonable time. This only rate-limits: every block is fully
+	// verified regardless, so a larger step grants a malicious peer nothing.
+	safeHeight := localHeight + common.NumberOfHashesInBucket
 	if safeHeight < claimedHeight {
 		logger.GetLogger().Printf("Large height claim %d not confirmed by enough peers (%d/%d), limiting to %d",
 			claimedHeight, peersAtOrAboveHeight, MinPeersForLargeSync, safeHeight)
@@ -121,6 +125,47 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	}
 
 	return true, claimedHeight
+}
+
+// networkHeight derives the height the network is at from the live peer height
+// claims. With a single live peer we take its claim; with two or more we take
+// the second highest, so one lying peer can neither stall our block production
+// by claiming an impossible height nor pull the target down by claiming a low
+// one. With no live claims we fall back to the HEIGHT_OF_NETWORK hint, which
+// keeps a solo/genesis node producing.
+func networkHeight() int64 {
+	peerHeightClaimsMutex.RLock()
+	defer peerHeightClaimsMutex.RUnlock()
+
+	now := time.Now()
+	best, second := int64(0), int64(0)
+	live := 0
+	for _, claim := range peerHeightClaims {
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration {
+			continue
+		}
+		live++
+		if claim.height > best {
+			second = best
+			best = claim.height
+		} else if claim.height > second {
+			second = claim.height
+		}
+	}
+	switch {
+	case live == 0:
+		return common.CurrentHeightOfNetwork
+	case live == 1:
+		return best
+	default:
+		return second
+	}
+}
+
+// updateSyncTarget refreshes the network height used to decide whether this node
+// is still behind and therefore must not produce blocks.
+func updateSyncTarget() {
+	common.SetSyncTarget(networkHeight())
 }
 
 // cleanupExpiredClaims removes old height claims
@@ -213,17 +258,22 @@ func OnMessage(addr [4]byte, m []byte) {
 				}
 			}
 		}
-		if h < common.CurrentHeightOfNetwork {
-			common.IsSyncing.Store(true)
-		}
 		lastOtherHeight := common.GetInt64FromByte(txn[[2]byte{'L', 'H'}][0])
 		lastOtherBlockHashBytes := txn[[2]byte{'L', 'B'}][0]
 
 		// Record this peer's height claim for consensus tracking
 		recordPeerHeightClaim(addr, lastOtherHeight, lastOtherBlockHashBytes)
+		// Refresh the network height before any IsSyncing decision below, so the
+		// decision uses what peers actually report instead of the static
+		// HEIGHT_OF_NETWORK hint.
+		updateSyncTarget()
 
 		// Periodically cleanup expired claims
 		go cleanupExpiredClaims()
+
+		if common.IsBehindNetwork() {
+			common.IsSyncing.Store(true)
+		}
 
 		hMax := common.GetHeightMax()
 
@@ -237,13 +287,13 @@ func OnMessage(addr [4]byte, m []byte) {
 			if !bytes.Equal(lastOtherBlockHashBytes, lastBlockHashBytes) {
 				SendGetHeaders(addr, lastOtherHeight)
 			}
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
 		} else if lastOtherHeight < h {
 			services.AdjustShiftInPastInReset(lastOtherHeight)
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
@@ -299,7 +349,7 @@ func OnMessage(addr [4]byte, m []byte) {
 			logger.GetLogger().Println("empty blocks received from peer - possible fake height claim")
 			tcpip.ReduceAndCheckIfBanIP(addr)
 			// Exit sync if we have no progress
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
@@ -307,7 +357,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		if indices[len(indices)-1] <= h {
 			logger.GetLogger().Println("shorter other chain")
 			// Peer claimed higher but sent lower blocks - suspicious
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
@@ -315,7 +365,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		if indices[0] > h+1 {
 			logger.GetLogger().Println("too far blocks from peer - gap in chain")
 			// Don't ban, but exit sync if this was the only claim
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
@@ -357,6 +407,9 @@ func OnMessage(addr [4]byte, m []byte) {
 				logger.GetLogger().Println("fork detected at index", index, "- reset done")
 				return
 			}
+			// parentFromPeer records where oldBlock came from; `was` is flipped inside
+			// the else branch, so it cannot answer that question after the fact.
+			parentFromPeer := was
 			if was {
 				oldBlock = blcks[i-1]
 				logger.GetLogger().Printf("Using previous block from received blocks for index %d", index)
@@ -428,7 +481,15 @@ func OnMessage(addr [4]byte, m []byte) {
 			defer merkleTrie.Destroy()
 			if err != nil {
 				logger.GetLogger().Printf("ERROR: Base block verification failed for block %d: %v", index, err)
-				tcpip.ReduceAndCheckIfBanIP(addr)
+				// Only blame the peer when the parent came from its own batch, i.e.
+				// the blocks it sent are internally inconsistent. When the parent
+				// came from our storage the mismatch is our own fork, and banning
+				// here would ban the honest peer we need to recover from it.
+				if parentFromPeer {
+					tcpip.ReduceAndCheckIfBanIP(addr)
+				} else {
+					logger.GetLogger().Printf("parent block %d came from local storage - treating as own fork, not banning %v", index-1, addr)
+				}
 				services.AdjustShiftInPastInReset(hmax)
 				common.ShiftToPastMutex.RLock()
 				services.ResetAccountsAndBlocksSync(index - common.ShiftToPastInReset)
@@ -469,9 +530,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		logger.GetLogger().Println("Starting final block processing and fund transfers")
 
 		defer func() {
-			//hMax := common.GetHeightMax()
-			h := common.GetHeight()
-			if h > common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 		}()

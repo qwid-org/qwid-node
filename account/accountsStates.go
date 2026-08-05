@@ -181,6 +181,19 @@ func LoadAccounts(height int64) error {
 	return nil
 }
 
+// AccountsStoredAtHeight reports whether an accounts snapshot exists for height.
+// Used by the rewind path to find a height it can actually restore state from,
+// instead of aborting on the first missing snapshot.
+func AccountsStoredAtHeight(height int64) bool {
+	if height < 0 {
+		return false
+	}
+	ib := common.GetByteInt64(height)
+	prefix := append(common.AccountsDBPrefix[:], ib...)
+	ok, err := database.MainDB.IsKey(prefix)
+	return err == nil && ok
+}
+
 func LastHeightStoredInAccounts() (int64, error) {
 	// AC-M8: find the highest stored height in O(log n) instead of an O(n) linear
 	// scan from 0. Heights are stored contiguously from 0, so exponential search

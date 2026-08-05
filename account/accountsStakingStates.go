@@ -149,6 +149,19 @@ func RemoveStakingAccountsFromDB(height int64) error {
 	return nil
 }
 
+// StakingAccountsStoredAtHeight reports whether a staking snapshot exists for
+// height. Counterpart of AccountsStoredAtHeight for the rewind path.
+func StakingAccountsStoredAtHeight(height int64) bool {
+	if height < 0 {
+		return false
+	}
+	ib := common.GetByteInt64(height)
+	prefix := append(common.StakingAccountsDBPrefix[:], ib...)
+	prefix = append(prefix, byte(1))
+	ok, err := database.MainDB.IsKey(prefix)
+	return err == nil && ok
+}
+
 func LastHeightStoredInStakingAccounts() (int64, error) {
 	i := int64(0)
 	for {

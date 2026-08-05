@@ -51,6 +51,17 @@ var (
 	ConnectionsWithoutVerification         = [][]byte{[]byte("TRAN"), []byte("STAT"), []byte("ENCR"), []byte("DETS"), []byte("STAK"), []byte("ACCS"), []byte("ADEX"), []byte("PUBA"), []byte("HELO"), []byte("VALS")}
 	CurrentHeightOfNetwork         int64   = 23
 
+	// SyncedTolerance is how many blocks behind the observed network height this
+	// node may be and still count as synced. The network keeps producing while we
+	// import, so requiring exact equality would keep IsSyncing latched forever and
+	// the node would never produce a block. Same magnitude as the "small height
+	// difference" threshold used by the sync consensus check.
+	SyncedTolerance int64 = 4
+	// MaxStartupRewind bounds how far the startup chain check may rewind the local
+	// chain when its tip does not verify. Anything deeper is left to the sync
+	// service, which resolves forks against live peers.
+	MaxStartupRewind int64 = 128
+
 	// Per-topic inbound message-size caps (bytes) — DoS hardening (sub-project A).
 	// Replace the single 151MB MaxMessageSizeBytes ENFORCEMENT (the wire marker
 	// MessageInitialization/MaxMessageSizeBytes are unchanged). Sized generously
