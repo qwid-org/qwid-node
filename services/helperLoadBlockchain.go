@@ -51,6 +51,19 @@ func checkBlockConsistency(height int64) error {
 	if !account.StakingAccountsStoredAtHeight(height) {
 		return fmt.Errorf("no staking snapshot for height %d", height)
 	}
+	// The snapshot can exist and still be unusable: if it was written while the
+	// state had been rewound under an in-flight block application, balances no
+	// longer add up to the supply the block declares, and every following block
+	// is rejected on that invariant with no way out. Detect it here so startup
+	// rewinds to the last height that does add up. Loading the snapshots is a
+	// side effect the caller relies on - see checkMainChain.
+	delta, err := SupplyInvariantDelta(height)
+	if err != nil {
+		return fmt.Errorf("cannot check supply invariant at height %d: %w", height, err)
+	}
+	if delta != 0 {
+		return fmt.Errorf("stored state at height %d breaks the block-supply invariant by %d", height, delta)
+	}
 	return nil
 }
 

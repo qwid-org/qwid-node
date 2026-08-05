@@ -686,7 +686,8 @@ func OnMessage(addr [4]byte, m []byte) {
 						time.Sleep(500 * time.Millisecond)
 					}
 				}
-				services.ResetAccountsAndBlocksSync(oldBlock.GetHeader().Height)
+				// Locked variant: common.BlockMutex is held for this whole apply loop.
+				services.ResetAccountsAndBlocksSyncLocked(oldBlock.GetHeader().Height)
 				return
 			}
 
@@ -694,7 +695,7 @@ func OnMessage(addr [4]byte, m []byte) {
 			err = block.StoreBlock()
 			if err != nil {
 				logger.GetLogger().Printf("ERROR: Failed to store block %d: %v", index, err)
-				services.ResetAccountsAndBlocksSync(oldBlock.GetHeader().Height)
+				services.ResetAccountsAndBlocksSyncLocked(oldBlock.GetHeader().Height)
 				return
 			}
 

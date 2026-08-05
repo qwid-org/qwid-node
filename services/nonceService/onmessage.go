@@ -259,7 +259,8 @@ func OnMessage(addr [4]byte, m []byte) {
 
 				err = blocks.CheckBlockAndTransferFunds(&newBlock, lastBlock, merkleTrie, true)
 				if err != nil {
-					services.ResetAccountsAndBlocksSync(lastBlock.GetHeader().Height)
+					// Locked variant: common.BlockMutex is held for this whole case.
+					services.ResetAccountsAndBlocksSyncLocked(lastBlock.GetHeader().Height)
 					logger.GetLogger().Println("check transfer transactions in block fails", err)
 					return
 				}
@@ -267,7 +268,7 @@ func OnMessage(addr [4]byte, m []byte) {
 				if err != nil {
 					logger.GetLogger().Println(err)
 					logger.GetLogger().Println("cannot store block")
-					services.ResetAccountsAndBlocksSync(lastBlock.GetHeader().Height)
+					services.ResetAccountsAndBlocksSyncLocked(lastBlock.GetHeader().Height)
 					return
 				}
 
