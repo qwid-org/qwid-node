@@ -73,17 +73,34 @@ func main() {
 		if err != nil {
 			logger.GetLogger().Fatal(err)
 		}
-		answers := make([]string, len(positions))
-		for i, p := range positions {
-			fmt.Printf("Podaj słowo numer %d: ", p)
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				logger.GetLogger().Fatal(err)
+
+		// A typo here must not cost the operator the phrase they just wrote
+		// down: the phrase is shown once, above, and is not repeated on retry
+		// (a wrong answer here creates no wallet, but the very next run would
+		// mint a brand-new phrase, making the one just written down worthless).
+		// Three attempts catches fat-fingering without turning the check into
+		// a formality.
+		const maxConfirmAttempts = 3
+		confirmed := false
+		for attempt := 1; attempt <= maxConfirmAttempts; attempt++ {
+			answers := make([]string, len(positions))
+			for i, p := range positions {
+				fmt.Printf("Podaj słowo numer %d: ", p)
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					logger.GetLogger().Fatal(err)
+				}
+				answers[i] = line
 			}
-			answers[i] = line
+			if err := checkConfirmation(string(mnemonic), positions, answers); err != nil {
+				fmt.Printf("Potwierdzenie nie powiodło się (próba %d/%d): %v\n", attempt, maxConfirmAttempts, err)
+				continue
+			}
+			confirmed = true
+			break
 		}
-		if err := checkConfirmation(string(mnemonic), positions, answers); err != nil {
-			logger.GetLogger().Fatal("potwierdzenie frazy nie powiodło się: ", err)
+		if !confirmed {
+			logger.GetLogger().Fatalf("potwierdzenie frazy nie powiodło się po %d próbach", maxConfirmAttempts)
 		}
 	}
 	defer wallet.ZeroBytes(mnemonic)
@@ -96,9 +113,14 @@ func main() {
 		logger.GetLogger().Fatal(err)
 	}
 
+	// A derivation failure here must stop everything: the operator has already
+	// been shown (or has already typed in) the recovery phrase and believes it
+	// backs a real wallet. Falling through with a zero-value account would
+	// silently write a wallet file for the zero address instead. Fatal exits
+	// non-zero before any file is created.
 	acc, err := wallet.GenerateNewAccountFromSeed(w, w.SigName, true)
 	if err != nil {
-		logger.GetLogger().Printf("Can not create wallet. Error %v", err)
+		logger.GetLogger().Fatalf("Can not create wallet, no file was written. Error %v", err)
 	}
 	w.MainAddress = acc.Address
 	acc.PublicKey.MainAddress = w.MainAddress
@@ -107,7 +129,7 @@ func main() {
 
 	acc, err = wallet.GenerateNewAccountFromSeed(w, w.SigName2, false)
 	if err != nil {
-		logger.GetLogger().Printf("Can not create wallet. Error %v", err)
+		logger.GetLogger().Fatalf("Can not create wallet, no file was written. Error %v", err)
 	}
 
 	w.Account2 = acc
@@ -156,7 +178,13 @@ func confirmPositions(seed64 [8]byte, wordCount int) []int {
 	out := make([]int, 0, confirmWordCount)
 	for len(out) < confirmWordCount {
 		p := int(n%uint64(wordCount)) + 1
-		n = n/uint64(wordCount) + 1
+		// Full-period 64-bit LCG (Hull-Dobell: odd increment, multiplier ≡ 1 mod 4;
+		// this is the multiplier used by PCG/Numerical Recipes). n advances
+		// unconditionally on every iteration, collision or not, so it can never
+		// settle on a fixed point and spin forever — unlike the previous
+		// `n = n/wordCount + 1`, which has a fixed point at n==1 (1/wordCount+1==1)
+		// and can loop forever once it lands there and p is already chosen.
+		n = n*6364136223846793005 + 1
 		if chosen[p] {
 			continue
 		}
