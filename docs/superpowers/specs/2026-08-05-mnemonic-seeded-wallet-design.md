@@ -22,7 +22,10 @@ który użytkownik musi zabezpieczyć, i wystarcza do odtworzenia portfela na cz
 3. **Fraza nigdy nie opuszcza maszyny**: obsługiwana wyłącznie przez `cmd/generateNewWallet`
    i `cmd/gui`. Endpointy HTTP `/api/wallet/mnemonic` w `cmd/webui` i `cmd/website` zostają
    wyłączone na stałe.
-4. **Ziarno jest przechowywane w pliku portfela**, zaszyfrowane tą samą ścieżką co klucze.
+4. **Fraza jest przechowywana w pliku portfela**, zaszyfrowana tą samą ścieżką co klucze.
+   Przechowujemy frazę, nie ziarno: PBKDF2 jest jednokierunkowe, więc z ziarna nie dałoby się
+   odtworzyć słów i funkcja "pokaż frazę" byłaby niewykonalna. Ryzyko jest identyczne — jedno
+   i drugie daje wszystkie klucze.
 
 ## Analiza bezpieczeństwa, która ukształtowała projekt
 
@@ -153,7 +156,8 @@ zachowanie liboqs testem.
 4. `GenerateKeyPairFromSeed` zamiast `GenerateKeyPair` w `GenerateNewAccount`
    (`wallet/wallet.go:268`).
 5. Dalej bez zmian: hasło, `Iv`, `KdfSalt`, szyfrowanie, `StoreJSON`.
-6. Ziarno zapisane w `EncryptedSeed`; mnemonic wyzerowany w pamięci przed powrotem.
+6. Fraza zaszyfrowana do `EncryptedMnemonic`, ziarno zachowane w `w.seed`; jawny bufor
+   frazy wyzerowany przed powrotem.
 
 ### Odtwarzanie z frazy
 
@@ -172,7 +176,8 @@ nazwa schematu jest znana, bo derywacja jest w pełni deterministyczna.
 ### Zmiana schematu szyfrowania w łańcuchu
 
 `AddNewEncryptionToActiveWallet` (`wallet/wallet.go:310`) woła dziś `signer.GenerateKeyPair()`.
-Zmiana: jeśli portfel ma `EncryptedSeed`, klucz powstaje z
+Zmiana: jeśli portfel ma ziarno (`w.seed`, wyliczone z `EncryptedMnemonic` przy ładowaniu),
+klucz powstaje z
 `GenerateKeyPairFromSeed(DeriveKeySeed(ziarno, sigName, primary))`. Bez tego mnemonic
 przestałby wystarczać do odtworzenia portfela po pierwszym głosowaniu, a węzeł działający
 24/7 nie może prosić operatora o wpisanie frazy.
@@ -191,14 +196,18 @@ na stałe komunikat, że fraza jest dostępna wyłącznie lokalnie. Trasy pozost
 Nowe pole w strukturze `Wallet` (`wallet/wallet.go:50`):
 
 ```go
-EncryptedSeed []byte `json:"encrypted_seed,omitempty"`
+EncryptedMnemonic []byte `json:"encrypted_mnemonic,omitempty"`
 ```
 
 Szyfrowane tą samą ścieżką co klucze prywatne (`w.encrypt`, AES-256-GCM z kluczem Argon2id).
 `omitempty` sprawia, że stare pliki ładują się bez zmian.
 
+W pamięci trzymamy wyłącznie 64-bajtowe **ziarno** (`w.seed`), wyliczone z frazy przy ładowaniu.
+Fraza pozostaje zaszyfrowana także w pamięci procesu i jest odszyfrowywana przejściowo — przy
+ładowaniu, żeby policzyć ziarno, oraz na żądanie przy wyświetleniu — po czym bufor jest zerowany.
+
 Pogorszenie bezpieczeństwa jest marginalne: kto ma plik i hasło, ma już wszystkie klucze
-prywatne. Ziarno dokłada do tego jedynie klucze dla schematów jeszcze nieużywanych.
+prywatne. Fraza dokłada do tego jedynie klucze dla schematów jeszcze nieużywanych.
 
 ## Obsługa błędów i przypadki brzegowe
 
@@ -208,6 +217,7 @@ prywatne. Ziarno dokłada do tego jedynie klucze dla schematów jeszcze nieużyw
 | Panika w liboqs podczas keygenu | `defer` przywraca `"system"` |
 | Nieudane przywrócenie RNG | `logger.Fatal` — zatrzymanie węzła. Podpisywanie deterministycznym RNG jest gorsze niż przestój: ujawnia klucz przez łańcuch |
 | Stary portfel + głosowanie zmieniło schemat | Klucz losowy jak dziś, plus ostrzeżenie w logu |
+| Fraza w pliku nie przechodzi walidacji po odszyfrowaniu | Portfel ładuje się bez ziarna i zachowuje się jak portfel starego typu, z ostrzeżeniem w logu |
 | Odtwarzanie na zajęty numer portfela | Odmowa nadpisania bez jawnego potwierdzenia |
 | Zerowanie pamięci | Mnemonic i ziarno jako `[]byte`, nie `string` — `string` jest niemutowalny; wzorzec już obecny w `wallet/wallet.go:51` |
 
@@ -234,7 +244,9 @@ Pozostałe:
 - Pełny cykl odtwarzania: utwórz → zapisz frazę i adres → skasuj plik → odtwórz → ten sam
   adres, podpis weryfikowalny wcześniejszym kluczem publicznym.
 - Przywrócenie RNG po panice w keygenie.
-- Zgodność wstecz: portfel bez `encrypted_seed` ładuje się i podpisuje.
+- Zgodność wstecz: portfel bez `encrypted_mnemonic` ładuje się i podpisuje.
+- Cykl fraza → plik → odczyt: `GetMnemonicWords` zwraca dokładnie tę frazę, którą podano przy
+  tworzeniu.
 - Walidacja frazy: zła suma kontrolna, 12 słów, pusta, słowo spoza listy.
 
 ## Poza zakresem
