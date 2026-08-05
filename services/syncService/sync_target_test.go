@@ -140,6 +140,60 @@ func TestNotBehindWithinTolerance(t *testing.T) {
 	})
 }
 
+// TestHeightHintOverridesPeers pins the configured behaviour: while the local
+// height is below HEIGHT_OF_NETWORK the operator's figure wins outright, even
+// when peers report a different height.
+func TestHeightHintOverridesPeers(t *testing.T) {
+	savedHint := common.CurrentHeightOfNetwork
+	savedHeight := common.GetHeight()
+	savedTarget := common.GetSyncTarget()
+	defer func() {
+		common.CurrentHeightOfNetwork = savedHint
+		common.SetHeight(savedHeight)
+		common.SetSyncTarget(savedTarget)
+	}()
+
+	common.CurrentHeightOfNetwork = 105000
+	common.SetHeight(500)
+
+	withClaims(t, map[[4]byte]peerHeightClaim{
+		{1}: claim(200000, time.Second),
+		{2}: claim(200000, time.Second),
+	}, func() {
+		updateSyncTarget()
+		if got := common.GetSyncTarget(); got != 105000 {
+			t.Fatalf("GetSyncTarget() = %d, want the configured 105000 to override the peer view", got)
+		}
+	})
+}
+
+// TestPeersTakeOverAboveHint is the other half: once the local chain reaches the
+// configured height the setting is spent and the live peer view decides, so a
+// stale HEIGHT_OF_NETWORK cannot pin the target below the real network height.
+func TestPeersTakeOverAboveHint(t *testing.T) {
+	savedHint := common.CurrentHeightOfNetwork
+	savedHeight := common.GetHeight()
+	savedTarget := common.GetSyncTarget()
+	defer func() {
+		common.CurrentHeightOfNetwork = savedHint
+		common.SetHeight(savedHeight)
+		common.SetSyncTarget(savedTarget)
+	}()
+
+	common.CurrentHeightOfNetwork = 105000
+	common.SetHeight(105000)
+
+	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(200000, time.Second)}, func() {
+		updateSyncTarget()
+		if got := common.GetSyncTarget(); got != 200000 {
+			t.Fatalf("GetSyncTarget() = %d, want the peer view 200000 once the hint is reached", got)
+		}
+		if !common.IsBehindNetwork() {
+			t.Fatal("node 95000 blocks behind the peer view must count as behind")
+		}
+	})
+}
+
 // TestSyncTargetFloorsAtHint keeps HEIGHT_OF_NETWORK working as a cold-start
 // lower bound: a node with no peers still must not consider itself synced below
 // the configured height.
