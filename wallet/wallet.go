@@ -563,47 +563,65 @@ func (w *Wallet) decryptLegacyCTR(v []byte) ([]byte, error) {
 // impossible (Falcon-512 is ~1281 bytes against BIP39's 64), which is why
 // wallets created before this feature have no phrase and never can (CW-M2).
 func (w *Wallet) GetMnemonicWords(primary bool) (string, error) {
+	if len(w.passwordBytes) == 0 {
+		return "", fmt.Errorf("set the wallet password before the recovery phrase")
+	}
 	if len(w.EncryptedMnemonic) == 0 {
 		return "", fmt.Errorf("this wallet was created without a recovery phrase; " +
 			"use the encrypted wallet-file backup instead")
-	}
-	if len(w.passwordBytes) == 0 {
-		return "", fmt.Errorf("you need load wallet first")
 	}
 	mnemonic, err := w.decrypt(w.EncryptedMnemonic)
 	if err != nil {
 		return "", fmt.Errorf("cannot decrypt the recovery phrase: %w", err)
 	}
+	// string(mnemonic) copies, so the decrypted plaintext can be zeroed right
+	// after — same pattern as every other decrypt site in this file (wallet.go
+	// loadKeys / ChangePassword / ChangePasswordInPlace).
+	words := string(mnemonic)
+	ZeroBytes(mnemonic)
 	// The phrase covers every scheme and both roles, so `primary` does not select
 	// between two phrases — it is kept only so existing callers still compile.
 	_ = primary
-	return string(mnemonic), nil
+	return words, nil
 }
 
-// RestoreSecretKeyFromMnemonic rebuilds one of the wallet's keys from a recovery
-// phrase. The key is derived, not unpacked: the same phrase always yields the
-// same key for a given scheme and role.
+// RestoreSecretKeyFromMnemonic rebuilds the wallet's keys — both roles, every
+// scheme — from a recovery phrase. One phrase covers the whole wallet, so a
+// partial restore (only Account1 or only Account2) would leave the stored
+// phrase claiming to back up a wallet it cannot actually reconstruct: the
+// phrase GetMnemonicWords hands back afterwards must reconstruct BOTH
+// accounts, not just the one the caller happened to ask for. `primary` is
+// accepted but ignored, for the same reason GetMnemonicWords ignores it —
+// existing callers keep compiling; Task 7 updates them to drop the parameter.
+// This also makes repeated calls idempotent regardless of the primary value
+// passed, which matters because cmd/gui/qtwidgets/wallet.go calls this twice
+// in a row (once with primary=true, once with primary=false) to restore one
+// wallet.
+//
+// SetMnemonic validates the phrase before mutating anything (seed, encrypted
+// phrase), and both accounts are derived and validated before either is
+// assigned onto w — so a bad phrase, or a derivation failure, leaves the
+// wallet exactly as it was.
 func (w *Wallet) RestoreSecretKeyFromMnemonic(mnemonic string, primary bool) error {
+	_ = primary
 	if err := w.SetMnemonic([]byte(mnemonic)); err != nil {
 		return err
 	}
-	sigName := w.SigName
-	if !primary {
-		sigName = w.SigName2
-	}
-	acc, err := GenerateNewAccountFromSeed(*w, sigName, primary)
+	acc1, err := GenerateNewAccountFromSeed(*w, w.SigName, true)
 	if err != nil {
 		return err
 	}
-	if primary {
-		w.Account1 = acc
-		var emptyAddress common.Address
-		if w.MainAddress.GetHex() == emptyAddress.GetHex() {
-			w.MainAddress = acc.Address
-		}
-	} else {
-		w.Account2 = acc
+	acc2, err := GenerateNewAccountFromSeed(*w, w.SigName2, false)
+	if err != nil {
+		return err
 	}
+	w.Account1 = acc1
+	w.Account2 = acc2
+	w.MainAddress = w.Account1.Address
+	// Realigns role metadata (Primary flags, PublicKey.MainAddress) across both
+	// accounts with the new MainAddress — the same fix-up loadKeys applies after
+	// reading a wallet off disk, so a restored wallet matches its reloaded form.
+	w.normalizeAccountRoles()
 	return nil
 }
 
