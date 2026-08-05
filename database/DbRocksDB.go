@@ -55,6 +55,40 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 	return db, nil
 }
 
+// InitReadOnly opens the database without taking the primary write lock, so a
+// diagnostic tool can inspect it while a node is running. It prefers a RocksDB
+// secondary instance (supported alongside a live primary) and falls back to a
+// plain read-only open when the secondary directory cannot be used.
+func (db *BlockchainDB) InitReadOnly(dbPath string, secondaryPath string) (*BlockchainDB, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	opts := gorocksdb.NewDefaultOptions()
+	opts.SetCreateIfMissing(false)
+	opts.SetMaxOpenFiles(1000)
+
+	if secondaryPath != "" {
+		if err := os.MkdirAll(secondaryPath, 0755); err == nil {
+			sdb, serr := gorocksdb.OpenDbAsSecondary(opts, dbPath, secondaryPath)
+			if serr == nil {
+				db.db = sdb
+				return db, nil
+			}
+			logger.GetLogger().Println("cannot open db as secondary, falling back to read-only:", serr)
+		}
+	}
+
+	rdb, err := gorocksdb.OpenDbForReadOnly(opts, dbPath, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database read-only at %s: %w", dbPath, err)
+	}
+	db.db = rdb
+	return db, nil
+}
+
 func (db *BlockchainDB) InitInMemory() (*BlockchainDB, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database is nil")

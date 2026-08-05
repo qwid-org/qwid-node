@@ -65,7 +65,80 @@ func restorableHeight(height int64) int64 {
 	return -1
 }
 
+// SupplyInvariantDelta reports how far the stored state at `height` deviates
+// from the supply the block at that height declares:
+//
+//	accounts + staked + rewarded + block.BlockFee - block.Supply
+//
+// This is the same invariant CheckBlockAndTransferFunds enforces before applying
+// the next block, so a non-zero result means the snapshot is unusable as a base:
+// every following block will be rejected with "block supply checking fails vs
+// account balances" and the node can never move on.
+//
+// It LOADS the stored snapshots into the live in-memory state, so call it only
+// from a path that is about to (re)load state anyway.
+func SupplyInvariantDelta(height int64) (int64, error) {
+	bl, err := blocks.LoadBlock(height)
+	if err != nil {
+		return 0, err
+	}
+	if err := account.LoadAccounts(height); err != nil {
+		return 0, err
+	}
+	if err := account.LoadStakingAccounts(height); err != nil {
+		return 0, err
+	}
+	staked, rewarded := blocks.GetSupplyInStakedAccounts()
+	return blocks.GetSupplyInAccounts() + staked + rewarded + bl.BlockFee - bl.GetBlockSupply(), nil
+}
+
+// consistentRewindTarget walks down from height to the closest height that is
+// both restorable and internally consistent, so a rewind cannot land on a
+// snapshot that is guaranteed to reject every following block. Heights whose
+// block is missing are accepted as-is: an unauditable height must not make the
+// rewind impossible. The audit stops common.MaxStartupRewind blocks below the
+// requested height, so a corruption older than that degrades to the previous
+// behaviour instead of rewinding the node back towards genesis.
+func consistentRewindTarget(height int64) int64 {
+	floor := height - common.MaxStartupRewind
+	for h := height; h >= 0; h-- {
+		if !account.AccountsStoredAtHeight(h) || !account.StakingAccountsStoredAtHeight(h) {
+			continue
+		}
+		if h < floor {
+			logger.GetLogger().Println("no self-consistent state within", common.MaxStartupRewind,
+				"blocks below", height, "- rewinding to", h, "without the supply check")
+			return h
+		}
+		delta, err := SupplyInvariantDelta(h)
+		if err != nil {
+			// Cannot audit (no block stored at that height) - accept it.
+			return h
+		}
+		if delta == 0 {
+			return h
+		}
+		logger.GetLogger().Println("stored state at height", h, "breaks the block-supply invariant by",
+			delta, "- rewinding further back")
+	}
+	return -1
+}
+
+// ResetAccountsAndBlocksSync rewinds the node to `height`, taking the block lock
+// so no block application can be running concurrently. A rewind replaces the
+// global account state: doing that under a block that is mid-apply makes that
+// block persist the rewound state under its own height, which desynchronises
+// balances from the fee ledger permanently. Callers that already hold
+// common.BlockMutex must use ResetAccountsAndBlocksSyncLocked instead.
 func ResetAccountsAndBlocksSync(height int64) {
+	common.BlockMutex.Lock()
+	defer common.BlockMutex.Unlock()
+	ResetAccountsAndBlocksSyncLocked(height)
+}
+
+// ResetAccountsAndBlocksSyncLocked is ResetAccountsAndBlocksSync for callers that
+// already hold common.BlockMutex.
+func ResetAccountsAndBlocksSyncLocked(height int64) {
 	logger.GetLogger().Println("reset to ", height)
 	if height < 0 {
 		logger.GetLogger().Println("try to reset from negative height")
@@ -75,7 +148,7 @@ func ResetAccountsAndBlocksSync(height int64) {
 	// Land on a height whose state we can restore. Aborting here instead would
 	// leave common.GetHeight() untouched, so the very next sync batch would
 	// rediscover the same fork and the node would never make progress.
-	target := restorableHeight(height)
+	target := consistentRewindTarget(height)
 	if target < 0 {
 		logger.GetLogger().Println("no restorable accounts snapshot at or below height", height,
 			"- cannot rewind, staying in sync mode")

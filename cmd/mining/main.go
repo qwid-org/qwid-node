@@ -123,6 +123,12 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing accounts...")
+		// Under the block lock: StoreAccounts(-1) writes the live state under
+		// common.GetHeight(), so running it while a block is being applied would
+		// persist a half-applied state as that height's snapshot - the node would
+		// then reject every following block on the supply invariant.
+		common.BlockMutex.Lock()
+		defer common.BlockMutex.Unlock()
 		account.StoreAccounts(-1)
 	}()
 
@@ -135,6 +141,8 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing DEX accounts...")
+		common.BlockMutex.Lock()
+		defer common.BlockMutex.Unlock()
 		account.StoreDexAccounts(-1)
 	}()
 
@@ -147,6 +155,8 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing staking accounts...")
+		common.BlockMutex.Lock()
+		defer common.BlockMutex.Unlock()
 		account.StoreStakingAccounts(-1)
 	}()
 

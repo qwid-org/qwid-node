@@ -222,13 +222,38 @@ func checkSyncStall(now time.Time) {
 	}
 	defer syncProcessMutex.Unlock()
 
+	// syncProcessMutex alone is not enough: the nonce service applies live blocks
+	// under common.BlockMutex without ever taking it. Rewinding the account state
+	// from under such an application makes it store the rewound state under the
+	// block's own height — balances then permanently disagree with the block fee
+	// ledger and every following block is rejected on the supply invariant. A
+	// held block lock also means a block is being applied, i.e. not a stall.
+	if !common.BlockMutex.TryLock() {
+		return
+	}
+	defer common.BlockMutex.Unlock()
+
 	target := h - SyncStallRewind
 	if target < 0 {
 		target = 0
 	}
 	logger.GetLogger().Printf("sync stalled at height %d for %s - rewinding to %d to re-request the batch",
 		h, now.Sub(progress.since).Truncate(time.Second), target)
-	services.ResetAccountsAndBlocksSync(target)
+	services.ResetAccountsAndBlocksSyncLocked(target)
+
+	// Push the request out ourselves rather than waiting for a peer's next 'hi'.
+	// The rewind alone changes nothing if those messages are not reaching us.
+	newHeight := common.GetHeight()
+	sent, live := requestHeadersFromPeersAhead(newHeight)
+	logger.GetLogger().Printf("sync stall recovery: height=%d target=%d syncing=%v livePeerClaims=%d headerRequestsSent=%d",
+		newHeight, common.GetSyncTarget(), common.IsSyncing.Load(), live, sent)
+	if live == 0 {
+		logger.GetLogger().Println("sync stall recovery: no live peer height claims - " +
+			"peers' 'hi' messages are not reaching us, so no batch can ever be requested")
+	} else if sent == 0 {
+		logger.GetLogger().Printf("sync stall recovery: %d live peer claim(s), none above our height %d - "+
+			"the peers we can see are not ahead of us", live, newHeight)
+	}
 
 	// Restart the clock even if the rewind landed somewhere else than asked, so
 	// a chain of rewinds is paced by SyncStallTimeout rather than firing every
