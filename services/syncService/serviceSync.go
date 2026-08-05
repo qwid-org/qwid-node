@@ -230,6 +230,20 @@ func checkSyncStall(now time.Time) {
 		h, now.Sub(progress.since).Truncate(time.Second), target)
 	services.ResetAccountsAndBlocksSync(target)
 
+	// Push the request out ourselves rather than waiting for a peer's next 'hi'.
+	// The rewind alone changes nothing if those messages are not reaching us.
+	newHeight := common.GetHeight()
+	sent, live := requestHeadersFromPeersAhead(newHeight)
+	logger.GetLogger().Printf("sync stall recovery: height=%d target=%d syncing=%v livePeerClaims=%d headerRequestsSent=%d",
+		newHeight, common.GetSyncTarget(), common.IsSyncing.Load(), live, sent)
+	if live == 0 {
+		logger.GetLogger().Println("sync stall recovery: no live peer height claims - " +
+			"peers' 'hi' messages are not reaching us, so no batch can ever be requested")
+	} else if sent == 0 {
+		logger.GetLogger().Printf("sync stall recovery: %d live peer claim(s), none above our height %d - "+
+			"the peers we can see are not ahead of us", live, newHeight)
+	}
+
 	// Restart the clock even if the rewind landed somewhere else than asked, so
 	// a chain of rewinds is paced by SyncStallTimeout rather than firing every
 	// second.

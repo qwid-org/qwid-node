@@ -172,6 +172,47 @@ func networkHeight() int64 {
 	}
 }
 
+// requestHeadersFromPeersAhead asks every peer whose live claim is above height
+// for the next batch, and reports how many requests went out and how many live
+// claims exist.
+//
+// Rewinding on its own does not restart a stalled sync. A batch is requested in
+// exactly one place — when WE receive a peer's 'hi' and see it is ahead of us
+// (the "hi" case below). Our own 'hi' only announces our height; it asks for
+// nothing. So if a peer's 'hi' stops reaching us, the node can rewind forever
+// with nothing to import. This is the active push that does not wait for one.
+func requestHeadersFromPeersAhead(height int64) (sent int, live int) {
+	type target struct {
+		addr   [4]byte
+		height int64
+	}
+	targets := []target{}
+
+	peerHeightClaimsMutex.RLock()
+	now := time.Now()
+	for addr, claim := range peerHeightClaims {
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration {
+			continue
+		}
+		live++
+		if claim.height > height {
+			targets = append(targets, target{addr: addr, height: claim.height})
+		}
+	}
+	peerHeightClaimsMutex.RUnlock()
+
+	// shouldSyncToHeight takes the same lock, so it is called only after release.
+	for _, t := range targets {
+		ok, validated := shouldSyncToHeight(t.height, height)
+		if !ok {
+			continue
+		}
+		SendGetHeaders(t.addr, validated)
+		sent++
+	}
+	return sent, live
+}
+
 // updateSyncTarget refreshes the network height used to decide whether this node
 // is still behind and therefore must not produce blocks.
 func updateSyncTarget() {
