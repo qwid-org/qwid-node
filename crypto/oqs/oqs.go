@@ -11,8 +11,17 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"unsafe"
 )
+
+// randMutex serializes every liboqs call that consumes randomness. It exists so
+// GenerateKeyPairFromSeed can install a deterministic RNG — which is global to
+// the process — without any concurrent signing observing it. A signature that
+// reused its salt would let anyone recover the private key from two signatures
+// published on-chain. OQS_SIG_verify draws no randomness and is deliberately
+// left unguarded, so block verification keeps its full parallelism.
+var randMutex sync.Mutex
 
 // Note: the liboqs version is intentionally not printed at startup to avoid
 // leaking the library version to logs/stdout (CW-M5). Use OQSVersion() if needed.
@@ -175,6 +184,9 @@ func (kem *KeyEncapsulation) Details() KeyEncapsulationDetails {
 // is not directly accessible, unless one exports it with
 // KeyEncapsulation.ExportSecretKey method.
 func (kem *KeyEncapsulation) GenerateKeyPair() ([]byte, error) {
+	randMutex.Lock()
+	defer randMutex.Unlock()
+
 	publicKey := make([]byte, kem.algDetails.LengthPublicKey)
 	kem.secretKey = make([]byte, kem.algDetails.LengthSecretKey)
 
@@ -398,6 +410,14 @@ func (sig *Signature) Details() SignatureDetails {
 // is not directly accessible, unless one exports it with
 // Signature.ExportSecretKey method.
 func (sig *Signature) GenerateKeyPair() ([]byte, error) {
+	randMutex.Lock()
+	defer randMutex.Unlock()
+	return sig.generateKeyPairUnlocked()
+}
+
+// generateKeyPairUnlocked is the body of GenerateKeyPair. The caller must hold
+// randMutex.
+func (sig *Signature) generateKeyPairUnlocked() ([]byte, error) {
 	publicKey := make([]byte, sig.algDetails.LengthPublicKey)
 	sig.secretKey = make([]byte, sig.algDetails.LengthSecretKey)
 
@@ -422,6 +442,9 @@ func (sig *Signature) Sign(message []byte) ([]byte, error) {
 		return nil, errors.New("incorrect secret key length, make sure you " +
 			"specify one in Set() or run GenerateKeyPair()")
 	}
+
+	randMutex.Lock()
+	defer randMutex.Unlock()
 
 	signature := make([]byte, sig.algDetails.MaxLengthSignature)
 	var lenSig int64
