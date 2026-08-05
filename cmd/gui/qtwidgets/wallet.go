@@ -261,14 +261,14 @@ func ShowWalletPage() *widgets.QTabWidget {
 	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore keys from recovery phrase", nil)
 	buttonRestoreMnemonic.ConnectClicked(func(bool) {
 		phrase := inputRestoreMnemonic.Text()
+		// The `primary` argument is ignored: one phrase rebuilds the whole wallet
+		// (both accounts and MainAddress) atomically in a single call. Do not add
+		// a second call here — it would just re-run both PQ key derivations from
+		// scratch, and a transient failure on that redundant second call would
+		// wrongly report the restore as failed even though it already succeeded.
 		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, true); err != nil {
 			widgets.QMessageBox_Information(nil, "OK",
-				fmt.Sprintf("Cannot restore the primary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-			return
-		}
-		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, false); err != nil {
-			widgets.QMessageBox_Information(nil, "OK",
-				fmt.Sprintf("Cannot restore the secondary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+				fmt.Sprintf("Cannot restore keys from recovery phrase:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 			return
 		}
 		widgets.QMessageBox_Information(nil, "OK",
