@@ -423,9 +423,23 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 	if err != nil {
 		return err
 	}
-	pubKey, err := signer.GenerateKeyPair()
-	if err != nil {
-		return err
+	var pubKey []byte
+	if w.HasSeed() {
+		keySeed := DeriveKeySeed(w.seed, sigName, primary)
+		defer ZeroBytes(keySeed)
+		var drawn int
+		pubKey, drawn, err = signer.GenerateKeyPairFromSeed(keySeed)
+		if err != nil {
+			return err
+		}
+		logger.GetLogger().Printf("derived the %s key for the new scheme from the recovery phrase (%d RNG bytes)", sigName, drawn)
+	} else {
+		pubKey, err = signer.GenerateKeyPair()
+		if err != nil {
+			return err
+		}
+		logger.GetLogger().Printf("WARNING: generated a random %s key — this wallet has no recovery phrase, "+
+			"so the new key cannot be restored from one; back up the wallet file", sigName)
 	}
 	mainAddress, err := common.PubKeyToAddress(pubKey, primary)
 	if err != nil {
