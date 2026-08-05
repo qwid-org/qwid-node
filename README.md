@@ -157,7 +157,7 @@ Examples:
 Then open http://localhost:8080 (or your custom port) in a web browser.
 
 Web UI Features:
-- **Wallet**: Load wallet, change password (see "Wallet backup & recovery" below — mnemonic backup is not available for post-quantum keys)
+- **Wallet**: Load wallet, change password (see "Wallet backup & recovery" below — new wallets are created from a 24-word recovery phrase; see "Wallet backup & recovery")
 - **Account**: View balances, staking details, network stats
 - **Send**: Send QWD with locked amounts, multi-sig, smart contract data
 - **Staking**: Stake, unstake, withdraw rewards
@@ -206,7 +206,16 @@ The read-only `cmd/explorer` also honours `BIND_ADDRESS` (defaults to all interf
 
 Wallet backup & recovery
 
-- Post-quantum secret keys (Falcon-512 / MAYO-5) are far larger than a BIP39 mnemonic can encode, so **the mnemonic-phrase backup is not available** for real wallets — requesting it returns a clear error directing you here.
-- Back up the **encrypted wallet file** instead. Node/CLI/GUI wallets live under `~/.qwid/`; website user wallets under `~/.qwid/website/users/<username>/`. The file is AES-256-GCM encrypted with an Argon2id-derived key from your password — keep a copy of the file and remember the password.
+- New wallets are generated **from a 24-word BIP39 recovery phrase**. The phrase
+  is shown once, before the wallet is created, and you must type three of its
+  words back to continue. Keep it offline: it derives every key of the wallet,
+  for the current signature schemes and any the chain votes in later.
+- To restore on a clean machine, run `go run cmd/generateNewWallet/main.go` and
+  pick the restore option. The same phrase always rebuilds the same addresses.
+- The phrase is available only in the CLI generator and the Qt GUI. It is never
+  served over HTTP, so `/api/wallet/mnemonic` returns an explanation instead.
+- Wallets created before this change have no phrase — a post-quantum secret key
+  is far too large to encode as one (CW-M2). Back up their AES-256-GCM /
+  Argon2id-encrypted wallet file instead.
 - Passwords must be at least 8 characters on password-change and website-registration flows.
 

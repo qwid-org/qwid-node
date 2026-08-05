@@ -131,7 +131,7 @@ COOKIE_INSECURE=true                 # Local HTTP dev only; unset in prod so the
 SMTP_USER / SMTP_PASS                # Optional, for website email features.
 ```
 
-Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); the BIP39 mnemonic backup is unavailable for post-quantum keys (CW-M2 — back up the AES-256-GCM/Argon2id-encrypted wallet file instead); password minimum is 8 chars on password-change and website-registration flows.
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); new wallets are derived from a 24-word BIP39 recovery phrase, which restores them on a clean machine (the phrase is shown once at creation and stored encrypted in the wallet file; it never travels over HTTP — CLI and Qt GUI only). Wallets created before this change have no phrase and never can, since a post-quantum secret key cannot be encoded as one (CW-M2) — back up their encrypted wallet file instead; password minimum is 8 chars on password-change and website-registration flows.
 
 Genesis config: `~/.qwid/genesis/config/genesis.json` (copy from `genesis/config/genesis_internal_tests.json`)
 
