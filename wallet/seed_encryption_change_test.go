@@ -41,6 +41,58 @@ func TestSchemeChangeIsReproducibleFromPhrase(t *testing.T) {
 	}
 }
 
+// TestSchemeChangeIsReproducibleFromPhraseUnknownScheme covers the case a
+// real chain vote actually produces: a scheme that is neither this node's
+// currently configured primary (Falcon-512) nor secondary (MAYO-5). Using
+// common.SigName2() (MAYO-5) as the "new" scheme in
+// TestSchemeChangeIsReproducibleFromPhrase above is not representative of
+// that — MAYO-5's public key length (5554) happens to equal the currently
+// configured secondary length, so common.PubKey.Init's length check
+// (common/types.go:326, `len(b) != PubKeyLength(false) && len(b) !=
+// PubKeyLength2(false)`) passes via the secondary-length branch even though
+// the key is written into the PRIMARY slot with primary=true — a
+// coincidence, not proof the primary/secondary handling is correct.
+//
+// In production, blocks/processEncryption.go's SetVoteEncryption drives
+// common.SetEncryption to the new scheme's lengths BEFORE
+// blocks/processPubKey.go calls AddNewPubKeyToActiveWallet into this
+// function, so withSchemeChangeTarget (which does the same thing for tests)
+// reproduces the actual state this function runs in.
+func TestSchemeChangeIsReproducibleFromPhraseUnknownScheme(t *testing.T) {
+	mnemonic, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w1 := newSeedTestWallet(t, 222)
+	if err := w1.SetMnemonic(mnemonic); err != nil {
+		t.Fatal(err)
+	}
+	fillAccountsFromSeed(t, w1)
+
+	w2 := newSeedTestWallet(t, 223)
+	if err := w2.SetMnemonic(mnemonic); err != nil {
+		t.Fatal(err)
+	}
+	fillAccountsFromSeed(t, w2)
+
+	// Mirrors a real scheme-change vote: the global config flips to the new
+	// scheme before the unattended key-generation call.
+	withSchemeChangeTarget(t)
+
+	if err := w1.AddNewEncryptionToActiveWallet(schemeChangeTarget, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := w2.AddNewEncryptionToActiveWallet(schemeChangeTarget, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if w1.Account1.Address.GetHex() != w2.Account1.Address.GetHex() {
+		t.Fatalf("klucz dla nieznanego schematu %q nie jest odtwarzalny z frazy: %s vs %s",
+			schemeChangeTarget, w1.Account1.Address.GetHex(), w2.Account1.Address.GetHex())
+	}
+}
+
 // TestSchemeChangeStaysRandomWithoutPhrase keeps pre-existing wallets on their
 // previous behaviour.
 func TestSchemeChangeStaysRandomWithoutPhrase(t *testing.T) {
