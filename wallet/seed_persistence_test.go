@@ -211,18 +211,23 @@ func readWalletFile(t *testing.T, dir string, number uint8) (string, error) {
 
 // TestChangePasswordPreservesMnemonic covers ChangePassword. Unlike
 // ChangePasswordInPlace, ChangePassword reloads via LoadJSON, which always
-// resolves the wallet's default (home-directory) path rather than a caller
-// chosen one, so this test cannot use a t.TempDir()-backed wallet the way the
-// others in this file do — it has to use the real default wallet path, like
-// TestChangePassword in wallet_test.go already does for the same reason.
+// resolves the wallet's default (home-directory) path via os.UserHomeDir()
+// rather than a caller-chosen one, so this test cannot point HomePath at a
+// t.TempDir() directly the way the others in this file do. Instead it
+// redirects os.UserHomeDir() itself with t.Setenv("HOME", t.TempDir()): on
+// Linux os.UserHomeDir() reads $HOME, so this isolates both StoreJSON and
+// ChangePassword's internal LoadJSON without ever touching the operator's
+// real ~/.qwid. t.Setenv is legal here because nothing in this package calls
+// t.Parallel().
 func TestChangePasswordPreservesMnemonic(t *testing.T) {
 	mnemonic, err := NewMnemonic24()
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	t.Setenv("HOME", t.TempDir())
+
 	w := EmptyWallet(210, common.SigName(), common.SigName2())
-	t.Cleanup(func() { os.RemoveAll(w.HomePath) })
 	w.SetPassword("test-password-123")
 	w.Iv = GenerateNewIv()
 	if err := w.SetMnemonic(mnemonic); err != nil {
@@ -310,6 +315,98 @@ func TestChangePasswordInPlacePreservesMnemonic(t *testing.T) {
 	}
 	if string(gotReloaded) != string(mnemonic) {
 		t.Fatal("recovery phrase changed after ChangePasswordInPlace + reload from disk")
+	}
+}
+
+// --- Item 3 (round 2 review): a password change must degrade, not abort,
+// when the stored phrase is already undecryptable under the (verified
+// correct) current password. Matches the degrade-not-abort rule from loading
+// (Finding 4): the blob is dropped rather than carried forward, since it
+// provably can never decrypt under any password from this point on. ---
+
+func TestChangePasswordInPlaceDropsUndecryptableMnemonic(t *testing.T) {
+	w := newSeedTestWallet(t, 217)
+	acc, err := GenerateNewAccount(*w, w.SigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.MainAddress = acc.Address
+	w.Account1 = acc
+	acc2, err := GenerateNewAccount(*w, w.SigName2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Account2 = acc2
+	// Not produced by SetMnemonic/encrypt on purpose: this must fail AES-GCM
+	// authentication, simulating a phrase blob that is already unrecoverable
+	// (e.g. via the corruption scenario TestCorruptedMnemonicDegradesGracefully
+	// covers on the load side).
+	w.EncryptedMnemonic = []byte("this is not a valid AES-GCM ciphertext at all, on purpose")
+	if err := w.StoreJSON(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.ChangePasswordInPlace("test-password-123", "new-password-456"); err != nil {
+		t.Fatalf("ChangePasswordInPlace must degrade, not abort, on an undecryptable stored phrase: %v", err)
+	}
+	if len(w.EncryptedMnemonic) != 0 {
+		t.Fatal("expected the undecryptable recovery phrase blob to be dropped, not carried forward")
+	}
+	if w.HasSeed() {
+		t.Fatal("wallet must not report HasSeed() true for a phrase it could never decrypt")
+	}
+
+	loaded, err := LoadJSONFromDir(w.HomePath, 217, "new-password-456", w.SigName, w.SigName2)
+	if err != nil {
+		t.Fatalf("wallet did not accept the new password: %v", err)
+	}
+	if loaded.HasSeed() {
+		t.Fatal("reloaded wallet reports HasSeed() true despite a dropped, undecryptable phrase")
+	}
+	if len(loaded.EncryptedMnemonic) != 0 {
+		t.Fatal("expected the undecryptable recovery phrase blob to stay dropped in the stored file")
+	}
+}
+
+// TestChangePasswordDropsUndecryptableMnemonic is the ChangePassword
+// (not-in-place) counterpart; see the isolation note on
+// TestChangePasswordPreservesMnemonic for why it uses t.Setenv("HOME", ...)
+// instead of newSeedTestWallet.
+func TestChangePasswordDropsUndecryptableMnemonic(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	w := EmptyWallet(218, common.SigName(), common.SigName2())
+	w.SetPassword("test-password-123")
+	w.Iv = GenerateNewIv()
+	acc, err := GenerateNewAccount(w, w.SigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.MainAddress = acc.Address
+	w.Account1 = acc
+	acc2, err := GenerateNewAccount(w, w.SigName2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Account2 = acc2
+	w.EncryptedMnemonic = []byte("this is not a valid AES-GCM ciphertext at all, on purpose")
+	if err := w.StoreJSON(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.ChangePassword("test-password-123", "new-password-456"); err != nil {
+		t.Fatalf("ChangePassword must degrade, not abort, on an undecryptable stored phrase: %v", err)
+	}
+
+	loaded, err := LoadJSON(218, "new-password-456", w.SigName, w.SigName2)
+	if err != nil {
+		t.Fatalf("wallet did not accept the new password: %v", err)
+	}
+	if loaded.HasSeed() {
+		t.Fatal("reloaded wallet reports HasSeed() true despite a dropped, undecryptable phrase")
+	}
+	if len(loaded.EncryptedMnemonic) != 0 {
+		t.Fatal("expected the undecryptable recovery phrase blob to be dropped from the stored file")
 	}
 }
 
@@ -421,6 +518,14 @@ func TestLegacyWalletSchemeChangeFailsSafely(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalMainAddress := w.MainAddress.GetHex()
+
+	// Reconfigure the global scheme, the way a real scheme-change vote would
+	// before the node reloads its wallet. Without this, the length check in
+	// common.PubKey.Init would have rejected the pre-fix (always-generate)
+	// behavior anyway, for an unrelated reason, and this test would pass for
+	// the wrong reason regardless of whether the production fix under test is
+	// present.
+	withSchemeChangeTarget(t)
 
 	_, err = LoadJSONFromDir(w.HomePath, 214, "test-password-123", schemeChangeTarget, w.SigName2)
 	if err == nil {

@@ -810,7 +810,11 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 			// one from: generating a random key here would silently hand this
 			// wallet a brand-new, unstaked identity (loadWalletFromStruct later
 			// overwrites MainAddress from Account1.Address). Refuse instead.
-			return nil, fmt.Errorf("the network switched primary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase, or restore the wallet file from a backup that already contains a %q key", sigName, sigName, sigName)
+			// The recovery phrase is the reliable route (StoreJSON's per-scheme
+			// key archive can itself go stale across reloads, a separate,
+			// pre-existing issue), so lead with that and mention a file backup
+			// only as a secondary option.
+			return nil, fmt.Errorf("the network switched primary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup taken after a %q key was already present", sigName, sigName, sigName)
 		}
 	}
 	if !common.IsPaused2() && w.SigName2 != sigName2 {
@@ -827,7 +831,7 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 			copy(w.Account2.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
 		} else {
 			// See the matching comment in the primary branch above.
-			return nil, fmt.Errorf("the network switched secondary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase, or restore the wallet file from a backup that already contains a %q key", sigName2, sigName2, sigName2)
+			return nil, fmt.Errorf("the network switched secondary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup taken after a %q key was already present", sigName2, sigName2, sigName2)
 		}
 	}
 
@@ -1035,17 +1039,28 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	// w2's new key. Without this, w2 (built field by field above) never gets an
 	// EncryptedMnemonic at all and the phrase backup is silently lost forever
 	// (PBKDF2 is one-way, so it can never be recovered from the seed).
+	//
+	// If it fails to decrypt under the just-verified-correct old password, the
+	// phrase was already unrecoverable before this call (the load path already
+	// degrades the same way — see Finding 4) and re-encrypting it under the new
+	// password can never fix that. Aborting the whole password change here would
+	// just be a dead end, contradicting the degrade-not-abort rule everywhere
+	// else. w2.EncryptedMnemonic is left at its zero value (nil), dropping the
+	// blob rather than carrying forward ciphertext now known to never decrypt:
+	// keeping it would leave a field on disk that looks like a phrase backup
+	// but provably isn't one.
 	if len(w.EncryptedMnemonic) > 0 {
 		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
 		if err != nil {
-			return fmt.Errorf("failed to decrypt recovery phrase: %v", err)
+			logger.GetLogger().Println("cannot decrypt the recovery phrase during password change, dropping it:", err)
+		} else {
+			enc, eerr := w2.encrypt(mnemonic)
+			ZeroBytes(mnemonic)
+			if eerr != nil {
+				return fmt.Errorf("failed to encrypt recovery phrase: %v", eerr)
+			}
+			w2.EncryptedMnemonic = enc
 		}
-		enc, err := w2.encrypt(mnemonic)
-		ZeroBytes(mnemonic)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt recovery phrase: %v", err)
-		}
-		w2.EncryptedMnemonic = enc
 	}
 
 	err := w2.StoreJSON()
@@ -1154,17 +1169,26 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 	// w.passwordBytes). Doing this after the password swap below would try to
 	// decrypt an old-key blob with the new key: that fails, and the wallet
 	// would otherwise persist a phrase that can never be opened again.
+	//
+	// If decrypt fails here even under the still-old (just-verified-correct)
+	// key, the phrase was already unrecoverable before this call — same
+	// degrade-not-abort case as ChangePassword above and as loading (Finding
+	// 4). Drop the blob (w.EncryptedMnemonic = nil) instead of aborting the
+	// whole password change or carrying forward ciphertext now known to never
+	// decrypt.
 	if len(w.EncryptedMnemonic) > 0 {
 		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
 		if err != nil {
-			return fmt.Errorf("failed to decrypt recovery phrase: %v", err)
+			logger.GetLogger().Println("cannot decrypt the recovery phrase during password change, dropping it:", err)
+			w.EncryptedMnemonic = nil
+		} else {
+			enc, eerr := w.encryptWithKey(newPasswordBytes, mnemonic) // CW-M3: no toggle
+			ZeroBytes(mnemonic)
+			if eerr != nil {
+				return fmt.Errorf("failed to encrypt recovery phrase: %v", eerr)
+			}
+			w.EncryptedMnemonic = enc
 		}
-		enc, err := w.encryptWithKey(newPasswordBytes, mnemonic) // CW-M3: no toggle
-		ZeroBytes(mnemonic)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt recovery phrase: %v", err)
-		}
-		w.EncryptedMnemonic = enc
 	}
 
 	// Now update to new password
