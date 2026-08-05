@@ -375,6 +375,12 @@ func OnMessage(addr [4]byte, m []byte) {
 		incompleteTxn := false
 		hashesMissingAll := [][]byte{}
 		lastGoodBlock := indices[0]
+		// verifiedUpTo is the highest new block in this batch that fully passed
+		// verification AND whose transactions we already hold. Blocks past it must
+		// not be applied: this phase checks the whole batch against pre-batch
+		// state, while state a block introduces (validator pubkeys via
+		// ProcessBlockPubKey, for one) only lands when that block is applied.
+		verifiedUpTo := int64(-1)
 		merkleTries := map[int64]*transactionsPool.MerkleTree{}
 		for i := 0; i < len(blcks); i++ {
 			header := blcks[i].GetHeader()
@@ -481,6 +487,17 @@ func OnMessage(addr [4]byte, m []byte) {
 			defer merkleTrie.Destroy()
 			if err != nil {
 				logger.GetLogger().Printf("ERROR: Base block verification failed for block %d: %v", index, err)
+				// A block verified here may depend on state that an earlier block of
+				// this same batch only writes when it is applied - a validator pubkey
+				// registered by ProcessBlockPubKey being the common case, without
+				// which oracle proof authentication cannot check a signature. So when
+				// we already have a verified prefix, stop the batch and apply it
+				// rather than declaring a fork: the next round re-checks this block
+				// against the state the prefix produced.
+				if verifiedUpTo >= 0 {
+					logger.GetLogger().Printf("stopping batch at block %d - applying verified blocks up to %d first", index, verifiedUpTo)
+					break
+				}
 				// Only blame the peer when the parent came from its own batch, i.e.
 				// the blocks it sent are internally inconsistent. When the parent
 				// came from our storage the mismatch is our own fork, and banning
@@ -504,10 +521,14 @@ func OnMessage(addr [4]byte, m []byte) {
 				logger.GetLogger().Printf("Block %d is missing %d transactions", index, len(hashesMissing))
 				hashesMissingAll = append(hashesMissingAll, hashesMissing...)
 				incompleteTxn = true
-			} else {
-				logger.GetLogger().Printf("Block %d has all transactions verified", index)
+				// Stop here. Every later block may depend on what these missing
+				// transactions write (a pubkey registration, an account balance),
+				// and verifying them now produces failures that look like a fork
+				// but are only "we do not have the data yet".
+				break
 			}
-
+			logger.GetLogger().Printf("Block %d has all transactions verified", index)
+			verifiedUpTo = index
 		}
 
 		if incompleteTxn {
@@ -523,8 +544,15 @@ func OnMessage(addr [4]byte, m []byte) {
 				transactionServices.SendGT(addr, chunk, "bt")
 				time.Sleep(500 * time.Millisecond)
 			}
-			logger.GetLogger().Println("Waiting for missing transactions before continuing sync")
-			return
+			if verifiedUpTo < 0 {
+				logger.GetLogger().Println("Waiting for missing transactions before continuing sync")
+				return
+			}
+			// Apply what we could verify anyway. Standing still until the peer
+			// answers would stall the whole sync on one incomplete block, and the
+			// blocks we do hold are exactly what registers the state the missing
+			// ones are checked against.
+			logger.GetLogger().Printf("Requested missing transactions - applying verified blocks up to %d meanwhile", verifiedUpTo)
 		}
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Starting final block processing and fund transfers")
@@ -542,6 +570,13 @@ func OnMessage(addr [4]byte, m []byte) {
 		for i := 0; i < len(blcks); i++ {
 			block := blcks[i]
 			index := indices[i]
+			if index > verifiedUpTo {
+				// Beyond the verified prefix: these blocks were never checked, or
+				// were checked against state that only exists once this prefix is
+				// applied. The next sync round picks them up.
+				logger.GetLogger().Printf("Stopping at block %d - beyond the verified prefix (up to %d)", index, verifiedUpTo)
+				break
+			}
 			if block.GetHeader().Height <= lastGoodBlock || index <= h {
 				logger.GetLogger().Printf("Skipping already verified block %d", index)
 				continue
