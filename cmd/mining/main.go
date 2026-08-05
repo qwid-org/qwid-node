@@ -3,8 +3,6 @@ package main
 import (
 	_ "net/http/pprof"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/wonabru/qwid-node/blocks"
@@ -195,37 +193,25 @@ func main() {
 
 	time.Sleep(time.Second)
 
-	// Find peer IP argument (skip flags like -log)
-	var peerIPArg string
-	for _, arg := range os.Args[1:] {
-		if !strings.HasPrefix(arg, "-") {
-			peerIPArg = arg
-			break
+	// Bootstrap peers from the command line (flags like -log are skipped).
+	bootstrapPeers, err := parsePeerIPs(os.Args[1:])
+	if err != nil {
+		logger.GetLogger().Println(err)
+		return
+	}
+	bootstrapDialer := newDialer()
+
+	if len(bootstrapPeers) > 0 {
+		logger.GetLogger().Println("Connecting to bootstrap peers:", bootstrapPeers)
+		for _, ip := range bootstrapPeers {
+			bootstrapDialer.connectToPeer(ip)
 		}
 	}
 
-	if peerIPArg != "" {
-		logger.GetLogger().Println("Processing command line arguments...")
-		ips := strings.Split(peerIPArg, ".")
-		if len(ips) != 4 {
-			logger.GetLogger().Println("Invalid IP address format")
-			return
-		}
-		var ip [4]byte
-		for i := 0; i < 4; i++ {
-			num, err := strconv.Atoi(ips[i])
-			if err != nil {
-				logger.GetLogger().Println("Invalid IP address segment:", ips[i])
-				return
-			}
-			ip[i] = byte(num)
-		}
-
-		logger.GetLogger().Println("Connecting to peer:", ip)
-		go nonceService.StartSubscribingNonceMsg(ip)
-		go syncServices.StartSubscribingSyncMsg(ip)
-		go transactionServices.StartSubscribingTransactionMsg(ip)
-	}
+	// Keep re-dialling them for as long as the node runs. Peer discovery travels
+	// inside 'hi' messages, which need a live connection to arrive, so once every
+	// connection drops nothing reconnects on its own.
+	go keepBootstrapPeersConnected(bootstrapPeers, bootstrapDialer)
 
 	time.Sleep(time.Second)
 
