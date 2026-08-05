@@ -63,7 +63,7 @@ Czysty Go, bez liboqs. Buduje fundament, na którym stoją wszystkie kolejne zad
 - Test: `wallet/mnemonic_seed_test.go`
 
 **Interfaces:**
-- Consumes: `github.com/wonabru/bip39` — `NewMnemonic(entropy []byte) (string, error)`, `IsMnemonicValid(mnemonic string) bool`, `NewSeed(mnemonic, password string) []byte`
+- Consumes: `github.com/wonabru/bip39` — `NewMnemonic(entropy []byte) (string, error)`, `MnemonicToByteArray(mnemonic string) ([]byte, error)` (validates the checksum; `IsMnemonicValid` does **not**), `NewSeed(mnemonic, password string) []byte`
 - Produces:
   - `func NewMnemonic24() ([]byte, error)` — 24 słowa rozdzielone pojedynczymi spacjami
   - `func SeedFromMnemonic(mnemonic []byte) ([]byte, error)` — 64 bajty
@@ -259,7 +259,13 @@ func SeedFromMnemonic(mnemonic []byte) ([]byte, error) {
 	if n := len(strings.Fields(phrase)); n != MnemonicWordCount {
 		return nil, fmt.Errorf("fraza musi mieć dokładnie %d słów, podano %d", MnemonicWordCount, n)
 	}
-	if !bip39.IsMnemonicValid(phrase) {
+	// bip39.IsMnemonicValid only checks word count and wordlist membership; it
+	// does not verify the checksum bits. bip39.MnemonicToByteArray calls
+	// IsMnemonicValid internally and then verifies the checksum, so it is the
+	// only one of the two that actually rejects a mnemonic with a bad checksum.
+	// This matters: without the checksum check a typo in a recovery phrase would
+	// silently derive a different wallet instead of reporting an error.
+	if _, err := bip39.MnemonicToByteArray(phrase); err != nil {
 		return nil, fmt.Errorf("nieprawidłowa fraza: słowo spoza listy BIP39 albo błędna suma kontrolna")
 	}
 	return bip39.NewSeed(phrase, ""), nil
