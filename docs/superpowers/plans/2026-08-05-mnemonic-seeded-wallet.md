@@ -1892,14 +1892,13 @@ Zamień etykietę przycisku i tekst pola, tak by opisywały nową semantykę:
 	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore keys from recovery phrase", nil)
 	buttonRestoreMnemonic.ConnectClicked(func(bool) {
 		phrase := inputRestoreMnemonic.Text()
+		// One call rebuilds the WHOLE wallet: RestoreSecretKeyFromMnemonic ignores
+		// its role argument and derives both accounts atomically (Task 5). Calling
+		// it a second time would repeat both post-quantum derivations and, on a
+		// transient failure, report an error for a restore that already succeeded.
 		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, true); err != nil {
 			widgets.QMessageBox_Information(nil, "OK",
-				fmt.Sprintf("Cannot restore the primary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-			return
-		}
-		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, false); err != nil {
-			widgets.QMessageBox_Information(nil, "OK",
-				fmt.Sprintf("Cannot restore the secondary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+				fmt.Sprintf("Cannot restore the keys:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 			return
 		}
 		widgets.QMessageBox_Information(nil, "OK",
