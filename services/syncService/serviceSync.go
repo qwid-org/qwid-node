@@ -173,12 +173,77 @@ func Send(addr [4]byte, nb []byte) bool {
 	return false
 }
 
+// syncProgress tracks how long the local height has stood still, so a sync that
+// is waiting on data that will never arrive can be detected. Only ever touched
+// by checkSyncStall, which runs on the single sendSyncMsgInLoop goroutine.
+type syncProgress struct {
+	height int64
+	since  time.Time
+}
+
+var progress = syncProgress{height: -1}
+
+// checkSyncStall gives back a couple of blocks when the node has been syncing
+// without advancing for SyncStallTimeout.
+//
+// The sync protocol has no retry of its own: a node that asked a peer for a
+// block's transactions ("bt") and never got the answer ("bx") — because the
+// connection dropped in between — keeps re-checking the same incomplete block
+// forever. Rewinding makes the next batch from the peer overlap blocks we
+// already hold, which re-runs the missing-transaction census in the "sh"
+// handler and re-sends the request. The same recovery covers a batch that
+// stalled on blocks rather than transactions.
+func checkSyncStall(now time.Time) {
+	h := common.GetHeight()
+
+	if h != progress.height {
+		progress.height = h
+		progress.since = now
+		return
+	}
+	if !common.IsSyncing.Load() {
+		// Standing still while caught up is the normal state, not a stall.
+		progress.since = now
+		return
+	}
+	if progress.since.IsZero() {
+		progress.since = now
+		return
+	}
+	if now.Sub(progress.since) < SyncStallTimeout {
+		return
+	}
+
+	// Rewind under the same lock the "sh" handler holds, so we never pull blocks
+	// out from under a batch that is mid-apply. A held lock also means a batch is
+	// actively running, which is not a stall — skip this round.
+	if !syncProcessMutex.TryLock() {
+		return
+	}
+	defer syncProcessMutex.Unlock()
+
+	target := h - SyncStallRewind
+	if target < 0 {
+		target = 0
+	}
+	logger.GetLogger().Printf("sync stalled at height %d for %s - rewinding to %d to re-request the batch",
+		h, now.Sub(progress.since).Truncate(time.Second), target)
+	services.ResetAccountsAndBlocksSync(target)
+
+	// Restart the clock even if the rewind landed somewhere else than asked, so
+	// a chain of rewinds is paced by SyncStallTimeout rather than firing every
+	// second.
+	progress.height = common.GetHeight()
+	progress.since = now
+}
+
 func sendSyncMsgInLoop() {
 	for {
 		if len(tcpip.GetPeersConnected(tcpip.SyncTopic)) == 0 {
 			time.Sleep(3 * time.Second)
 			continue
 		}
+		checkSyncStall(time.Now())
 		n := generateSyncMsgHeight()
 		if !Send([4]byte{0, 0, 0, 0}, n) {
 			logger.GetLogger().Println("could not send 'hi' message")
