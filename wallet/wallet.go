@@ -281,6 +281,9 @@ func (w *Wallet) SetMnemonic(mnemonic []byte) error {
 	if err != nil {
 		return err
 	}
+	// Zero any previously derived seed before replacing it, so a phrase change
+	// (or a second SetMnemonic call) never leaves the old seed lingering in memory.
+	ZeroBytes(w.seed)
 	w.seed = seed
 	w.EncryptedMnemonic = enc
 	return nil
@@ -288,9 +291,28 @@ func (w *Wallet) SetMnemonic(mnemonic []byte) error {
 
 // HasSeed reports whether this wallet can derive keys from a recovery phrase.
 // Wallets created before this feature return false and keep their previous,
-// random key generation.
+// random key generation. This only checks presence, not integrity: a struct
+// copy taken concurrently with Wipe() can observe a zeroed backing array with
+// a non-zero length (slices share their backing array across a value copy).
+// GenerateNewAccountFromSeed guards against that case before deriving
+// anything from the seed.
 func (w *Wallet) HasSeed() bool {
 	return len(w.seed) > 0
+}
+
+// bip39SeedLength is the exact size of the seed SeedFromMnemonic produces
+// (standard BIP39: PBKDF2-HMAC-SHA512, 64-byte output).
+const bip39SeedLength = 64
+
+// isAllZero reports whether every byte of b is zero. Used to detect a seed
+// that has been wiped out from under a stale struct copy (see HasSeed).
+func isAllZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // GenerateNewAccountFromSeed creates the account that this wallet's recovery
@@ -302,6 +324,13 @@ func GenerateNewAccountFromSeed(w Wallet, sigName string, primary bool) (Account
 	}
 	if len(w.password) < 1 {
 		return Account{}, fmt.Errorf("password cannot be empty")
+	}
+	// A struct copy of Wallet taken just before the original's Wipe() runs
+	// shares the same seed backing array; Wipe() zeroing it in place would
+	// otherwise leave this copy reporting HasSeed()==true over an all-zero
+	// seed, silently deriving keys from no entropy at all.
+	if len(w.seed) != bip39SeedLength || isAllZero(w.seed) {
+		return Account{}, fmt.Errorf("wallet seed is invalid (wrong length or zeroed out); reload the wallet or restore it from its recovery phrase")
 	}
 
 	var signer oqs.Signature
@@ -660,19 +689,18 @@ func (w *Wallet) StoreJSON() error {
 		copy(w.Accounts[k].EncryptedSecretKey, se)
 	}
 
-	// Re-encrypt the phrase under the current password so ChangePassword leaves a
-	// file whose phrase opens with the new one.
-	if w.HasSeed() && len(w.EncryptedMnemonic) > 0 {
-		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
-		if err == nil {
-			enc, eerr := w.encrypt(mnemonic)
-			ZeroBytes(mnemonic)
-			if eerr != nil {
-				return eerr
-			}
-			w.EncryptedMnemonic = enc
-		}
-	}
+	// EncryptedMnemonic is deliberately NOT re-encrypted here. It is only ever
+	// correct to re-encrypt it against a *specific* old/new key pair, which only
+	// ChangePassword and ChangePasswordInPlace know; StoreJSON only ever sees the
+	// current password, so trying to "refresh" the encryption here by decrypting
+	// under the current key and re-encrypting under the same current key is pure
+	// churn on the normal path. Worse, during ChangePasswordInPlace's transition
+	// window w.passwordBytes is already the *new* key while EncryptedMnemonic is
+	// still under the *old* one, so a decrypt attempted here would fail, and a
+	// swallowed failure used to persist an unopenable phrase permanently. Both
+	// password-change functions now re-encrypt EncryptedMnemonic explicitly
+	// before calling StoreJSON, so by the time we get here it is already correct
+	// under the current key (or absent, for legacy wallets).
 
 	// OB-122: normalize account role metadata before persisting so a freshly
 	// generated wallet is identical to its own reloaded form. GenerateNewAccount
@@ -770,13 +798,19 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 		if a, ok := w.Accounts[sigName]; ok {
 			w.Account1 = a
 			copy(w.Account1.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
-		} else {
+		} else if w.HasSeed() {
 			acc, err := GenerateNewAccountFromSeed(*w, sigName, true)
 			if err != nil {
 				return nil, err
 			}
 			w.Account1 = acc
 			copy(w.Account1.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
+		} else {
+			// No stored key for the new scheme and no recovery phrase to derive
+			// one from: generating a random key here would silently hand this
+			// wallet a brand-new, unstaked identity (loadWalletFromStruct later
+			// overwrites MainAddress from Account1.Address). Refuse instead.
+			return nil, fmt.Errorf("the network switched primary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase, or restore the wallet file from a backup that already contains a %q key", sigName, sigName, sigName)
 		}
 	}
 	if !common.IsPaused2() && w.SigName2 != sigName2 {
@@ -784,13 +818,16 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 		if a, ok := w.Accounts[sigName2]; ok {
 			w.Account2 = a
 			copy(w.Account2.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
-		} else {
+		} else if w.HasSeed() {
 			acc, err := GenerateNewAccountFromSeed(*w, sigName2, false)
 			if err != nil {
 				return nil, err
 			}
 			w.Account2 = acc
 			copy(w.Account2.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
+		} else {
+			// See the matching comment in the primary branch above.
+			return nil, fmt.Errorf("the network switched secondary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase, or restore the wallet file from a backup that already contains a %q key", sigName2, sigName2, sigName2)
 		}
 	}
 
@@ -993,6 +1030,24 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 		}
 		w2.Account2.EncryptedSecretKey = se
 	}
+
+	// Carry the recovery phrase across the password change, re-encrypted under
+	// w2's new key. Without this, w2 (built field by field above) never gets an
+	// EncryptedMnemonic at all and the phrase backup is silently lost forever
+	// (PBKDF2 is one-way, so it can never be recovered from the seed).
+	if len(w.EncryptedMnemonic) > 0 {
+		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt recovery phrase: %v", err)
+		}
+		enc, err := w2.encrypt(mnemonic)
+		ZeroBytes(mnemonic)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt recovery phrase: %v", err)
+		}
+		w2.EncryptedMnemonic = enc
+	}
+
 	err := w2.StoreJSON()
 	if err != nil {
 		logger.GetLogger().Println("Can not store new wallet")
@@ -1007,6 +1062,9 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	w.Iv = loaded.Iv
 	w.KdfSalt = loaded.KdfSalt
 	w.Accounts = loaded.Accounts
+	w.EncryptedMnemonic = loaded.EncryptedMnemonic
+	ZeroBytes(w.seed) // the old seed (if any) is superseded by loaded.seed below
+	w.seed = loaded.seed
 	return nil
 }
 
@@ -1089,6 +1147,24 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 			return fmt.Errorf("failed to encrypt Account2: %v", err)
 		}
 		w.Account2.EncryptedSecretKey = se
+	}
+
+	// Re-encrypt the recovery phrase under the new key while the old key is
+	// still live in w.passwordBytes (decrypt uses w.decrypt, which reads
+	// w.passwordBytes). Doing this after the password swap below would try to
+	// decrypt an old-key blob with the new key: that fails, and the wallet
+	// would otherwise persist a phrase that can never be opened again.
+	if len(w.EncryptedMnemonic) > 0 {
+		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt recovery phrase: %v", err)
+		}
+		enc, err := w.encryptWithKey(newPasswordBytes, mnemonic) // CW-M3: no toggle
+		ZeroBytes(mnemonic)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt recovery phrase: %v", err)
+		}
+		w.EncryptedMnemonic = enc
 	}
 
 	// Now update to new password
