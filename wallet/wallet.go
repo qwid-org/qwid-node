@@ -598,23 +598,53 @@ func (w *Wallet) GetMnemonicWords(primary bool) (string, error) {
 // in a row (once with primary=true, once with primary=false) to restore one
 // wallet.
 //
-// SetMnemonic validates the phrase before mutating anything (seed, encrypted
-// phrase), and both accounts are derived and validated before either is
-// assigned onto w — so a bad phrase, or a derivation failure, leaves the
-// wallet exactly as it was.
+// The whole operation is atomic, including against a derivation failure, not
+// just a bad phrase: the phrase is validated and encrypted, and both accounts
+// are derived, on a scratch copy of the wallet before anything on w is
+// touched. w.seed, w.EncryptedMnemonic, w.Account1, w.Account2 and
+// w.MainAddress are only written once every step above has succeeded — so a
+// bad phrase, or a derivation failure partway through (for example the
+// network having voted in a signature scheme this build of liboqs does not
+// support — loadKeys already has to handle exactly that case, see its "has
+// neither a stored key ... nor a recovery phrase" error path), leaves w
+// exactly as it was. The stored phrase and the keys it backs can never
+// disagree.
 func (w *Wallet) RestoreSecretKeyFromMnemonic(mnemonic string, primary bool) error {
 	_ = primary
-	if err := w.SetMnemonic([]byte(mnemonic)); err != nil {
-		return err
+	if len(w.passwordBytes) == 0 {
+		return fmt.Errorf("set the wallet password before the recovery phrase")
 	}
-	acc1, err := GenerateNewAccountFromSeed(*w, w.SigName, true)
+	seed, err := SeedFromMnemonic([]byte(mnemonic))
 	if err != nil {
 		return err
 	}
-	acc2, err := GenerateNewAccountFromSeed(*w, w.SigName2, false)
+	enc, err := w.encrypt([]byte(mnemonic))
 	if err != nil {
+		ZeroBytes(seed)
 		return err
 	}
+
+	// Derive both accounts on a scratch copy that carries the NEW seed. Wallet
+	// is passed by value into GenerateNewAccountFromSeed, and neither it nor
+	// DeriveKeySeed mutates the seed slice they're given, so nothing here can
+	// touch w — if either derivation fails, w has not been written to at all.
+	scratch := *w
+	scratch.seed = seed
+	acc1, err := GenerateNewAccountFromSeed(scratch, w.SigName, true)
+	if err != nil {
+		ZeroBytes(seed)
+		return err
+	}
+	acc2, err := GenerateNewAccountFromSeed(scratch, w.SigName2, false)
+	if err != nil {
+		ZeroBytes(seed)
+		return err
+	}
+
+	// Every step above succeeded — commit atomically.
+	ZeroBytes(w.seed)
+	w.seed = seed
+	w.EncryptedMnemonic = enc
 	w.Account1 = acc1
 	w.Account2 = acc2
 	w.MainAddress = w.Account1.Address

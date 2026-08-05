@@ -237,3 +237,60 @@ func TestRestoreFromMnemonicLeavesWalletUnchangedOnBadPhrase(t *testing.T) {
 		t.Fatal("EncryptedMnemonic zmienił się mimo błędnej frazy")
 	}
 }
+
+// TestRestoreFromMnemonicLeavesWalletUnchangedOnDerivationFailure covers the
+// same fund-loss shape as the partial-restore bug, but triggered by a
+// mid-operation derivation failure instead of a bad phrase: the phrase can be
+// perfectly valid and still fail to produce a key, e.g. because the network
+// has voted in a signature scheme this build of liboqs does not support
+// (loadKeys already has to handle exactly that case). A restore that commits
+// the new seed/EncryptedMnemonic before deriving both accounts would leave
+// the stored phrase pointing at keys the wallet doesn't actually hold.
+func TestRestoreFromMnemonicLeavesWalletUnchangedOnDerivationFailure(t *testing.T) {
+	original, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newSeedTestWallet(t, 230)
+	if err := w.SetMnemonic(original); err != nil {
+		t.Fatal(err)
+	}
+	fillAccountsFromSeed(t, w)
+
+	wantAccount1 := w.Account1.Address.GetHex()
+	wantAccount2 := w.Account2.Address.GetHex()
+	wantMain := w.MainAddress.GetHex()
+	wantEncMnemonic := append([]byte(nil), w.EncryptedMnemonic...)
+
+	// A scheme name liboqs does not support: acc1 (SigName, unchanged) derives
+	// fine, acc2 (SigName2) fails — exactly the partway-through case.
+	w.SigName2 = "No-Such-Scheme-42"
+
+	other, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RestoreSecretKeyFromMnemonic(string(other), true); err == nil {
+		t.Fatal("oczekiwano błędu dla nieobsługiwanego schematu podpisu")
+	}
+
+	got, err := w.GetMnemonicWords(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(original) {
+		t.Fatalf("GetMnemonicWords zwróciła nową frazę mimo nieudanej derywacji klucza")
+	}
+	if w.Account1.Address.GetHex() != wantAccount1 {
+		t.Fatal("Account1 zmienił się mimo nieudanej derywacji klucza")
+	}
+	if w.Account2.Address.GetHex() != wantAccount2 {
+		t.Fatal("Account2 zmienił się mimo nieudanej derywacji klucza")
+	}
+	if w.MainAddress.GetHex() != wantMain {
+		t.Fatal("MainAddress zmienił się mimo nieudanej derywacji klucza")
+	}
+	if !bytes.Equal(w.EncryptedMnemonic, wantEncMnemonic) {
+		t.Fatal("EncryptedMnemonic zmienił się mimo nieudanej derywacji klucza")
+	}
+}
