@@ -54,16 +54,24 @@ type Wallet struct {
 	// decryption re-derive keys from it.
 	password      []byte
 	passwordBytes []byte
-	Iv            []byte             `json:"iv"`
-	KdfSalt       []byte             `json:"kdf_salt"`
-	HomePath      string             `json:"home_path"`
-	WalletNumber  uint8              `json:"wallet_number"`
-	MainAddress   common.Address     `json:"main_address"`
-	SigName       string             `json:"sig_name"`
-	SigName2      string             `json:"sig_name_2"`
-	Account1      Account            `json:"account_1"`
-	Account2      Account            `json:"account_2"`
-	Accounts      map[string]Account `json:"accounts"`
+	// seed is the 64-byte BIP39 seed derived from the recovery phrase. Present
+	// only while the wallet is unlocked; Wipe() zeroes it.
+	seed []byte
+	// EncryptedMnemonic holds the recovery phrase under the same AES-256-GCM /
+	// Argon2id key as the secret keys. The phrase is stored rather than the seed
+	// because PBKDF2 is one-way: from a seed the words cannot be shown again.
+	// omitempty keeps pre-existing wallet files byte-identical.
+	EncryptedMnemonic []byte             `json:"encrypted_mnemonic,omitempty"`
+	Iv                []byte             `json:"iv"`
+	KdfSalt           []byte             `json:"kdf_salt"`
+	HomePath          string             `json:"home_path"`
+	WalletNumber      uint8              `json:"wallet_number"`
+	MainAddress       common.Address     `json:"main_address"`
+	SigName           string             `json:"sig_name"`
+	SigName2          string             `json:"sig_name_2"`
+	Account1          Account            `json:"account_1"`
+	Account2          Account            `json:"account_2"`
+	Accounts          map[string]Account `json:"accounts"`
 }
 
 var activeWallet *Wallet
@@ -127,6 +135,10 @@ func (w *Wallet) Wipe() {
 	for i := range w.passwordBytes {
 		w.passwordBytes[i] = 0
 	}
+	for i := range w.seed {
+		w.seed[i] = 0
+	}
+	w.seed = nil
 	w.password = nil
 	w.passwordBytes = nil
 	// CW-H2: cleanse the live post-quantum secret keys. signer.Clean() runs
@@ -251,6 +263,81 @@ func EmptyAccount() Account {
 		Address:            common.Address{},
 		signer:             oqs.Signature{},
 	}
+}
+
+// SetMnemonic validates a recovery phrase, derives the wallet seed from it and
+// keeps the phrase encrypted so it can be shown again later. Requires the wallet
+// password to be set first, since the phrase is encrypted with the key derived
+// from it.
+func (w *Wallet) SetMnemonic(mnemonic []byte) error {
+	if len(w.passwordBytes) == 0 {
+		return fmt.Errorf("set the wallet password before the recovery phrase")
+	}
+	seed, err := SeedFromMnemonic(mnemonic)
+	if err != nil {
+		return err
+	}
+	enc, err := w.encrypt(mnemonic)
+	if err != nil {
+		return err
+	}
+	w.seed = seed
+	w.EncryptedMnemonic = enc
+	return nil
+}
+
+// HasSeed reports whether this wallet can derive keys from a recovery phrase.
+// Wallets created before this feature return false and keep their previous,
+// random key generation.
+func (w *Wallet) HasSeed() bool {
+	return len(w.seed) > 0
+}
+
+// GenerateNewAccountFromSeed creates the account that this wallet's recovery
+// phrase determines for one signature scheme and role. Without a seed it falls
+// back to GenerateNewAccount, so pre-existing wallets are unaffected.
+func GenerateNewAccountFromSeed(w Wallet, sigName string, primary bool) (Account, error) {
+	if !w.HasSeed() {
+		return GenerateNewAccount(w, sigName)
+	}
+	if len(w.password) < 1 {
+		return Account{}, fmt.Errorf("password cannot be empty")
+	}
+
+	var signer oqs.Signature
+	if err := signer.Init(sigName, nil); err != nil {
+		return Account{}, err
+	}
+
+	keySeed := DeriveKeySeed(w.seed, sigName, primary)
+	defer ZeroBytes(keySeed)
+
+	pubKey, drawn, err := signer.GenerateKeyPairFromSeed(keySeed)
+	if err != nil {
+		return Account{}, err
+	}
+	logger.GetLogger().Printf("derived %s key from the recovery phrase (%d RNG bytes consumed)", sigName, drawn)
+
+	acc := EmptyAccount()
+	if err := acc.PublicKey.Init(pubKey, w.MainAddress); err != nil {
+		return Account{}, err
+	}
+	acc.Address = acc.PublicKey.GetAddress()
+
+	if err := acc.secretKey.Init(signer.ExportSecretKey(), acc.Address, false); err != nil {
+		return Account{}, err
+	}
+	acc.signer = signer
+
+	se, err := w.encrypt(acc.secretKey.GetBytes())
+	if err != nil {
+		logger.GetLogger().Println(err)
+		return Account{}, err
+	}
+	acc.EncryptedSecretKey = make([]byte, len(se))
+	copy(acc.EncryptedSecretKey, se)
+
+	return acc, nil
 }
 
 func GenerateNewAccount(w Wallet, sigName string) (Account, error) {
@@ -573,6 +660,20 @@ func (w *Wallet) StoreJSON() error {
 		copy(w.Accounts[k].EncryptedSecretKey, se)
 	}
 
+	// Re-encrypt the phrase under the current password so ChangePassword leaves a
+	// file whose phrase opens with the new one.
+	if w.HasSeed() && len(w.EncryptedMnemonic) > 0 {
+		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+		if err == nil {
+			enc, eerr := w.encrypt(mnemonic)
+			ZeroBytes(mnemonic)
+			if eerr != nil {
+				return eerr
+			}
+			w.EncryptedMnemonic = enc
+		}
+	}
+
 	// OB-122: normalize account role metadata before persisting so a freshly
 	// generated wallet is identical to its own reloaded form. GenerateNewAccount
 	// cannot set these for Account1 (w.MainAddress is not yet known when Account1
@@ -645,13 +746,32 @@ func LoadJSON(walletNumber uint8, password string, sigName, sigName2 string) (*W
 }
 
 func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 string) (*Wallet, error) {
+	w.SetPassword(password)
+
+	// Recover the seed before anything can need it: the scheme-change branches
+	// below generate keys, and with a seed those must be derived, not random.
+	if len(w.EncryptedMnemonic) > 0 {
+		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+		if err != nil {
+			logger.GetLogger().Println("cannot decrypt the recovery phrase, continuing without a seed:", err)
+		} else {
+			seed, serr := SeedFromMnemonic(mnemonic)
+			ZeroBytes(mnemonic)
+			if serr != nil {
+				logger.GetLogger().Println("stored recovery phrase is not valid, continuing without a seed:", serr)
+			} else {
+				w.seed = seed
+			}
+		}
+	}
+
 	if !common.IsPaused() && w.SigName != sigName {
 		w.SigName = sigName
 		if a, ok := w.Accounts[sigName]; ok {
 			w.Account1 = a
 			copy(w.Account1.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
 		} else {
-			acc, err := GenerateNewAccount(*w, sigName)
+			acc, err := GenerateNewAccountFromSeed(*w, sigName, true)
 			if err != nil {
 				return nil, err
 			}
@@ -665,7 +785,7 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 			w.Account2 = a
 			copy(w.Account2.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
 		} else {
-			acc, err := GenerateNewAccount(*w, sigName2)
+			acc, err := GenerateNewAccountFromSeed(*w, sigName2, false)
 			if err != nil {
 				return nil, err
 			}
@@ -673,8 +793,6 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 			copy(w.Account2.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
 		}
 	}
-
-	w.SetPassword(password)
 
 	// Try to init Account1 - always try, tolerate failure if encryption is paused
 	account1OK := false
