@@ -15,12 +15,19 @@ import (
 	"unsafe"
 )
 
-// randMutex serializes every liboqs call that consumes randomness. It exists so
-// GenerateKeyPairFromSeed can install a deterministic RNG — which is global to
-// the process — without any concurrent signing observing it. A signature that
-// reused its salt would let anyone recover the private key from two signatures
-// published on-chain. OQS_SIG_verify draws no randomness and is deliberately
-// left unguarded, so block verification keeps its full parallelism.
+// randMutex serializes every liboqs call that consumes randomness:
+// Signature.Sign, Signature.GenerateKeyPair (and the deterministic
+// GenerateKeyPairFromSeed), KeyEncapsulation.GenerateKeyPair, and
+// KeyEncapsulation.EncapSecret. It exists so GenerateKeyPairFromSeed can
+// install a deterministic RNG — which is global to the process — without any
+// concurrent randomness-consuming call observing it. A signature that reused
+// its salt would let anyone recover the private key from two signatures
+// published on-chain; an unguarded EncapSecret racing a seeded keygen can
+// corrupt the shared HKDF reader state, steal stream bytes so the same seed
+// derives a different key pair, or exhaust the stream outright. OQS_SIG_verify
+// and KeyEncapsulation.DecapSecret draw no randomness and are deliberately left
+// unguarded, so block verification and secret decapsulation keep their full
+// parallelism.
 var randMutex sync.Mutex
 
 // Note: the liboqs version is intentionally not printed at startup to avoid
@@ -209,6 +216,9 @@ func (kem *KeyEncapsulation) ExportSecretKey() []byte {
 // corresponding ciphertext and shared secret.
 func (kem *KeyEncapsulation) EncapSecret(publicKey []byte) (ciphertext,
 	sharedSecret []byte, err error) {
+	randMutex.Lock()
+	defer randMutex.Unlock()
+
 	if len(publicKey) != kem.algDetails.LengthPublicKey {
 		return nil, nil, errors.New("incorrect public key length")
 	}

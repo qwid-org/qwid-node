@@ -29,45 +29,69 @@ const minSeedLength = 32
 // removed while holding randMutex — the same lock Sign holds. Signing therefore
 // can never observe it, and Falcon's per-signature salt always comes from the
 // system CSPRNG.
-func (sig *Signature) GenerateKeyPairFromSeed(seed []byte) ([]byte, int, error) {
+//
+// If the HKDF stream fails partway through a draw, liboqs still gets fed
+// whatever the callback wrote — the caller-provided buffer is zero-filled, so
+// a short read leaves it partly zero. That would let generateKeyPairUnlocked
+// write a secret key derived from partly-zero randomness. On any error return
+// below, that secret key (if written) is wiped so the receiver is never left
+// holding compromised, but seemingly usable, key material.
+func (sig *Signature) GenerateKeyPairFromSeed(seed []byte) (pub []byte, drawn int, err error) {
 	if len(seed) < minSeedLength {
 		return nil, 0, errors.New("seed must be at least 32 bytes for deterministic keygen")
 	}
 
 	stream := hkdf.Expand(sha512.New, seed, []byte(detKeygenInfo))
-	drawn := 0
 	var streamErr error
 
 	randMutex.Lock()
 	defer randMutex.Unlock()
 
-	if err := oqsrand.RandomBytesCustomAlgorithm(func(out []byte, n int) {
+	defer func() {
+		if err != nil {
+			sig.wipeSecretKeyLocked()
+		}
+	}()
+
+	if cbErr := oqsrand.RandomBytesCustomAlgorithm(func(out []byte, n int) {
 		if n > len(out) {
 			n = len(out)
 		}
-		if _, err := io.ReadFull(stream, out[:n]); err != nil {
-			if streamErr == nil {
-				streamErr = err
-			}
-			return
+		read, readErr := io.ReadFull(stream, out[:n])
+		drawn += read
+		if readErr != nil && streamErr == nil {
+			streamErr = readErr
 		}
-		drawn += n
-	}); err != nil {
-		return nil, 0, err
+	}); cbErr != nil {
+		return nil, drawn, cbErr
 	}
 	// Runs before the randMutex unlock above: defers are LIFO, so the system RNG
 	// is back in place while the lock still keeps signers out. Also covers a panic
 	// from inside liboqs.
 	defer restoreSystemRNG()
 
-	pub, err := sig.generateKeyPairUnlocked()
-	if err != nil {
-		return nil, drawn, err
+	pubKey, keyErr := sig.generateKeyPairUnlocked()
+	if keyErr != nil {
+		return nil, drawn, keyErr
 	}
 	if streamErr != nil {
 		return nil, drawn, streamErr
 	}
-	return pub, drawn, nil
+	return pubKey, drawn, nil
+}
+
+// wipeSecretKeyLocked destroys any secret key material generateKeyPairUnlocked
+// may have written before an error was discovered further up the call stack.
+// The caller must hold randMutex (it is only ever invoked from within
+// GenerateKeyPairFromSeed's deferred cleanup). Leaving the key in place would
+// mean a failed deterministic keygen still returns an error while the receiver
+// silently holds a key generated from partly-zero randomness — usable by
+// anything that later calls Sign or ExportSecretKey.
+func (sig *Signature) wipeSecretKeyLocked() {
+	if len(sig.secretKey) > 0 {
+		MemCleanse(sig.secretKey)
+	}
+	sig.secretKey = nil
 }
 
 // restoreSystemRNG puts liboqs back on the system CSPRNG. Failing to restore it

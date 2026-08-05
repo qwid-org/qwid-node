@@ -2,8 +2,13 @@ package oqs
 
 import (
 	"bytes"
+	"crypto/sha512"
+	"io"
 	"sync"
 	"testing"
+
+	oqsrand "github.com/wonabru/qwid-node/crypto/oqs/rand"
+	"golang.org/x/crypto/hkdf"
 )
 
 const (
@@ -117,6 +122,31 @@ func TestDifferentSeedsGiveDifferentKeys(t *testing.T) {
 	}
 }
 
+// TestWipeSecretKeyLockedClearsKey is a direct regression test for finding 3's
+// fix: the cleanup path GenerateKeyPairFromSeed relies on when it returns an
+// error must actually destroy the secret key, not just discard the return
+// value while leaving usable key material on the receiver.
+func TestWipeSecretKeyLockedClearsKey(t *testing.T) {
+	var sig Signature
+	if err := sig.Init(testSigName, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer sig.Clean()
+
+	if _, err := sig.GenerateKeyPair(); err != nil {
+		t.Fatal(err)
+	}
+	if len(sig.ExportSecretKey()) == 0 {
+		t.Fatal("precondition failed: no secret key to wipe")
+	}
+
+	sig.wipeSecretKeyLocked()
+
+	if sig.ExportSecretKey() != nil {
+		t.Fatal("wipeSecretKeyLocked left the receiver holding a secret key")
+	}
+}
+
 func TestGenerateKeyPairFromSeedRejectsShortSeed(t *testing.T) {
 	var sig Signature
 	if err := sig.Init(testSigName, nil); err != nil {
@@ -130,9 +160,18 @@ func TestGenerateKeyPairFromSeedRejectsShortSeed(t *testing.T) {
 }
 
 // TestSigningStaysRandomAfterSeededKeygen is the regression test for the whole
-// point of randMutex: if the deterministic RNG survived keygen, Falcon would
-// reuse its 40-byte salt and two signatures published on-chain would reveal the
-// private key.
+// point of randMutex: if the deterministic RNG survived keygen, subsequent
+// draws from liboqs' "random" bytes would keep coming from the same HKDF
+// stream instead of the system CSPRNG. That does NOT make two consecutive
+// draws equal — the HKDF stream keeps advancing, so every draw yields a fresh
+// value — which is why an equality check between two signatures can never
+// fail here, leak or no leak. The real damage of a leak is reproducibility
+// across restarts: anyone who replays the same seed through the same HKDF
+// construction reproduces the exact bytes liboqs would have drawn next,
+// including whatever salt/nonce those bytes seed — which is what exposes the
+// private key. This test detects that by rebuilding the seed's HKDF stream
+// independently, skipping past the bytes keygen consumed, and asserting that
+// the next system draw does NOT match the stream's next bytes.
 func TestSigningStaysRandomAfterSeededKeygen(t *testing.T) {
 	var sig Signature
 	if err := sig.Init(testSigName, nil); err != nil {
@@ -140,27 +179,43 @@ func TestSigningStaysRandomAfterSeededKeygen(t *testing.T) {
 	}
 	defer sig.Clean()
 
-	if _, _, err := sig.GenerateKeyPairFromSeed(seedOf(0x77)); err != nil {
+	seed := seedOf(0x77)
+	_, drawn, err := sig.GenerateKeyPairFromSeed(seed)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	msg := []byte("qwid")
-	s1, err := sig.Sign(msg)
-	if err != nil {
+	// Independently rebuild the exact HKDF stream keygen drew from, and skip
+	// past the bytes it consumed. If the deterministic RNG leaked past keygen,
+	// the next bytes liboqs draws (via oqsrand.RandomBytes below) would equal
+	// streamTail, because both would be reading the same construction from the
+	// same offset.
+	replay := hkdf.Expand(sha512.New, seed, []byte(detKeygenInfo))
+	if _, err := io.ReadFull(replay, make([]byte, drawn)); err != nil {
 		t.Fatal(err)
 	}
-	s2, err := sig.Sign(msg)
-	if err != nil {
+	streamTail := make([]byte, 48)
+	if _, err := io.ReadFull(replay, streamTail); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(s1, s2) {
-		t.Fatal("dwa podpisy tej samej wiadomości są identyczne — deterministyczny RNG " +
-			"przeciekł do podpisywania; powtórzona sól ujawnia klucz prywatny")
+
+	got := oqsrand.RandomBytes(48)
+	if bytes.Equal(got, streamTail) {
+		t.Fatal("bajty pobrane po zakończeniu keygenu odpowiadają kolejnym bajtom " +
+			"deterministycznego strumienia ziarna — RNG nie został przywrócony do " +
+			"systemowego CSPRNG; każdy kolejny odczyt byłby odtwarzalny z frazy " +
+			"odzyskiwania po restarcie procesu, co ujawnia sole, nonce i ostatecznie " +
+			"klucz prywatny")
 	}
 }
 
 // TestConcurrentSigningStaysRandom runs the same guarantee under -race with
-// keygen and signing fighting for the global RNG.
+// keygen and signing fighting for the global RNG. It only asserts absence of
+// errors/races (via `go test -race`); it deliberately does not assert that
+// concurrent signatures differ — HKDF's ever-advancing stream means a leak
+// would not make two draws equal (see TestSigningStaysRandomAfterSeededKeygen
+// for the assertion that actually detects a leak), so that check would never
+// fail here regardless of whether randMutex is held correctly.
 func TestConcurrentSigningStaysRandom(t *testing.T) {
 	var signer Signature
 	if err := signer.Init(testSigName, nil); err != nil {
@@ -172,25 +227,14 @@ func TestConcurrentSigningStaysRandom(t *testing.T) {
 	}
 
 	msg := []byte("qwid")
-	var mu sync.Mutex
-	seen := map[string]bool{}
-
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, err := signer.Sign(msg)
-			if err != nil {
+			if _, err := signer.Sign(msg); err != nil {
 				t.Error(err)
-				return
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			if seen[string(s)] {
-				t.Error("powtórzony podpis przy równoległym generowaniu kluczy z ziarna")
-			}
-			seen[string(s)] = true
 		}()
 	}
 	for i := 0; i < 8; i++ {
@@ -204,6 +248,66 @@ func TestConcurrentSigningStaysRandom(t *testing.T) {
 			}
 			defer s.Clean()
 			if _, _, err := s.GenerateKeyPairFromSeed(seedOf(byte(n))); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// TestConcurrentEncapSecretStaysUnderRandMutex is the regression test for
+// finding 1: KeyEncapsulation.EncapSecret draws randomness through the same
+// global liboqs RNG that GenerateKeyPairFromSeed temporarily replaces. Without
+// randMutex around EncapSecret, running it concurrently with a seeded keygen
+// can corrupt the shared HKDF reader (two goroutines advancing one SHA-512
+// state at once — an unrecoverable "d.nx != 0" panic), let EncapSecret steal
+// stream bytes so the same seed derives a different key pair, or exhaust the
+// stream outright ("hkdf: entropy limit reached"). With the lock in place the
+// two operations never overlap, so this must run clean, repeatedly, and under
+// -race.
+func TestConcurrentEncapSecretStaysUnderRandMutex(t *testing.T) {
+	var kemAlg string
+	for _, want := range []string{"ML-KEM-768", "Kyber768", "ML-KEM-512", "Kyber512"} {
+		if IsKEMEnabled(want) {
+			kemAlg = want
+			break
+		}
+	}
+	if kemAlg == "" {
+		t.Skip("no supported KEM enabled in this liboqs build")
+	}
+
+	var kem KeyEncapsulation
+	if err := kem.Init(kemAlg, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer kem.Clean()
+	pub, err := kem.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := kem.EncapSecret(pub); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			var s Signature
+			if err := s.Init(testSigName, nil); err != nil {
+				t.Error(err)
+				return
+			}
+			defer s.Clean()
+			if _, _, err := s.GenerateKeyPairFromSeed(seedOf(byte(n + 0x80))); err != nil {
 				t.Error(err)
 			}
 		}(i)
