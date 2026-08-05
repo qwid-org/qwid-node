@@ -305,46 +305,14 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"success": "Password changed"})
 }
 
+// GetMnemonic is permanently disabled. The recovery phrase derives every key of
+// the wallet, so it must never cross the network: even on localhost it would end
+// up in browser history, caches and any proxy in between. Use the CLI
+// (cmd/generateNewWallet) or the Qt GUI, which keep it on the machine.
+// The route stays registered so clients get this explanation instead of a 404.
 func GetMnemonic(w http.ResponseWriter, r *http.Request) {
-	if !walletReady() {
-		jsonError(w, "Load wallet first", http.StatusBadRequest)
-		return
-	}
-	// WH-C5: require the wallet password to be re-entered before revealing the
-	// recovery phrase, so a walk-up/left-open session cannot exfiltrate keys.
-	if r.Method != "POST" {
-		jsonError(w, "Password required (POST)", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-	if !MainWallet.VerifyPassword(req.Password) {
-		jsonError(w, "Invalid password", http.StatusUnauthorized)
-		return
-	}
-
-	mnemonic1, err1 := MainWallet.GetMnemonicWords(true)
-	mnemonic2, err2 := MainWallet.GetMnemonicWords(false)
-
-	resp := map[string]interface{}{
-		"primaryMnemonic":   mnemonic1,
-		"primaryError":      "",
-		"secondaryMnemonic": mnemonic2,
-		"secondaryError":    "",
-	}
-	if err1 != nil {
-		resp["primaryError"] = err1.Error()
-	}
-	if err2 != nil {
-		resp["secondaryError"] = err2.Error()
-	}
-
-	jsonResponse(w, resp)
+	jsonError(w, "The recovery phrase is available only locally, in the CLI wallet generator "+
+		"or the Qt GUI. It is never served over HTTP.", http.StatusForbidden)
 }
 
 func GetAccount(w http.ResponseWriter, r *http.Request) {

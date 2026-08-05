@@ -135,44 +135,12 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	JsonResponse(w, resp)
 }
 
+// GetMnemonic is permanently disabled — see the note on the webui handler. This
+// server is multi-user and remote, so serving recovery phrases would put every
+// user's keys on the wire.
 func GetMnemonic(w http.ResponseWriter, r *http.Request) {
-	sess := GetSession(r.Context())
-	if sess == nil || sess.Wallet == nil {
-		JsonError(w, "Wallet not loaded", http.StatusBadRequest)
-		return
-	}
-
-	wl := sess.Wallet
-	// WH-C5: require password re-entry before revealing the recovery phrase,
-	// so a stolen/left-open session cannot exfiltrate keys.
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		JsonError(w, "Password required", http.StatusBadRequest)
-		return
-	}
-	if !wl.VerifyPassword(req.Password) {
-		JsonError(w, "Invalid password", http.StatusUnauthorized)
-		return
-	}
-
-	mnemonic1, err1 := wl.GetMnemonicWords(true)
-	mnemonic2, err2 := wl.GetMnemonicWords(false)
-
-	resp := map[string]interface{}{
-		"primaryMnemonic":   mnemonic1,
-		"primaryError":      "",
-		"secondaryMnemonic": mnemonic2,
-		"secondaryError":    "",
-	}
-	if err1 != nil {
-		resp["primaryError"] = err1.Error()
-	}
-	if err2 != nil {
-		resp["secondaryError"] = err2.Error()
-	}
-	JsonResponse(w, resp)
+	JsonError(w, "The recovery phrase is available only locally, in the CLI wallet generator "+
+		"or the Qt GUI. It is never served over HTTP.", http.StatusForbidden)
 }
 
 func ChangePassword(w http.ResponseWriter, r *http.Request) {

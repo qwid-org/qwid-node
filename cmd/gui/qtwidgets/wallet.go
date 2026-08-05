@@ -242,47 +242,38 @@ func ShowWalletPage() *widgets.QTabWidget {
 		widgets.QMessageBox_Information(nil, "OK", "Password changed", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	})
 	widget.Layout().AddWidget(buttonChangePassword)
-	buttonMnemonic := widgets.NewQPushButton2("Show mnemonic words", nil)
+	buttonMnemonic := widgets.NewQPushButton2("Show recovery phrase", nil)
 	buttonMnemonic.ConnectClicked(func(bool) {
-		var v string
 		mnemonic, err := MainWallet.GetMnemonicWords(true)
 		if err != nil {
-			v = err.Error()
-		} else {
-			v = fmt.Sprintf("Mnemonic words for primary encryption:\n%v", mnemonic)
+			widgets.QMessageBox_Information(nil, "OK", err.Error(), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+			return
 		}
-		mnemonic2, err := MainWallet.GetMnemonicWords(false)
-		if err != nil {
-			v += err.Error()
-		} else {
-			v += fmt.Sprintf("\nMnemonic words for secondary encryption:\n%v", mnemonic2)
-		}
-		widgets.QMessageBox_Information(nil, "OK", v, widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		widgets.QMessageBox_Information(nil, "OK",
+			fmt.Sprintf("Recovery phrase (24 words) — write it down and keep it offline:\n\n%v", mnemonic),
+			widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	})
 	widget.Layout().AddWidget(buttonMnemonic)
 
 	inputRestoreMnemonic := widgets.NewQLineEdit(nil)
-	inputRestoreMnemonic.SetPlaceholderText("Mnemonic words seperated by space:")
+	inputRestoreMnemonic.SetPlaceholderText("24 recovery words separated by spaces")
 	widget.Layout().AddWidget(inputRestoreMnemonic)
-	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore private key from mnemonic words", nil)
+	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore keys from recovery phrase", nil)
 	buttonRestoreMnemonic.ConnectClicked(func(bool) {
-		err := MainWallet.RestoreSecretKeyFromMnemonic(inputRestoreMnemonic.Text(), true)
-		if err != nil {
-			widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Can not restore primary Private key from mnemonic words:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-
-		} else {
-			sec := MainWallet.GetSecretKey()
-			widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Primary Private Key:\n%v", sec.GetHex()), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		phrase := inputRestoreMnemonic.Text()
+		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, true); err != nil {
+			widgets.QMessageBox_Information(nil, "OK",
+				fmt.Sprintf("Cannot restore the primary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 			return
 		}
-		err = MainWallet.RestoreSecretKeyFromMnemonic(inputRestoreMnemonic.Text(), false)
-		if err != nil {
-			widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Can not restore secondary Private key from mnemonic words:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, false); err != nil {
+			widgets.QMessageBox_Information(nil, "OK",
+				fmt.Sprintf("Cannot restore the secondary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 			return
 		}
-		sec := MainWallet.GetSecretKey2()
-		widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Secondary Private Key:\n%v", sec.GetHex()), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-
+		widgets.QMessageBox_Information(nil, "OK",
+			fmt.Sprintf("Keys restored. Wallet address:\n%v", MainWallet.MainAddress.GetHex()),
+			widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	})
 	widget.Layout().AddWidget(buttonRestoreMnemonic)
 	return widget
