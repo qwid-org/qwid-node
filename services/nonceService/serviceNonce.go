@@ -252,8 +252,7 @@ func canProduce() bool {
 }
 
 func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
-	h := common.GetHeight()
-	if h < common.CurrentHeightOfNetwork {
+	if common.IsBehindNetwork() {
 		return false
 	}
 	isync := common.IsSyncing.Load()
@@ -276,8 +275,13 @@ func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
 }
 
 func sendNonceMsgSelf(ip [4]byte, topic [2]byte) bool {
-	h := common.GetHeight()
-	if h < common.CurrentHeightOfNetwork {
+	if common.IsBehindNetwork() {
+		return false
+	}
+	// Mirror sendNonceMsg: a node importing blocks must not emit nonces on the
+	// self-nonce path either. Relying on the IsSyncing check in OnMessage alone
+	// would leave block production one refactor away from restarting mid-sync.
+	if common.IsSyncing.Load() {
 		return false
 	}
 	if !canProduce() {

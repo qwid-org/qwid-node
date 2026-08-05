@@ -112,8 +112,12 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		return true, claimedHeight
 	}
 
-	// Not enough peers confirm - only sync up to a safe limit
-	safeHeight := localHeight + MaxHeightJumpWithoutConsensus
+	// Not enough peers confirm - only sync up to a safe limit. One batch worth of
+	// blocks (NumberOfHashesInBucket, the span clampHeaderSpan already allows) so
+	// a node that is tens of thousands of blocks behind a single peer still
+	// catches up in reasonable time. This only rate-limits: every block is fully
+	// verified regardless, so a larger step grants a malicious peer nothing.
+	safeHeight := localHeight + common.NumberOfHashesInBucket
 	if safeHeight < claimedHeight {
 		logger.GetLogger().Printf("Large height claim %d not confirmed by enough peers (%d/%d), limiting to %d",
 			claimedHeight, peersAtOrAboveHeight, MinPeersForLargeSync, safeHeight)
@@ -121,6 +125,55 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	}
 
 	return true, claimedHeight
+}
+
+// networkHeight derives the height the network is at from the live peer height
+// claims. With a single live peer we take its claim; with two or more we take
+// the second highest, so one lying peer can neither stall our block production
+// by claiming an impossible height nor pull the target down by claiming a low
+// one. With no live claims we fall back to the HEIGHT_OF_NETWORK hint, which
+// keeps a solo/genesis node producing.
+func networkHeight() int64 {
+	peerHeightClaimsMutex.RLock()
+	defer peerHeightClaimsMutex.RUnlock()
+
+	now := time.Now()
+	best, second := int64(0), int64(0)
+	live := 0
+	for _, claim := range peerHeightClaims {
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration {
+			continue
+		}
+		live++
+		if claim.height > best {
+			second = best
+			best = claim.height
+		} else if claim.height > second {
+			second = claim.height
+		}
+	}
+	switch {
+	case live == 0:
+		return common.CurrentHeightOfNetwork
+	case live == 1:
+		return best
+	default:
+		return second
+	}
+}
+
+// updateSyncTarget refreshes the network height used to decide whether this node
+// is still behind and therefore must not produce blocks.
+func updateSyncTarget() {
+	nh := networkHeight()
+	common.SetSyncTarget(nh)
+	// HeightMax answers "how high is the network" for the stats/UI and for the
+	// rewind-step heuristic. Feed it the consensus-filtered peer height, not the
+	// throttled per-round sync target: the latter is only ever a batch ahead of
+	// us, which made a node 100k blocks behind look all but synced.
+	if nh > common.GetHeightMax() {
+		common.SetHeightMax(nh)
+	}
 }
 
 // cleanupExpiredClaims removes old height claims
@@ -213,19 +266,22 @@ func OnMessage(addr [4]byte, m []byte) {
 				}
 			}
 		}
-		if h < common.CurrentHeightOfNetwork {
-			common.IsSyncing.Store(true)
-		}
 		lastOtherHeight := common.GetInt64FromByte(txn[[2]byte{'L', 'H'}][0])
 		lastOtherBlockHashBytes := txn[[2]byte{'L', 'B'}][0]
 
 		// Record this peer's height claim for consensus tracking
 		recordPeerHeightClaim(addr, lastOtherHeight, lastOtherBlockHashBytes)
+		// Refresh the network height before any IsSyncing decision below, so the
+		// decision uses what peers actually report instead of the static
+		// HEIGHT_OF_NETWORK hint.
+		updateSyncTarget()
 
 		// Periodically cleanup expired claims
 		go cleanupExpiredClaims()
 
-		hMax := common.GetHeightMax()
+		if common.IsBehindNetwork() {
+			common.IsSyncing.Store(true)
+		}
 
 		if lastOtherHeight == h {
 			services.AdjustShiftInPastInReset(lastOtherHeight)
@@ -237,13 +293,13 @@ func OnMessage(addr [4]byte, m []byte) {
 			if !bytes.Equal(lastOtherBlockHashBytes, lastBlockHashBytes) {
 				SendGetHeaders(addr, lastOtherHeight)
 			}
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
 		} else if lastOtherHeight < h {
 			services.AdjustShiftInPastInReset(lastOtherHeight)
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
@@ -254,11 +310,6 @@ func OnMessage(addr [4]byte, m []byte) {
 		if !shouldSync {
 			logger.GetLogger().Printf("Ignoring height claim %d from %v - not validated", lastOtherHeight, addr)
 			return
-		}
-
-		// Only update HeightMax to validated height (not blindly trust claims)
-		if validatedHeight > hMax {
-			common.SetHeightMax(validatedHeight)
 		}
 
 		common.IsSyncing.Store(true)
@@ -299,7 +350,7 @@ func OnMessage(addr [4]byte, m []byte) {
 			logger.GetLogger().Println("empty blocks received from peer - possible fake height claim")
 			tcpip.ReduceAndCheckIfBanIP(addr)
 			// Exit sync if we have no progress
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
@@ -307,7 +358,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		if indices[len(indices)-1] <= h {
 			logger.GetLogger().Println("shorter other chain")
 			// Peer claimed higher but sent lower blocks - suspicious
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
@@ -315,26 +366,38 @@ func OnMessage(addr [4]byte, m []byte) {
 		if indices[0] > h+1 {
 			logger.GetLogger().Println("too far blocks from peer - gap in chain")
 			// Don't ban, but exit sync if this was the only claim
-			if h >= common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 			return
 		}
 		// check blocks
 		was := false
-		incompleteTxn := false
 		hashesMissingAll := [][]byte{}
 		lastGoodBlock := indices[0]
+		// verifiedUpTo is the highest new block in this batch that passed
+		// verification. Blocks past it must not be applied: this phase checks the
+		// whole batch against pre-batch state, while state a block introduces
+		// (validator pubkeys via ProcessBlockPubKey, for one) only lands when that
+		// block is applied. It stays at h when nothing new verified.
+		verifiedUpTo := h
+		// completeUpTo is the top of the contiguous run starting at our own tip for
+		// which we hold every transaction, i.e. how far this batch can be verified
+		// at all. It stays at h when nothing new is complete.
+		completeUpTo := h
 		merkleTries := map[int64]*transactionsPool.MerkleTree{}
-		for i := 0; i < len(blcks); i++ {
-			header := blcks[i].GetHeader()
-			index := indices[i]
 
+		// First pass, cheap hash lookups only: detect a fork against the part of
+		// the batch we already have, and take a census of the transactions we are
+		// missing across the WHOLE batch. Verifying a block whose transactions are
+		// absent yields failures that look like consensus violations but are only
+		// missing data, so nothing may be verified before this pass is done.
+		for i := 0; i < len(blcks); i++ {
+			index := indices[i]
 			if index <= 0 {
 				continue
 			}
 			block := blcks[i]
-			oldBlock := blocks.Block{}
 			if index <= h {
 				hashOfMyBlockBytes, err := blocks.LoadHashOfBlock(index)
 				if err != nil {
@@ -357,6 +420,57 @@ func OnMessage(addr [4]byte, m []byte) {
 				logger.GetLogger().Println("fork detected at index", index, "- reset done")
 				return
 			}
+			hashesMissing := blocks.IsAllTransactions(block)
+			if len(hashesMissing) > 0 {
+				logger.GetLogger().Printf("Block %d is missing %d transactions", index, len(hashesMissing))
+				hashesMissingAll = append(hashesMissingAll, hashesMissing...)
+				continue
+			}
+			if index == completeUpTo+1 {
+				completeUpTo = index
+			}
+		}
+
+		// Ask for everything this batch needs in one round trip, so the next batch
+		// can be verified and applied whole instead of crawling forward one block
+		// per message.
+		if len(hashesMissingAll) > 0 {
+			logger.GetLogger().Printf("Sync incomplete - requesting %d missing transactions from peer in chunks", len(hashesMissingAll))
+			maxChunk := common.MaxNumberTransactionInChunk
+			for i := 0; i < len(hashesMissingAll); i += maxChunk {
+				end := i + maxChunk
+				if end > len(hashesMissingAll) {
+					end = len(hashesMissingAll)
+				}
+				chunk := hashesMissingAll[i:end]
+				logger.GetLogger().Printf("Sending bt chunk %d-%d of %d to %v", i, end, len(hashesMissingAll), addr)
+				transactionServices.SendGT(addr, chunk, "bt")
+				time.Sleep(500 * time.Millisecond)
+			}
+			if completeUpTo <= h {
+				logger.GetLogger().Println("Waiting for missing transactions before continuing sync")
+				return
+			}
+			// Do not stand still while the peer answers: the blocks we do hold form
+			// a contiguous run from our tip, so they can be applied right away.
+			logger.GetLogger().Printf("Requested missing transactions - applying the complete run up to %d meanwhile", completeUpTo)
+		}
+
+		for i := 0; i < len(blcks); i++ {
+			header := blcks[i].GetHeader()
+			index := indices[i]
+
+			if index <= 0 || index <= h {
+				continue
+			}
+			if index > completeUpTo {
+				break
+			}
+			block := blcks[i]
+			oldBlock := blocks.Block{}
+			// parentFromPeer records where oldBlock came from; `was` is flipped inside
+			// the else branch, so it cannot answer that question after the fact.
+			parentFromPeer := was
 			if was {
 				oldBlock = blcks[i-1]
 				logger.GetLogger().Printf("Using previous block from received blocks for index %d", index)
@@ -428,7 +542,26 @@ func OnMessage(addr [4]byte, m []byte) {
 			defer merkleTrie.Destroy()
 			if err != nil {
 				logger.GetLogger().Printf("ERROR: Base block verification failed for block %d: %v", index, err)
-				tcpip.ReduceAndCheckIfBanIP(addr)
+				// A block verified here may depend on state that an earlier block of
+				// this same batch only writes when it is applied - a validator pubkey
+				// registered by ProcessBlockPubKey being the common case, without
+				// which oracle proof authentication cannot check a signature. So when
+				// we already have a verified prefix, stop the batch and apply it
+				// rather than declaring a fork: the next round re-checks this block
+				// against the state the prefix produced.
+				if verifiedUpTo > h {
+					logger.GetLogger().Printf("stopping batch at block %d - applying verified blocks up to %d first", index, verifiedUpTo)
+					break
+				}
+				// Only blame the peer when the parent came from its own batch, i.e.
+				// the blocks it sent are internally inconsistent. When the parent
+				// came from our storage the mismatch is our own fork, and banning
+				// here would ban the honest peer we need to recover from it.
+				if parentFromPeer {
+					tcpip.ReduceAndCheckIfBanIP(addr)
+				} else {
+					logger.GetLogger().Printf("parent block %d came from local storage - treating as own fork, not banning %v", index-1, addr)
+				}
 				services.AdjustShiftInPastInReset(hmax)
 				common.ShiftToPastMutex.RLock()
 				services.ResetAccountsAndBlocksSync(index - common.ShiftToPastInReset)
@@ -438,40 +571,18 @@ func OnMessage(addr [4]byte, m []byte) {
 
 			}
 			merkleTries[index] = merkleTrie
-			hashesMissing := blocks.IsAllTransactions(block)
-			if len(hashesMissing) > 0 {
-				logger.GetLogger().Printf("Block %d is missing %d transactions", index, len(hashesMissing))
-				hashesMissingAll = append(hashesMissingAll, hashesMissing...)
-				incompleteTxn = true
-			} else {
-				logger.GetLogger().Printf("Block %d has all transactions verified", index)
-			}
-
+			verifiedUpTo = index
 		}
 
-		if incompleteTxn {
-			logger.GetLogger().Printf("Sync incomplete - requesting %d missing transactions from peer in chunks", len(hashesMissingAll))
-			maxChunk := common.MaxNumberTransactionInChunk
-			for i := 0; i < len(hashesMissingAll); i += maxChunk {
-				end := i + maxChunk
-				if end > len(hashesMissingAll) {
-					end = len(hashesMissingAll)
-				}
-				chunk := hashesMissingAll[i:end]
-				logger.GetLogger().Printf("Sending bt chunk %d-%d of %d to %v", i, end, len(hashesMissingAll), addr)
-				transactionServices.SendGT(addr, chunk, "bt")
-				time.Sleep(500 * time.Millisecond)
-			}
-			logger.GetLogger().Println("Waiting for missing transactions before continuing sync")
+		if verifiedUpTo <= h {
+			logger.GetLogger().Println("nothing new could be verified in this batch")
 			return
 		}
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Starting final block processing and fund transfers")
 
 		defer func() {
-			//hMax := common.GetHeightMax()
-			h := common.GetHeight()
-			if h > common.CurrentHeightOfNetwork {
+			if !common.IsBehindNetwork() {
 				common.IsSyncing.Store(false)
 			}
 		}()
@@ -483,6 +594,13 @@ func OnMessage(addr [4]byte, m []byte) {
 		for i := 0; i < len(blcks); i++ {
 			block := blcks[i]
 			index := indices[i]
+			if index > verifiedUpTo {
+				// Beyond the verified prefix: these blocks were never checked, or
+				// were checked against state that only exists once this prefix is
+				// applied. The next sync round picks them up.
+				logger.GetLogger().Printf("Stopping at block %d - beyond the verified prefix (up to %d)", index, verifiedUpTo)
+				break
+			}
 			if block.GetHeader().Height <= lastGoodBlock || index <= h {
 				logger.GetLogger().Printf("Skipping already verified block %d", index)
 				continue

@@ -111,7 +111,13 @@ REWARD_PERCENTAGE=200        # Operator reward (0-500, where 500=50%)
 NODE_IP=<your_external_ip>
 WHITELIST_IP=<optional_ip>   # IP to EXEMPT from banning/rate-limiting (never banned)
 BLACKLIST_IP=<optional_ips>  # Comma-separated IPs to PERMANENTLY ban (no inbound/outbound/discovery connections; overrides whitelist)
-HEIGHT_OF_NETWORK=<current_height>  # For faster initial sync
+HEIGHT_OF_NETWORK=<current_height>  # Sync target while the local chain is BELOW it: this value
+                                    # overrides the height derived from peers. Once the local
+                                    # height reaches it, the live peer view takes over
+                                    # (common.GetSyncTarget / IsBehindNetwork), so a stale value
+                                    # cannot pin the target below the real network height. Set it
+                                    # at or above the true network height - a value that is too
+                                    # low lets the node declare itself synced early and fork.
 RPC_BIND_ADDRESS=<host>      # Optional. wallet<->node RPC bind host; default 127.0.0.1 (loopback only, NP-C4). Override only if wallet/UI runs on a different host — exposes unauthenticated RPC (e.g. TRAN).
 NODE_IP_SELF_NONCE=<ip>      # Optional. IP for the self-nonce connection; unset = default local behaviour.
 ```
