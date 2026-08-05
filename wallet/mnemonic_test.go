@@ -3,27 +3,87 @@ package wallet
 import (
 	"strings"
 	"testing"
-
-	"github.com/wonabru/qwid-node/common"
 )
 
-// TestGetMnemonicWordsRejectsOversizedKeyHonestly verifies CW-M2: a secret key
-// larger than the 64-byte mnemonic ceiling (e.g. a post-quantum key) gets a clear,
-// directive error instead of the misleading "less than 64 bytes" message. Pure
-// length check — no oqs/CGO.
-func TestGetMnemonicWordsRejectsOversizedKeyHonestly(t *testing.T) {
-	w := &Wallet{}
-	w.Account1.secretKey = common.PrivKey{ByteValue: make([]byte, 100)} // > 64
+// TestGetMnemonicWordsReturnsThePhraseThatCreatedTheWallet replaces the old
+// CW-M2 behaviour. The phrase is no longer an encoding of the secret key — which
+// is impossible for post-quantum keys — but the input the wallet was built from.
+func TestGetMnemonicWordsReturnsThePhraseThatCreatedTheWallet(t *testing.T) {
+	mnemonic, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newSeedTestWallet(t, 220)
+	if err := w.SetMnemonic(mnemonic); err != nil {
+		t.Fatal(err)
+	}
+	fillAccountsFromSeed(t, w)
 
+	got, err := w.GetMnemonicWords(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(mnemonic) {
+		t.Fatalf("zwrócona fraza różni się od podanej przy tworzeniu")
+	}
+	if n := len(strings.Fields(got)); n != MnemonicWordCount {
+		t.Fatalf("liczba słów = %d, oczekiwano %d", n, MnemonicWordCount)
+	}
+}
+
+// TestGetMnemonicWordsOnLegacyWalletExplainsWhy: a wallet created before this
+// feature has no phrase and never can — the caller must be told to back up the
+// file instead.
+func TestGetMnemonicWordsOnLegacyWalletExplainsWhy(t *testing.T) {
+	w := newSeedTestWallet(t, 221)
 	_, err := w.GetMnemonicWords(true)
 	if err == nil {
-		t.Fatal("expected an error for a >64-byte secret key")
+		t.Fatal("oczekiwano błędu dla portfela bez frazy")
 	}
-	msg := err.Error()
-	if strings.Contains(msg, "less than 64 bytes") {
-		t.Fatalf("misleading old message still present: %q", msg)
+	if !strings.Contains(err.Error(), "wallet-file") {
+		t.Fatalf("komunikat %q nie kieruje do kopii pliku portfela", err.Error())
 	}
-	if !strings.Contains(msg, "wallet-file") {
-		t.Fatalf("error should direct the user to the wallet-file backup: %q", msg)
+}
+
+func TestRestoreFromMnemonicRebuildsTheSameKeys(t *testing.T) {
+	mnemonic, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := newSeedTestWallet(t, 222)
+	if err := original.SetMnemonic(mnemonic); err != nil {
+		t.Fatal(err)
+	}
+	fillAccountsFromSeed(t, original)
+
+	restored := newSeedTestWallet(t, 222)
+	if err := restored.RestoreSecretKeyFromMnemonic(string(mnemonic), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.RestoreSecretKeyFromMnemonic(string(mnemonic), false); err != nil {
+		t.Fatal(err)
+	}
+
+	if restored.Account1.Address.GetHex() != original.Account1.Address.GetHex() {
+		t.Fatal("odtworzony klucz podstawowy ma inny adres")
+	}
+	if restored.Account2.Address.GetHex() != original.Account2.Address.GetHex() {
+		t.Fatal("odtworzony klucz dodatkowy ma inny adres")
+	}
+
+	sig, err := restored.Sign([]byte("qwid"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Verify([]byte("qwid"), sig.GetBytes(), original.Account1.PublicKey.GetBytes(),
+		original.SigName, original.SigName2, false, false) {
+		t.Fatal("podpis odtworzonym kluczem nie weryfikuje się oryginalnym kluczem publicznym")
+	}
+}
+
+func TestRestoreFromMnemonicRejectsBadPhrase(t *testing.T) {
+	w := newSeedTestWallet(t, 223)
+	if err := w.RestoreSecretKeyFromMnemonic("abandon abandon abandon", true); err == nil {
+		t.Fatal("oczekiwano błędu dla frazy o złej długości")
 	}
 }

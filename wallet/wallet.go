@@ -17,8 +17,6 @@ import (
 	"io"
 	"sync"
 
-	"github.com/wonabru/bip39"
-
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/crypto/oqs"
 	"golang.org/x/crypto/argon2"
@@ -558,78 +556,54 @@ func (w *Wallet) decryptLegacyCTR(v []byte) ([]byte, error) {
 	return plaintext[len(common.ValidationTag):], nil
 }
 
+// GetMnemonicWords returns the recovery phrase this wallet was created from.
+//
+// Note the direction: the phrase is the input the keys were derived from, not an
+// encoding of a key. Encoding a post-quantum secret key as a phrase is
+// impossible (Falcon-512 is ~1281 bytes against BIP39's 64), which is why
+// wallets created before this feature have no phrase and never can (CW-M2).
 func (w *Wallet) GetMnemonicWords(primary bool) (string, error) {
-	var secret []byte
-	var secretLength int
-	if primary {
-		secret = w.GetSecretKey().GetBytes()
-		secretLength = w.GetSecretKey().GetLength()
-	} else {
-		secret = w.GetSecretKey2().GetBytes()
-		secretLength = w.GetSecretKey2().GetLength()
+	if len(w.EncryptedMnemonic) == 0 {
+		return "", fmt.Errorf("this wallet was created without a recovery phrase; " +
+			"use the encrypted wallet-file backup instead")
 	}
-	if secret == nil {
+	if len(w.passwordBytes) == 0 {
 		return "", fmt.Errorf("you need load wallet first")
 	}
-
-	if secretLength > 64 {
-		// CW-M2: BIP39-style mnemonics cannot represent a post-quantum secret key
-		// (e.g. Falcon-512 is ~1281 bytes) — the 64-byte ceiling is intentional.
-		// Give a clear, actionable error instead of the misleading "< 64 bytes" one.
-		return "", fmt.Errorf("mnemonic backup is unavailable for keys larger than 64 bytes (post-quantum secret keys); use the encrypted wallet-file backup instead")
+	mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+	if err != nil {
+		return "", fmt.Errorf("cannot decrypt the recovery phrase: %w", err)
 	}
-	if secretLength < 64 {
-		logger.GetLogger().Println("not all mnemonic words are important. secret is less than 64 bytes")
-		secretTmp := make([]byte, 64)
-		copy(secretTmp, secret)
-		secret = secretTmp[:]
-	}
-	mnemonic, _ := bip39.NewMnemonic(secret)
-
-	secretKey, _ := bip39.MnemonicToByteArray(mnemonic)
-	if !bytes.Equal(secretKey[:secretLength], secret[:secretLength]) {
-		logger.GetLogger().Println("Can not restore secret key from mnemonic")
-		return "", fmt.Errorf("can not restore secret key from mnemonic")
-	}
-	return mnemonic, nil
+	// The phrase covers every scheme and both roles, so `primary` does not select
+	// between two phrases — it is kept only so existing callers still compile.
+	_ = primary
+	return string(mnemonic), nil
 }
 
+// RestoreSecretKeyFromMnemonic rebuilds one of the wallet's keys from a recovery
+// phrase. The key is derived, not unpacked: the same phrase always yields the
+// same key for a given scheme and role.
 func (w *Wallet) RestoreSecretKeyFromMnemonic(mnemonic string, primary bool) error {
-	secretKey, err := bip39.MnemonicToByteArray(mnemonic)
-	if err != nil {
-		logger.GetLogger().Println("Can not restore secret key")
+	if err := w.SetMnemonic([]byte(mnemonic)); err != nil {
 		return err
 	}
-	var signer oqs.Signature
-	if primary {
-		//if len(secretKey) < common.PrivateKeyLength() {
-		//	return fmt.Errorf("not enough bytes for primary encryption private key")
-		//}
-		err = w.Account1.secretKey.Init(secretKey[:], w.Account1.Address, true)
-		if err != nil {
-			return err
-		}
-
-		err = signer.Init(common.SigName(), w.Account1.secretKey.GetBytes())
-		if err != nil {
-			return err
-		}
-		(*w).Account1.signer = signer
-	} else {
-		//if len(secretKey) < common.PrivateKeyLength2() {
-		//	return fmt.Errorf("not enough bytes for secondary encryption private key")
-		//}
-		err = w.Account2.secretKey.Init(secretKey[:], w.Account2.Address, false)
-		if err != nil {
-			return err
-		}
-		err = signer.Init(common.SigName2(), w.Account2.secretKey.GetBytes())
-		if err != nil {
-			return err
-		}
-		(*w).Account2.signer = signer
+	sigName := w.SigName
+	if !primary {
+		sigName = w.SigName2
 	}
-
+	acc, err := GenerateNewAccountFromSeed(*w, sigName, primary)
+	if err != nil {
+		return err
+	}
+	if primary {
+		w.Account1 = acc
+		var emptyAddress common.Address
+		if w.MainAddress.GetHex() == emptyAddress.GetHex() {
+			w.MainAddress = acc.Address
+		}
+	} else {
+		w.Account2 = acc
+	}
 	return nil
 }
 
