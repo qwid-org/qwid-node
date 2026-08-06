@@ -29,6 +29,32 @@ import (
 	"github.com/wonabru/qwid-node/tcpip"
 )
 
+// shutdownLockWait bounds how long a shutdown store waits for the block lock.
+const shutdownLockWait = 3 * time.Second
+
+// lockBlocksForShutdown takes common.BlockMutex for a shutdown store, but only
+// if it becomes free quickly. The lock matters because Store*(-1) writes the
+// live state under common.GetHeight(): running it while a block is being applied
+// would persist a half-applied state as that height's snapshot, and the node
+// would then reject every following block on the supply invariant. Waiting for
+// it unconditionally is just as wrong - a sync batch holds the lock for its
+// whole run, so Ctrl-C would appear to hang. Skipping the store is safe: every
+// applied block already wrote its own snapshot.
+func lockBlocksForShutdown(what string) bool {
+	deadline := time.Now().Add(shutdownLockWait)
+	for {
+		if common.BlockMutex.TryLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			logger.GetLogger().Println("a block is still being applied - skipping the shutdown store of",
+				what, "; the snapshot of the last applied block stands")
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func main() {
 	var err error
 	// Check for -log flag to enable logging
@@ -123,11 +149,9 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing accounts...")
-		// Under the block lock: StoreAccounts(-1) writes the live state under
-		// common.GetHeight(), so running it while a block is being applied would
-		// persist a half-applied state as that height's snapshot - the node would
-		// then reject every following block on the supply invariant.
-		common.BlockMutex.Lock()
+		if !lockBlocksForShutdown("accounts") {
+			return
+		}
 		defer common.BlockMutex.Unlock()
 		account.StoreAccounts(-1)
 	}()
@@ -141,7 +165,9 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing DEX accounts...")
-		common.BlockMutex.Lock()
+		if !lockBlocksForShutdown("DEX accounts") {
+			return
+		}
 		defer common.BlockMutex.Unlock()
 		account.StoreDexAccounts(-1)
 	}()
@@ -155,7 +181,9 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing staking accounts...")
-		common.BlockMutex.Lock()
+		if !lockBlocksForShutdown("staking accounts") {
+			return
+		}
 		defer common.BlockMutex.Unlock()
 		account.StoreStakingAccounts(-1)
 	}()

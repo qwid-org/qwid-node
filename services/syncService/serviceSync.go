@@ -193,6 +193,25 @@ var progress = syncProgress{height: -1}
 // already hold, which re-runs the missing-transaction census in the "sh"
 // handler and re-sends the request. The same recovery covers a batch that
 // stalled on blocks rather than transactions.
+// rewindLockWait bounds how long the stall watchdog waits for the block lock.
+const rewindLockWait = 2 * time.Second
+
+// lockBlocksForRewind takes common.BlockMutex for the stall rewind if it becomes
+// free within rewindLockWait. Bounded, so the sync send loop this runs on is
+// never parked behind a long batch.
+func lockBlocksForRewind() bool {
+	deadline := time.Now().Add(rewindLockWait)
+	for {
+		if common.BlockMutex.TryLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func checkSyncStall(now time.Time) {
 	h := common.GetHeight()
 
@@ -228,7 +247,14 @@ func checkSyncStall(now time.Time) {
 	// block's own height — balances then permanently disagree with the block fee
 	// ledger and every following block is rejected on the supply invariant. A
 	// held block lock also means a block is being applied, i.e. not a stall.
-	if !common.BlockMutex.TryLock() {
+	//
+	// Give it a moment rather than one TryLock: this is the only mechanism that
+	// unsticks a stalled sync, so it must not be starved by a lock that happens
+	// to be busy every time it looks. A skipped round is logged — silently doing
+	// nothing here is indistinguishable from a node that has simply given up.
+	if !lockBlocksForRewind() {
+		logger.GetLogger().Printf("sync stalled at height %d for %s, but a block is being applied - "+
+			"postponing the rewind to the next round", h, now.Sub(progress.since).Truncate(time.Second))
 		return
 	}
 	defer common.BlockMutex.Unlock()
