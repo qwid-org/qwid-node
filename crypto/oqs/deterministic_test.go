@@ -314,3 +314,57 @@ func TestConcurrentEncapSecretStaysUnderRandMutex(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestSeededKeygenReleasesTheRNGCallback: the callback installed for a
+// deterministic keygen closes over an HKDF stream keyed by that key's seed.
+// Switching liboqs back to the system RNG does not drop that reference — only
+// clearing the callback does — so without it the seed of the last key generated
+// stays reachable (and in memory dumps) for the whole process lifetime.
+func TestSeededKeygenReleasesTheRNGCallback(t *testing.T) {
+	var sig Signature
+	if err := sig.Init(testSigName, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer sig.Clean()
+	if _, _, err := sig.GenerateKeyPairFromSeed(seedOf(0x5a)); err != nil {
+		t.Fatal(err)
+	}
+	if oqsrand.CustomAlgorithmInstalled() {
+		t.Fatal("deterministic keygen left its seed-keyed RNG callback installed")
+	}
+
+	// And the process is still able to produce randomness afterwards, i.e.
+	// clearing the callback did not leave liboqs pointed at nothing.
+	a := oqsrand.RandomBytes(32)
+	b := oqsrand.RandomBytes(32)
+	if bytes.Equal(a, b) {
+		t.Fatal("system RNG returned the same bytes twice after a seeded keygen")
+	}
+}
+
+// TestRepeatedSeededKeygenStaysDeterministic: install/clear happens on every
+// derived key (scheme changes derive more later), so the cycle must be
+// repeatable — a cleared callback must not break the next derivation.
+func TestRepeatedSeededKeygenStaysDeterministic(t *testing.T) {
+	derive := func() []byte {
+		var sig Signature
+		if err := sig.Init(testSigName, nil); err != nil {
+			t.Fatal(err)
+		}
+		defer sig.Clean()
+		pub, _, err := sig.GenerateKeyPairFromSeed(seedOf(0x11))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pub
+	}
+	first := derive()
+	for i := 0; i < 3; i++ {
+		if !bytes.Equal(first, derive()) {
+			t.Fatalf("derivation %d differs from the first: install/clear cycle is not repeatable", i+2)
+		}
+		if oqsrand.CustomAlgorithmInstalled() {
+			t.Fatalf("callback still installed after derivation %d", i+2)
+		}
+	}
+}

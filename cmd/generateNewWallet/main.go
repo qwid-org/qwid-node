@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -42,7 +43,25 @@ func main() {
 		logger.GetLogger().Fatal(err)
 	}
 
+	w := wallet.EmptyWallet(uint8(walletNumber), common.SigName(), common.SigName2())
+	walletFile := walletFilePath(w.HomePath, walletNumber)
+
 	reader := bufio.NewReader(os.Stdin)
+
+	// Refuse to overwrite an occupied wallet number without an explicit, typed
+	// confirmation. This runs before ANY mode is chosen, so it protects the
+	// restore path too — which is the dangerous one: it is run by an operator
+	// who has just lost a wallet, the first prompt asks for a wallet number,
+	// and "0" is the natural answer. StoreJSON is an unconditional
+	// os.WriteFile, so without this guard one keystroke silently destroys the
+	// only backup of a pre-existing wallet (a wallet created before recovery
+	// phrases existed has NO phrase — its encrypted file is the sole copy of
+	// its keys, and nothing can rebuild it).
+	overwriteConfirmed, err := confirmOverwriteIfExists(reader, walletFile, walletNumber)
+	if err != nil {
+		logger.GetLogger().Fatalf("%v — nie zapisano żadnego pliku", err)
+	}
+
 	fmt.Print("\n[1] utwórz nowy portfel  [2] odtwórz z frazy 24 słów\nWybór [1]: ")
 	mode, _ := reader.ReadString('\n')
 	mode = strings.TrimSpace(mode)
@@ -50,11 +69,18 @@ func main() {
 	var mnemonic []byte
 	if mode == "2" {
 		fmt.Print("Wpisz frazę (24 słowa oddzielone spacjami): ")
-		line, err := reader.ReadString('\n')
+		// Read without echo: the phrase owns every key of the wallet, so echoing
+		// it would leave it in terminal scrollback, tmux/screen logs and any
+		// recording of the session. ReadPassword reads fd 0 directly, which is
+		// also why the password above is read the same way. A typo stays
+		// invisible, but SeedFromMnemonic's checksum check below catches it.
+		line, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
 			logger.GetLogger().Fatal(err)
 		}
-		mnemonic = []byte(strings.TrimSpace(line))
+		fmt.Println()
+		mnemonic = []byte(strings.TrimSpace(string(line)))
+		wallet.ZeroBytes(line)
 		if _, err := wallet.SeedFromMnemonic(mnemonic); err != nil {
 			logger.GetLogger().Fatal(err)
 		}
@@ -105,7 +131,6 @@ func main() {
 	}
 	defer wallet.ZeroBytes(mnemonic)
 
-	w := wallet.EmptyWallet(uint8(walletNumber), common.SigName(), common.SigName2())
 	w.SetPassword(string(password))
 	w.Iv = wallet.GenerateNewIv()
 
@@ -156,6 +181,16 @@ func main() {
 	fmt.Printf("Write permission: %v\n", hasWritePermission)
 	fmt.Printf("Execute permission: %v\n", hasExecutePermission)
 
+	// Re-check right before the write. The guard above ran several prompts ago;
+	// this closes the window in which the file appeared in the meantime (another
+	// generator run, a restored backup) and would be destroyed by a confirmation
+	// that was never given for it.
+	if !overwriteConfirmed {
+		if _, statErr := os.Stat(walletFile); statErr == nil {
+			logger.GetLogger().Fatalf("plik %s pojawił się w trakcie tworzenia portfela, a nadpisanie nie zostało potwierdzone — nie zapisano niczego", walletFile)
+		}
+	}
+
 	err = w.StoreJSON()
 	if err != nil {
 		logger.GetLogger().Println(err)
@@ -163,6 +198,67 @@ func main() {
 	}
 
 	fmt.Printf("\nAdres portfela: %s\n", w.MainAddress.GetHex())
+}
+
+// walletFilePath is the file StoreJSON writes for this wallet number. Kept next
+// to the overwrite guard so the guard can never end up checking a different path
+// than the one that is about to be written.
+func walletFilePath(homePath string, walletNumber int) string {
+	return filepath.Join(homePath, "wallet"+strconv.Itoa(walletNumber)+".json")
+}
+
+// overwriteConfirmationPhrase is what the operator must type, verbatim, to
+// destroy an existing wallet file. It deliberately names the wallet number: a
+// bare "y" (or a reflex "yes") is exactly what a panicking operator types
+// without reading, and the number is the thing they are most likely to have got
+// wrong in the first place.
+func overwriteConfirmationPhrase(walletNumber int) string {
+	return fmt.Sprintf("nadpisz portfel %d", walletNumber)
+}
+
+// checkOverwriteConfirmation reports whether answer is the exact confirmation
+// phrase for walletNumber. Surrounding whitespace and letter case are ignored;
+// nothing else is.
+func checkOverwriteConfirmation(answer string, walletNumber int) error {
+	want := overwriteConfirmationPhrase(walletNumber)
+	got := strings.Join(strings.Fields(strings.ToLower(answer)), " ")
+	if got != want {
+		return fmt.Errorf("nie potwierdzono nadpisania portfela %d (oczekiwano dokładnie %q, podano %q)", walletNumber, want, answer)
+	}
+	return nil
+}
+
+// confirmOverwriteIfExists refuses to continue when walletFile already exists,
+// unless the operator types the confirmation phrase for walletNumber. It
+// returns whether an overwrite was confirmed. A missing file needs no
+// confirmation; a stat error that is not "does not exist" is treated as a
+// refusal, because we cannot then prove the number is free.
+func confirmOverwriteIfExists(in *bufio.Reader, walletFile string, walletNumber int) (bool, error) {
+	if _, err := os.Stat(walletFile); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nie można sprawdzić, czy portfel %d jest zajęty (%s): %v", walletNumber, walletFile, err)
+	}
+
+	fmt.Printf("\n!!! UWAGA: portfel numer %d JUŻ ISTNIEJE !!!\n", walletNumber)
+	fmt.Printf("Plik: %s\n", walletFile)
+	fmt.Println("Kontynuacja NADPISZE ten plik. Klucze, które są w nim zapisane,")
+	fmt.Println("zostaną zniszczone bezpowrotnie — jeśli ten portfel powstał przed")
+	fmt.Println("wprowadzeniem fraz odzyskiwania, ten plik jest jedyną kopią jego")
+	fmt.Println("kluczy i nic ich potem nie odtworzy. Środki na nim przepadną.")
+	fmt.Println("Jeśli chciałeś tylko odtworzyć portfel z frazy, użyj WOLNEGO numeru.")
+	fmt.Printf("\nAby nadpisać, wpisz dokładnie: %s\nW przeciwnym razie naciśnij Enter, aby przerwać.\n> ", overwriteConfirmationPhrase(walletNumber))
+
+	answer, err := in.ReadString('\n')
+	if err != nil && answer == "" {
+		return false, fmt.Errorf("nie potwierdzono nadpisania portfela %d (%s): %v", walletNumber, walletFile, err)
+	}
+	if err := checkOverwriteConfirmation(answer, walletNumber); err != nil {
+		return false, err
+	}
+	fmt.Printf("Potwierdzono nadpisanie portfela %d (%s).\n", walletNumber, walletFile)
+	return true, nil
 }
 
 // confirmWordCount is how many words the operator must type back before the

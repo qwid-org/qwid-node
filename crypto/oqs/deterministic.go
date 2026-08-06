@@ -97,9 +97,18 @@ func (sig *Signature) wipeSecretKeyLocked() {
 // restoreSystemRNG puts liboqs back on the system CSPRNG. Failing to restore it
 // would leave the node signing with a deterministic RNG, which publishes the
 // private key through repeated salts — halting is the lesser harm.
+// The caller (GenerateKeyPairFromSeed) holds randMutex, which is what makes
+// clearing the callback safe: no other goroutine can be inside liboqs.
 func restoreSystemRNG() {
 	if err := oqsrand.RandomBytesSwitchAlgorithm("system"); err != nil {
 		logger.GetLogger().Fatal("cannot restore the system RNG after deterministic keygen; "+
 			"continuing would sign with a predictable salt and leak the private key: ", err)
 	}
+	// Switching back is not enough: the package-level callback variable still
+	// holds the closure, which captures the HKDF stream keyed by this key's seed.
+	// Left in place it keeps that seed reachable — unfreed, and present in any
+	// core dump — for the rest of the process lifetime, for a key that has
+	// already been generated. Cleared only after the switch above succeeded, so
+	// liboqs can never call into a nil callback.
+	oqsrand.ClearCustomAlgorithm()
 }

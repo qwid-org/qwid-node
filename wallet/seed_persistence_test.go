@@ -628,3 +628,224 @@ func TestGenerateNewAccountFromSeedRejectsZeroedSeed(t *testing.T) {
 		t.Fatal("expected an error deriving a key from a zeroed-out seed")
 	}
 }
+
+// --- I1: the recovery phrase outranks the per-scheme key archive ---
+
+// readStoredAccountAddresses reads the wallet file straight off disk and returns
+// account_1.address and, per scheme, accounts[<scheme>].address. Deliberately
+// bypasses LoadJSON: the point is what was PERSISTED, independent of what the
+// load path would then make of it.
+func readStoredAccountAddresses(t *testing.T, dir string, number uint8) (account1 string, archive map[string]string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "wallet"+strconv.Itoa(int(number))+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// common.Address marshals through MarshalText, i.e. as a hex string.
+	type storedAccount struct {
+		Address string `json:"address"`
+	}
+	var stored struct {
+		Account1 storedAccount            `json:"account_1"`
+		Accounts map[string]storedAccount `json:"accounts"`
+	}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	norm := func(s string) string { return strings.ToLower(strings.TrimPrefix(s, "0x")) }
+	archive = map[string]string{}
+	for k, v := range stored.Accounts {
+		archive[k] = norm(v.Address)
+	}
+	return norm(stored.Account1.Address), archive
+}
+
+// TestRestoreFromDifferentPhraseLeavesNoStaleArchive is the reviewer's probe:
+// create a seeded wallet, restore it from a DIFFERENT phrase, store it, and the
+// file must not end up holding two disagreeing identities — account_1 from the
+// new phrase and accounts["<scheme>"] from the old one. Before the fix both were
+// persisted, and the load path preferred the archive, so the wallet came back as
+// its PRE-restore identity.
+//
+// The assertions read the stored file directly and then reload it, so this test
+// is independent of the separate, out-of-scope StoreJSON archive-re-encryption
+// bug: it compares addresses (which that bug does not touch), not ciphertext.
+func TestRestoreFromDifferentPhraseLeavesNoStaleArchive(t *testing.T) {
+	phraseA, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+	phraseB, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := newSeedTestWallet(t, 230)
+	if err := w.SetMnemonic(phraseA); err != nil {
+		t.Fatal(err)
+	}
+	fillAccountsFromSeed(t, w)
+	if err := w.StoreJSON(); err != nil {
+		t.Fatal(err)
+	}
+	addressFromA := w.MainAddress.GetHex()
+
+	if err := w.RestoreSecretKeyFromMnemonic(string(phraseB), true); err != nil {
+		t.Fatal(err)
+	}
+	addressFromB := w.MainAddress.GetHex()
+	if addressFromB == addressFromA {
+		t.Fatal("test setup: two different phrases produced the same wallet")
+	}
+	if err := w.StoreJSON(); err != nil {
+		t.Fatal(err)
+	}
+
+	storedAccount1, storedArchive := readStoredAccountAddresses(t, w.HomePath, 230)
+	if storedAccount1 != addressFromB {
+		t.Fatalf("account_1.address = %s, oczekiwano tożsamości z nowej frazy %s", storedAccount1, addressFromB)
+	}
+	if got, ok := storedArchive[w.SigName]; ok && got != addressFromB {
+		t.Fatalf("accounts[%q].address = %s nie zgadza się z frazą (%s); plik niesie dwie różne tożsamości",
+			w.SigName, got, addressFromB)
+	}
+	if got, ok := storedArchive[w.SigName2]; ok && got != w.Account2.Address.GetHex() {
+		t.Fatalf("accounts[%q].address = %s nie zgadza się z frazą (%s)",
+			w.SigName2, got, w.Account2.Address.GetHex())
+	}
+	for scheme, addr := range storedArchive {
+		if addr == addressFromA {
+			t.Fatalf("archiwum wciąż zawiera tożsamość sprzed odtworzenia pod kluczem %q (%s)", scheme, addr)
+		}
+	}
+
+	loaded, err := LoadJSONFromDir(w.HomePath, 230, "test-password-123", w.SigName, w.SigName2)
+	if err != nil {
+		t.Fatalf("odtworzony portfel nie wczytuje się: %v", err)
+	}
+	if loaded.MainAddress.GetHex() != addressFromB {
+		t.Fatalf("po ponownym wczytaniu MainAddress = %s, oczekiwano %s (tożsamość z odtworzonej frazy)",
+			loaded.MainAddress.GetHex(), addressFromB)
+	}
+	if loaded.Account1.Address.GetHex() != addressFromB {
+		t.Fatalf("po ponownym wczytaniu Account1 = %s, oczekiwano %s",
+			loaded.Account1.Address.GetHex(), addressFromB)
+	}
+	phrase, err := loaded.GetMnemonicWords(true)
+	if err != nil {
+		t.Fatalf("odtworzona fraza nie jest dostępna po wczytaniu: %v", err)
+	}
+	if strings.Join(strings.Fields(phrase), " ") != strings.Join(strings.Fields(string(phraseB)), " ") {
+		t.Fatal("zapisana fraza to nie ta, z której odtworzono portfel")
+	}
+}
+
+// TestSchemeChangeSeedOutranksStaleArchive covers the load path directly: a
+// seeded wallet whose archive holds a FOREIGN key for the scheme the chain just
+// voted in must derive from its phrase and ignore the archive entry. Deriving is
+// self-verifying — the same phrase always yields the same key — so an archive
+// entry that disagrees can only be stale or foreign.
+func TestSchemeChangeSeedOutranksStaleArchive(t *testing.T) {
+	phraseA, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+	phraseB, err := NewMnemonic24()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := newSeedTestWallet(t, 231)
+	if err := w.SetMnemonic(phraseA); err != nil {
+		t.Fatal(err)
+	}
+	fillAccountsFromSeed(t, w)
+
+	withSchemeChangeTarget(t)
+
+	// What the phrase derives for the new scheme — the only correct answer.
+	expected, err := GenerateNewAccountFromSeed(*w, schemeChangeTarget, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a foreign archive entry for the new scheme: same wallet (so it is
+	// encrypted under this wallet's key and would load cleanly), different
+	// phrase. This is what a restore used to leave behind.
+	foreignSeed, err := SeedFromMnemonic(phraseB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := *w
+	scratch.seed = foreignSeed
+	foreign, err := GenerateNewAccountFromSeed(scratch, schemeChangeTarget, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foreign.Address.GetHex() == expected.Address.GetHex() {
+		t.Fatal("test setup: foreign key equals the derived one")
+	}
+	w.Accounts[schemeChangeTarget] = foreign
+	if err := w.StoreJSON(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadJSONFromDir(w.HomePath, 231, "test-password-123", schemeChangeTarget, w.SigName2)
+	if err != nil {
+		t.Fatalf("seeded wallet failed a scheme change it should have derived: %v", err)
+	}
+	if loaded.Account1.Address.GetHex() != expected.Address.GetHex() {
+		t.Fatalf("Account1 = %s, oczekiwano wyprowadzonego z frazy %s (wzięto wpis z archiwum %s)",
+			loaded.Account1.Address.GetHex(), expected.Address.GetHex(), foreign.Address.GetHex())
+	}
+	if loaded.MainAddress.GetHex() != expected.Address.GetHex() {
+		t.Fatalf("MainAddress = %s, oczekiwano %s", loaded.MainAddress.GetHex(), expected.Address.GetHex())
+	}
+	_, archive := readStoredAccountAddresses(t, w.HomePath, 231)
+	if got, ok := archive[schemeChangeTarget]; ok && got == foreign.Address.GetHex() {
+		t.Fatalf("obcy wpis archiwum dla %q przetrwał wczytanie (%s)", schemeChangeTarget, got)
+	}
+}
+
+// TestLegacyWalletSchemeChangeStillUsesArchive guards the reordering done for
+// I1: the seed is consulted BEFORE the per-scheme archive, but for a wallet with
+// no seed the archive is still the only source there is, and taking it must keep
+// working — otherwise a phrase-less wallet that legitimately holds a key for the
+// new scheme would be refused as if it had none.
+func TestLegacyWalletSchemeChangeStillUsesArchive(t *testing.T) {
+	w := newSeedTestWallet(t, 232)
+	acc, err := GenerateNewAccount(*w, w.SigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.MainAddress = acc.Address
+	w.Account1 = acc
+	acc2, err := GenerateNewAccount(*w, w.SigName2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Account2 = acc2
+	if w.HasSeed() {
+		t.Fatal("test setup: wallet unexpectedly has a seed")
+	}
+
+	withSchemeChangeTarget(t)
+
+	archived, err := GenerateNewAccount(*w, schemeChangeTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Accounts[schemeChangeTarget] = archived
+	if err := w.StoreJSON(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadJSONFromDir(w.HomePath, 232, "test-password-123", schemeChangeTarget, w.SigName2)
+	if err != nil {
+		t.Fatalf("portfel bez frazy z zarchiwizowanym kluczem nie wczytał się po zmianie schematu: %v", err)
+	}
+	if loaded.Account1.Address.GetHex() != archived.Address.GetHex() {
+		t.Fatalf("Account1 = %s, oczekiwano klucza z archiwum %s",
+			loaded.Account1.Address.GetHex(), archived.Address.GetHex())
+	}
+}

@@ -5,6 +5,7 @@ package rand // import "github.com/open-quantum-safe/liboqs-go/oqs/rand"
 
 /*
 #cgo pkg-config: liboqs
+#include <stdlib.h>
 #include <oqs/oqs.h>
 typedef void (*algorithm_ptr)(uint8_t*, size_t);
 void algorithmPtr_cgo(uint8_t*, size_t);
@@ -26,6 +27,14 @@ var algorithmPtrCallback func([]byte, int)
 //
 //export algorithmPtr
 func algorithmPtr(randomArray *C.uint8_t, bytesToRead C.size_t) {
+	// A nil callback means liboqs is calling back into a custom algorithm that
+	// has been cleared — i.e. it was never switched away from, or was switched
+	// back and then re-entered. Filling the buffer with whatever was there (or
+	// panicking on a nil call with an opaque message) would silently produce key
+	// or salt material from non-random memory, so say what happened.
+	if algorithmPtrCallback == nil {
+		panic("oqs/rand: custom RNG callback invoked after it was cleared; liboqs was not switched back to a built-in RNG")
+	}
 	// TODO optimize the copying if possible!
 	result := make([]byte, int(bytesToRead))
 	algorithmPtrCallback(result, int(bytesToRead))
@@ -66,7 +75,13 @@ func RandomBytesInPlace(randomArray []byte, bytesToRead int) {
 // specified algorithm. Possible values are "system", "NIST-KAT", "OpenSSL".
 // See <oqs/rand.h> liboqs header for more details.
 func RandomBytesSwitchAlgorithm(algName string) error {
-	if C.OQS_randombytes_switch_algorithm(C.CString(algName)) != C.OQS_SUCCESS {
+	// C.CString mallocs; liboqs only reads the name during the call, so it must
+	// be freed here or every switch leaks it. This is on the deterministic-keygen
+	// path (restoreSystemRNG runs after every derived key), so the leak was
+	// unbounded over a node's lifetime.
+	cAlgName := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlgName))
+	if C.OQS_randombytes_switch_algorithm(cAlgName) != C.OQS_SUCCESS {
 		return errors.New("can not switch to \"" + algName + "\" algorithm")
 	}
 	return nil
@@ -108,6 +123,27 @@ func RandomBytesCustomAlgorithm(fun func([]byte, int)) error {
 	C.OQS_randombytes_custom_algorithm(
 		(C.algorithm_ptr)(unsafe.Pointer(C.algorithmPtr_cgo)))
 	return nil
+}
+
+// ClearCustomAlgorithm drops the reference to the callback installed by
+// RandomBytesCustomAlgorithm. Call it only after switching liboqs back to a
+// built-in RNG (RandomBytesSwitchAlgorithm), since algorithmPtr has nothing to
+// call once it is cleared.
+//
+// It matters because the callback closes over the caller's key seed: leaving it
+// installed keeps that seed — and everything the closure captured with it —
+// reachable, and therefore unfreed and present in memory dumps, for the rest of
+// the process lifetime, long after the one key it was created for was generated.
+func ClearCustomAlgorithm() {
+	algorithmPtrCallback = nil
+}
+
+// CustomAlgorithmInstalled reports whether a custom RNG callback is currently
+// held. It exists so callers that install one temporarily can assert they gave
+// it back; treat a true here outside a keygen window as a leak of whatever the
+// callback captured.
+func CustomAlgorithmInstalled() bool {
+	return algorithmPtrCallback != nil
 }
 
 /**************** END Randomness ****************/

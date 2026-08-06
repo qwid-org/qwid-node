@@ -432,12 +432,20 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 		}
 		logger.GetLogger().Printf("derived the %s key for the new scheme from the recovery phrase (%d RNG bytes)", sigName, drawn)
 	} else {
-		pubKey, err = signer.GenerateKeyPair()
-		if err != nil {
-			return err
-		}
-		logger.GetLogger().Printf("WARNING: generated a random %s key — this wallet has no recovery phrase, "+
-			"so the new key cannot be restored from one; back up the wallet file", sigName)
+		// Refuse, exactly as the load path does (loadWalletFromStruct's
+		// scheme-change branches). Generating a random key here would mint a
+		// brand-new, unstaked identity and — because the caller archives it with
+		// StoreJSON — persist it, so the load path's refusal would never get the
+		// chance to fire on the next restart: it would find the archived entry,
+		// take it, and repoint MainAddress at it. The staked identity would be
+		// replaced anyway, silently, which is precisely what the refusal exists
+		// to prevent. Failing loudly here leaves the node following the chain
+		// with no key for the new scheme until the operator intervenes.
+		return fmt.Errorf("the network switched signature scheme to %q, but this wallet has no recovery phrase to derive a %q key from; "+
+			"generating a random key would silently replace this wallet's staked identity with a new, unstaked one. "+
+			"Restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup that already contains a %q key. "+
+			"Until then this node cannot produce with %q",
+			sigName, sigName, sigName, sigName)
 	}
 	mainAddress, err := common.PubKeyToAddress(pubKey, primary)
 	if err != nil {
@@ -648,11 +656,35 @@ func (w *Wallet) RestoreSecretKeyFromMnemonic(mnemonic string, primary bool) err
 	w.Account1 = acc1
 	w.Account2 = acc2
 	w.MainAddress = w.Account1.Address
+	// Rebuild the per-scheme key archive from scratch. Whatever was in it before
+	// belongs to the identity this restore just replaced (or to another wallet
+	// entirely) and the new phrase does not derive it; leaving it would put two
+	// disagreeing identities in the same file, and the load path would then have
+	// to choose between them. The archive now holds exactly the two accounts the
+	// phrase derives — a key for any other scheme is re-derived from the seed on
+	// demand, which is why dropping the rest loses nothing.
+	// (Written secondary-first so that if a chain ever runs the same scheme in
+	// both roles, the single surviving entry is the primary one — Account1 is
+	// the wallet's identity.)
+	w.Accounts = map[string]Account{w.SigName2: acc2}
+	w.Accounts[w.SigName] = acc1
 	// Realigns role metadata (Primary flags, PublicKey.MainAddress) across both
 	// accounts with the new MainAddress — the same fix-up loadKeys applies after
 	// reading a wallet off disk, so a restored wallet matches its reloaded form.
 	w.normalizeAccountRoles()
 	return nil
+}
+
+// setArchivedAccount records acc as the per-scheme archive entry for sigName,
+// replacing whatever was there. Called after deriving a key from the seed so the
+// archive is refreshed with the entry the phrase actually derives instead of
+// keeping a stale one next to it; the map is created if the wallet was
+// unmarshalled from JSON without an "accounts" object (nil map).
+func (w *Wallet) setArchivedAccount(sigName string, acc Account) {
+	if w.Accounts == nil {
+		w.Accounts = map[string]Account{}
+	}
+	w.Accounts[sigName] = acc
 }
 
 // normalizeAccountRoles sets the primary/secondary role metadata (the Primary
@@ -831,16 +863,25 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 
 	if !common.IsPaused() && w.SigName != sigName {
 		w.SigName = sigName
-		if a, ok := w.Accounts[sigName]; ok {
-			w.Account1 = a
-			copy(w.Account1.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
-		} else if w.HasSeed() {
+		// The seed outranks the per-scheme key archive, and is consulted FIRST.
+		// For a seeded wallet the phrase defines the identity: derivation is
+		// self-verifying (the same phrase always yields the same key), so an
+		// archive entry that disagrees is by definition stale (written before a
+		// restore) or foreign (copied in from another wallet). Taking the
+		// archive first, as this used to, meant that after
+		// RestoreSecretKeyFromMnemonic the wallet loaded its PRE-restore
+		// identity back — silently, and with MainAddress repointed at it.
+		if w.HasSeed() {
 			acc, err := GenerateNewAccountFromSeed(*w, sigName, true)
 			if err != nil {
 				return nil, err
 			}
 			w.Account1 = acc
 			copy(w.Account1.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
+			w.setArchivedAccount(sigName, acc)
+		} else if a, ok := w.Accounts[sigName]; ok {
+			w.Account1 = a
+			copy(w.Account1.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
 		} else {
 			// No stored key for the new scheme and no recovery phrase to derive
 			// one from: generating a random key here would silently hand this
@@ -855,16 +896,18 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 	}
 	if !common.IsPaused2() && w.SigName2 != sigName2 {
 		w.SigName2 = sigName2
-		if a, ok := w.Accounts[sigName2]; ok {
-			w.Account2 = a
-			copy(w.Account2.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
-		} else if w.HasSeed() {
+		// Seed first — see the matching comment in the primary branch above.
+		if w.HasSeed() {
 			acc, err := GenerateNewAccountFromSeed(*w, sigName2, false)
 			if err != nil {
 				return nil, err
 			}
 			w.Account2 = acc
 			copy(w.Account2.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
+			w.setArchivedAccount(sigName2, acc)
+		} else if a, ok := w.Accounts[sigName2]; ok {
+			w.Account2 = a
+			copy(w.Account2.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
 		} else {
 			// See the matching comment in the primary branch above.
 			return nil, fmt.Errorf("the network switched secondary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup taken after a %q key was already present", sigName2, sigName2, sigName2)

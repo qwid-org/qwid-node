@@ -281,10 +281,17 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		logger.GetLogger().Println("welcome tx global cap reached; skipping for", req.Username)
 	}
 
+	// No recovery phrase here either: the phrase must never cross HTTP (design
+	// decision 3), so website wallets are generated with random keys. Say so,
+	// rather than letting the README's "new wallets are created from a 24-word
+	// recovery phrase" be read as covering this flow.
 	JsonResponse(w, map[string]interface{}{
-		"success": true,
-		"address": address,
-		"message": "Account created successfully. Please login.",
+		"success":  true,
+		"address":  address,
+		"mnemonic": false,
+		"message": "Account created successfully. Please login. NOTE: this wallet has NO 24-word recovery phrase — " +
+			"recovery phrases are never sent over the network. Your password and this site's encrypted wallet file " +
+			"are the only way to reach these funds.",
 	})
 }
 

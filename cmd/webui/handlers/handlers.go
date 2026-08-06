@@ -266,9 +266,21 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 	TestAndSetEncryption()
 	startSession(w) // WH-C3: authenticate this browser session
 
+	// Be explicit that this wallet has NO recovery phrase. The phrase must never
+	// cross HTTP (design decision 3), so a wallet created here is generated with
+	// random keys and its encrypted file is the ONLY thing that can ever restore
+	// it. Saying nothing would leave the user with the impression the README
+	// gives for the CLI/GUI flows — that they hold a 24-word backup — which they
+	// do not.
 	jsonResponse(w, map[string]interface{}{
-		"success": true,
-		"address": wl.MainAddress.GetHex(),
+		"success":  true,
+		"address":  wl.MainAddress.GetHex(),
+		"mnemonic": false,
+		"warning": "This wallet has NO 24-word recovery phrase. The recovery phrase is never sent over HTTP, " +
+			"so wallets created in the Web UI cannot have one. Back up the encrypted wallet file " +
+			"(" + filepath.Join(wl.HomePath, "wallet"+strconv.Itoa(int(wl.WalletNumber))+".json") + ") " +
+			"together with its password — it is the only way to restore this wallet. " +
+			"For a wallet backed by a recovery phrase, create it with `go run cmd/generateNewWallet/main.go` or the Qt GUI.",
 	})
 }
 

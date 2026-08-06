@@ -1,10 +1,93 @@
 package main
 
 import (
+	"bufio"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestConfirmOverwriteAllowsFreeWalletNumber: a free number must not prompt.
+func TestConfirmOverwriteAllowsFreeWalletNumber(t *testing.T) {
+	dir := t.TempDir()
+	confirmed, err := confirmOverwriteIfExists(bufio.NewReader(strings.NewReader("")), walletFilePath(dir, 7), 7)
+	if err != nil {
+		t.Fatalf("wolny numer portfela odrzucony: %v", err)
+	}
+	if confirmed {
+		t.Fatal("zgłoszono potwierdzenie nadpisania dla nieistniejącego pliku")
+	}
+}
+
+// TestConfirmOverwriteRefusesOccupiedWalletNumber is the C1 regression: the
+// wallet file for the chosen number exists and the operator does NOT type the
+// confirmation phrase. Every one of these answers must abort — especially "y",
+// "yes" and a bare Enter, which are what a panicking operator running the
+// restore mode types by reflex.
+func TestConfirmOverwriteRefusesOccupiedWalletNumber(t *testing.T) {
+	for _, answer := range []string{"\n", "y\n", "yes\n", "tak\n", "nadpisz\n", "nadpisz portfel 1\n", ""} {
+		dir := t.TempDir()
+		file := walletFilePath(dir, 0)
+		if err := os.WriteFile(file, []byte(`{"wallet_number":0}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		confirmed, err := confirmOverwriteIfExists(bufio.NewReader(strings.NewReader(answer)), file, 0)
+		if err == nil {
+			t.Fatalf("odpowiedź %q nadpisała istniejący portfel 0", answer)
+		}
+		if confirmed {
+			t.Fatalf("odpowiedź %q zgłoszona jako potwierdzenie", answer)
+		}
+		// The file must still be there, untouched: refusing is only useful if
+		// nothing was written on the way to the refusal.
+		if data, rerr := os.ReadFile(file); rerr != nil || string(data) != `{"wallet_number":0}` {
+			t.Fatalf("istniejący plik portfela został naruszony (%v, %q)", rerr, string(data))
+		}
+	}
+}
+
+// TestConfirmOverwriteAcceptsExactPhrase: the escape hatch has to actually work,
+// otherwise a legitimate overwrite becomes impossible.
+func TestConfirmOverwriteAcceptsExactPhrase(t *testing.T) {
+	dir := t.TempDir()
+	file := walletFilePath(dir, 12)
+	if err := os.WriteFile(file, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, answer := range []string{"nadpisz portfel 12\n", "  NADPISZ   Portfel 12  \n"} {
+		confirmed, err := confirmOverwriteIfExists(bufio.NewReader(strings.NewReader(answer)), file, 12)
+		if err != nil {
+			t.Fatalf("odrzucono poprawne potwierdzenie %q: %v", answer, err)
+		}
+		if !confirmed {
+			t.Fatalf("potwierdzenie %q nie zostało zgłoszone jako potwierdzone", answer)
+		}
+	}
+}
+
+// TestCheckOverwriteConfirmationNamesWalletNumber guards the "names what will be
+// destroyed" requirement: the phrase for wallet 0 must not confirm wallet 1.
+func TestCheckOverwriteConfirmationNamesWalletNumber(t *testing.T) {
+	if err := checkOverwriteConfirmation("nadpisz portfel 0", 1); err == nil {
+		t.Fatal("potwierdzenie dla portfela 0 zaakceptowane dla portfela 1")
+	}
+	if err := checkOverwriteConfirmation("nadpisz portfel 1", 1); err != nil {
+		t.Fatalf("odrzucono własne potwierdzenie: %v", err)
+	}
+}
+
+// TestWalletFilePathMatchesStoreJSON pins the guard's path to the one StoreJSON
+// writes (filepath.Join(HomePath, "wallet<N>.json")). If they ever diverge the
+// guard would check a file that is not the one about to be destroyed.
+func TestWalletFilePathMatchesStoreJSON(t *testing.T) {
+	got := walletFilePath("/home/op/.qwid/wallet/3", 3)
+	want := filepath.Join("/home/op/.qwid/wallet/3", "wallet3.json")
+	if got != want {
+		t.Fatalf("walletFilePath = %q, oczekiwano %q", got, want)
+	}
+}
 
 func TestConfirmPositionsAreDistinctAndInRange(t *testing.T) {
 	pos := confirmPositions([8]byte{1, 2, 3, 4, 5, 6, 7, 8}, 24)

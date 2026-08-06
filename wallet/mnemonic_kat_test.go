@@ -24,18 +24,35 @@ const (
 	katSecondaryAddress = "e3e10a9738ed934220871e9cdc5a13a5cdcc36c0"
 )
 
+// The schemes the pinned addresses above were recorded under. The addresses are
+// only meaningful together with these names: derivation is domain-separated per
+// scheme (DeriveKeySeed), so running the same phrase under a different scheme
+// legitimately yields a different address. Asserted explicitly so that a change
+// to the default config fails with "the test environment is configured for a
+// different scheme" instead of the address mismatch below, which claims the
+// derivation changed when it did not.
+const (
+	katPrimaryScheme   = "Falcon-512"
+	katSecondaryScheme = "MAYO-5"
+)
+
 func TestKnownAnswerDerivation(t *testing.T) {
 	w := newSeedTestWallet(t, 241)
+	if w.SigName != katPrimaryScheme || w.SigName2 != katSecondaryScheme {
+		t.Fatalf("przypięte adresy zapisano dla schematów %q/%q, a środowisko testowe używa %q/%q — "+
+			"to NIE znaczy, że derywacja się zmieniła; przypięte wartości dotyczą innych schematów",
+			katPrimaryScheme, katSecondaryScheme, w.SigName, w.SigName2)
+	}
 	if err := w.SetMnemonic([]byte(katPhrase)); err != nil {
 		t.Fatal(err)
 	}
 
-	primary, err := GenerateNewAccountFromSeed(*w, w.SigName, true)
+	primary, err := GenerateNewAccountFromSeed(*w, katPrimaryScheme, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w.MainAddress = primary.Address
-	secondary, err := GenerateNewAccountFromSeed(*w, w.SigName2, false)
+	secondary, err := GenerateNewAccountFromSeed(*w, katSecondaryScheme, false)
 	if err != nil {
 		t.Fatal(err)
 	}

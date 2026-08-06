@@ -658,7 +658,15 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	}
 	err = ProcessBlockEncryption(*newBlock, lastBlock)
 	if err != nil {
-		logger.GetLogger().Println("process block encryption fails", err)
+		// Deliberately logged and not returned: the block itself is valid and has
+		// already been applied, so the node must keep following the chain. What
+		// failed is this node's own adoption of the new signature scheme — most
+		// often because the wallet has no recovery phrase to derive the new key
+		// from (see AddNewEncryptionToActiveWallet). Consequence: the node stays
+		// in sync but cannot sign under the new scheme until the operator
+		// restores the wallet.
+		logger.GetLogger().Println("WALLET DID NOT ADOPT THE CHAIN'S NEW ENCRYPTION SCHEME — node keeps syncing "+
+			"but cannot produce blocks or sign transactions under it; operator action required:", err)
 	}
 	return nil
 }

@@ -67,7 +67,16 @@ func TestSeedFromMnemonicRejectsBadInput(t *testing.T) {
 		{"pusta", "", "24"},
 		{"dwanaście słów", strings.Join(words[:12], " "), "24"},
 		{"słowo spoza listy", strings.Join(append(append([]string{}, words[:23]...), "qwidqwid"), " "), "nieprawidłowa"},
-		{"zła suma kontrolna", strings.Join(append(append([]string{}, words[:23]...), words[0]), " "), "nieprawidłowa"},
+		// Fixed vector, not a corrupted random phrase. Replacing the last word of
+		// a random phrase with another valid word restores a valid checksum about
+		// 1 run in 256 (the checksum is 8 bits), so that version of this subtest
+		// failed sporadically — and a suite whose job is catching derivation drift
+		// must never teach anyone to just re-run it. This one is deterministic:
+		// all-zero entropy's valid 24-word phrase ends in "art" (that is the
+		// katPhrase in mnemonic_kat_test.go); ending it in a 24th "abandon"
+		// encodes checksum byte 0x00 where SHA-256(0^32)'s first byte is required,
+		// so the checksum is always wrong.
+		{"zła suma kontrolna", strings.Repeat("abandon ", 23) + "abandon", "nieprawidłowa"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

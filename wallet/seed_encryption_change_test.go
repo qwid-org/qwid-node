@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/wonabru/qwid-node/common"
@@ -93,31 +94,52 @@ func TestSchemeChangeIsReproducibleFromPhraseUnknownScheme(t *testing.T) {
 	}
 }
 
-// TestSchemeChangeStaysRandomWithoutPhrase keeps pre-existing wallets on their
-// previous behaviour.
-func TestSchemeChangeStaysRandomWithoutPhrase(t *testing.T) {
-	newScheme := common.SigName2()
-
-	addr := func() string {
-		w := newSeedTestWallet(t, 211)
-		acc, err := GenerateNewAccount(*w, w.SigName)
-		if err != nil {
-			t.Fatal(err)
-		}
-		w.MainAddress = acc.Address
-		w.Account1 = acc
-		acc2, err := GenerateNewAccount(*w, w.SigName2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		w.Account2 = acc2
-		if err := w.AddNewEncryptionToActiveWallet(newScheme, true); err != nil {
-			t.Fatal(err)
-		}
-		return w.Account1.Address.GetHex()
+// TestSchemeChangeRefusedWithoutPhrase is the live-path half of the refusal the
+// load path already implements (loadWalletFromStruct's scheme-change branches,
+// covered by TestLegacyWalletSchemeChangeFailsSafely).
+//
+// This function is what a chain-voted scheme change actually runs on a live
+// node: blocks/processEncryption.go -> AddNewPubKeyToActiveWallet ->
+// AddNewEncryptionToActiveWallet, and the caller then persists the result with
+// StoreJSON. It used to generate a RANDOM key for a phrase-less wallet, which
+// made the load path's refusal unreachable: the random key was archived under
+// the new scheme name, so the next restart found an archive entry, adopted it,
+// and repointed MainAddress at it — replacing the staked identity silently,
+// which is exactly what the refusal exists to prevent. It must refuse instead,
+// and the message must name the scheme so the operator knows what to restore
+// for.
+func TestSchemeChangeRefusedWithoutPhrase(t *testing.T) {
+	w := newSeedTestWallet(t, 211)
+	acc, err := GenerateNewAccount(*w, w.SigName)
+	if err != nil {
+		t.Fatal(err)
 	}
+	w.MainAddress = acc.Address
+	w.Account1 = acc
+	acc2, err := GenerateNewAccount(*w, w.SigName2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Account2 = acc2
+	if w.HasSeed() {
+		t.Fatal("test wallet unexpectedly has a seed")
+	}
+	addressBefore := w.Account1.Address.GetHex()
 
-	if addr() == addr() {
-		t.Fatal("portfel bez frazy dał ten sam klucz dwa razy — generowanie przestało być losowe")
+	newScheme := common.SigName2()
+	err = w.AddNewEncryptionToActiveWallet(newScheme, true)
+	if err == nil {
+		t.Fatal("portfel bez frazy wygenerował losowy klucz dla nowego schematu zamiast odmówić")
+	}
+	if !strings.Contains(err.Error(), newScheme) {
+		t.Fatalf("komunikat nie nazywa nowego schematu %q: %v", newScheme, err)
+	}
+	for _, want := range []string{"recovery phrase", "wallet-file backup"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("komunikat nie mówi operatorowi o %q: %v", want, err)
+		}
+	}
+	if w.Account1.Address.GetHex() != addressBefore {
+		t.Fatalf("odmowa mimo to podmieniła tożsamość: %s -> %s", addressBefore, w.Account1.Address.GetHex())
 	}
 }
