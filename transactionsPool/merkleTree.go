@@ -380,20 +380,9 @@ func LastHeightStoredInMerleTrie() (int64, error) {
 		return -1, fmt.Errorf("database is nil")
 	}
 
-	i := int64(0)
-	for {
-		ib := common.GetByteInt64(i)
-		prefix := append(common.RootHashMerkleTreeDBPrefix[:], ib...)
-		isKey, err := GlobalMerkleTree.DB.IsKey(prefix)
-		if err != nil {
-			return i - 1, err
-		}
-		if !isKey {
-			break
-		}
-		i++
-	}
-	return i - 1, nil
+	return database.LastContiguousHeight(GlobalMerkleTree.DB, func(h int64) []byte {
+		return append(common.RootHashMerkleTreeDBPrefix[:], common.GetByteInt64(h)...)
+	})
 }
 
 func RemoveMerkleTrieFromDB(height int64) error {

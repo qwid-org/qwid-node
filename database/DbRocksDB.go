@@ -272,11 +272,14 @@ func (db *BlockchainDB) IsKey(key []byte) (bool, error) {
 	}
 	ro := gorocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
-	value, err := db.db.Get(ro, key)
+	// GetPinned, not Get: an existence check must not copy the value into Go
+	// memory. Snapshot values here run to megabytes, and this is called in a loop
+	// over heights.
+	value, err := db.db.GetPinned(ro, key)
 	if err != nil {
 		return false, err
 	}
-	defer value.Free()
+	defer value.Destroy()
 	return value.Exists(), nil
 }
 
