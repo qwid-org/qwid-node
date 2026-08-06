@@ -163,21 +163,10 @@ func StakingAccountsStoredAtHeight(height int64) bool {
 }
 
 func LastHeightStoredInStakingAccounts() (int64, error) {
-	i := int64(0)
-	for {
-		ib := common.GetByteInt64(i)
-		prefix := append(common.StakingAccountsDBPrefix[:], ib...)
-		prefix = append(prefix, byte(1))
-		isKey, err := database.MainDB.IsKey(prefix)
-		if err != nil {
-			return i - 1, err
-		}
-		if !isKey {
-			break
-		}
-		i++
-	}
-	return i - 1, nil
+	return database.LastContiguousHeight(database.MainDB, func(h int64) []byte {
+		prefix := append(common.StakingAccountsDBPrefix[:], common.GetByteInt64(h)...)
+		return append(prefix, byte(1))
+	})
 }
 
 func GetStakedInAllDelegatedAccounts() int64 {

@@ -198,41 +198,7 @@ func LastHeightStoredInAccounts() (int64, error) {
 	// AC-M8: find the highest stored height in O(log n) instead of an O(n) linear
 	// scan from 0. Heights are stored contiguously from 0, so exponential search
 	// brackets the boundary and binary search pinpoints it.
-	exists := func(h int64) (bool, error) {
-		ib := common.GetByteInt64(h)
-		prefix := append(common.AccountsDBPrefix[:], ib...)
-		return database.MainDB.IsKey(prefix)
-	}
-	if ok, err := exists(0); err != nil {
-		return -1, err
-	} else if !ok {
-		return -1, nil
-	}
-	// Exponential search for a hi that does NOT exist (lo always exists).
-	lo, hi := int64(0), int64(1)
-	for {
-		ok, err := exists(hi)
-		if err != nil {
-			return lo, err
-		}
-		if !ok {
-			break
-		}
-		lo = hi
-		hi *= 2
-	}
-	// Binary search the boundary in (lo, hi]: lo exists, hi does not.
-	for hi-lo > 1 {
-		mid := lo + (hi-lo)/2
-		ok, err := exists(mid)
-		if err != nil {
-			return lo, err
-		}
-		if ok {
-			lo = mid
-		} else {
-			hi = mid
-		}
-	}
-	return lo, nil
+	return database.LastContiguousHeight(database.MainDB, func(h int64) []byte {
+		return append(common.AccountsDBPrefix[:], common.GetByteInt64(h)...)
+	})
 }
