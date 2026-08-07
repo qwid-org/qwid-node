@@ -111,11 +111,29 @@ func InitStateDB() {
 	}
 }
 
-// CommitEVMState persists the current EVM state for a block height. Call it
-// wherever native accounts are stored on block finalize.
+// CommitEVMState persists the current EVM state for a block height
+// unconditionally. Genesis uses it to write the floor snapshot every later
+// closest-at-or-below lookup bottoms out on; block-apply paths should use
+// CommitEVMStateIfChanged instead.
 func CommitEVMState(height int64) error {
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
+	return State.Store(height)
+}
+
+// CommitEVMStateIfChanged persists the EVM state for a block height only when
+// a transaction of that block actually touched it (EvaluateSCForBlock marks
+// the state changed on every SC/DEX/token execution). Storing the full state
+// under every height made snapshots grow with chain length; skipping unchanged
+// heights keeps them proportional to contract activity while preserving the
+// rewind invariant — every height at which the state changed has a snapshot,
+// so the closest snapshot at-or-below any rewind target is exact.
+func CommitEVMStateIfChanged(height int64) error {
+	StateMutex.Lock()
+	defer StateMutex.Unlock()
+	if !State.ChangedSinceStore() {
+		return nil
+	}
 	return State.Store(height)
 }
 
@@ -330,6 +348,13 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 				loggerMain.GetLogger().Println(err)
 				return false, nil, nil, nil, nil
 			}
+			// The DEX execution below runs token transfers through the EVM and
+			// mutates State (token balances, prices). Mark before executing:
+			// conservative marking costs at most one redundant snapshot, while a
+			// missed mark would silently corrupt every later rewind.
+			StateMutex.Lock()
+			State.MarkChanged()
+			StateMutex.Unlock()
 			// transfering tokens
 			l, _, _, _, err := EvaluateSCDex(t.ContractAddress, fromAddress, dexOptData, t, bl)
 			if err != nil {
@@ -413,6 +438,13 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			continue
 		}
 
+		// EvaluateSC deploys or calls a contract on the shared State. Marked
+		// before the call for the same reason as the DEX branch above — even a
+		// reverted execution may leave persistable traces, and an extra snapshot
+		// is cheaper than a rewind on a stale one.
+		StateMutex.Lock()
+		State.MarkChanged()
+		StateMutex.Unlock()
 		l, ret, address, _, err := EvaluateSC(t, bl)
 		if t.TxData.Recipient == common.EmptyAddress() {
 			code := t.TxData.OptData

@@ -47,8 +47,28 @@ func RevertVMToBlockHeight(height int64) bool {
 
 	blocks.State.RevertToSnapshot(lastNum)
 	blocks.State.CleanupContractsAfterHeight(height)
-	if err := blocks.State.Load(height); err != nil {
-		logger.GetLogger().Println("could not reload EVM state on reset:", err)
+
+	// Snapshots are stored only for blocks that changed contract state, so the
+	// exact height usually has none. The closest snapshot at-or-below it is not
+	// an approximation: every state change writes its own snapshot, hence the
+	// state at that snapshot IS the state at `height`.
+	loaded, err := blocks.State.LoadAtOrBelow(height)
+	if err != nil {
+		// Nothing restorable (typically a database from before EVM snapshots
+		// existed). Keep the in-memory state and mark it changed, so the next
+		// applied block persists a full snapshot and later rewinds have a base.
+		logger.GetLogger().Println("no EVM snapshot at or below height", height,
+			"- keeping in-memory EVM state:", err)
+		blocks.State.MarkChanged()
+	} else if loaded < height {
+		logger.GetLogger().Println("EVM state restored from snapshot at", loaded,
+			"- no contract activity between", loaded, "and", height)
+	}
+
+	// Drop snapshots of the branch being abandoned; a stale one above the
+	// rewind point would resurrect dead-chain state on the next restart.
+	if err := blocks.State.RemoveStoredAbove(height); err != nil {
+		logger.GetLogger().Println("could not prune EVM snapshots above height", height, ":", err)
 	}
 	return true
 }

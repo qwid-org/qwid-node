@@ -406,8 +406,12 @@ func (d *dialer) connectToPeer(ip [4]byte) {
 // Peer discovery travels inside 'hi' messages, which need a live connection to
 // arrive — so once every connection drops, nothing reconnects on its own and the
 // command-line peers are the only route back.
+//
+// The self-connection does not count. It is present on the sync topic even on a
+// node that is completely alone, and counting it made this check answer "we are
+// connected" while the only chain data reaching us was our own.
 func needsBootstrap() bool {
-	return tcpip.GetPeersCount() == 0 || len(tcpip.GetPeersConnected(tcpip.SyncTopic)) == 0
+	return tcpip.GetPeersCount() == 0 || tcpip.CountPeersOnTopic(tcpip.SyncTopic) == 0
 }
 
 // keepBootstrapPeersConnected re-dials the command-line peers whenever the node

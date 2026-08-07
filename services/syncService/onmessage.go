@@ -72,8 +72,19 @@ var (
 	SyncStallRewind int64 = 2
 )
 
-// recordPeerHeightClaim stores a peer's height claim
+// recordPeerHeightClaim stores a peer's height claim.
+//
+// Our own address is never recorded. A node keeps a sync connection to itself
+// (the genesis/self-nonce path dials our own listener), so our own 'hi' comes
+// straight back to us. Stored as a claim it becomes a phantom peer that always
+// sits at exactly our height - and after the stall watchdog rewinds a couple of
+// blocks, ABOVE it. The node then asks itself for the batch, answers itself with
+// blocks it already has ("shorter other chain"), never advances, rewinds again,
+// and walks the chain backwards two blocks per timeout forever.
 func recordPeerHeightClaim(addr [4]byte, height int64, blockHash []byte) {
+	if tcpip.IsSelfIP(addr) {
+		return
+	}
 	peerHeightClaimsMutex.Lock()
 	defer peerHeightClaimsMutex.Unlock()
 	peerHeightClaims[addr] = peerHeightClaim{
@@ -104,9 +115,10 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	peersAtOrAboveHeight := 0
 	maxConfirmedHeight := localHeight
 
-	for _, claim := range peerHeightClaims {
-		// Skip expired claims
-		if now.Sub(claim.timestamp) > ClaimExpiryDuration {
+	for addr, claim := range peerHeightClaims {
+		// Skip expired claims, and our own echoed-back height: confirming a large
+		// sync with ourselves is no confirmation at all.
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
 			continue
 		}
 		if claim.height >= claimedHeight {
@@ -150,8 +162,8 @@ func networkHeight() int64 {
 	now := time.Now()
 	best, second := int64(0), int64(0)
 	live := 0
-	for _, claim := range peerHeightClaims {
-		if now.Sub(claim.timestamp) > ClaimExpiryDuration {
+	for addr, claim := range peerHeightClaims {
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
 			continue
 		}
 		live++
@@ -172,6 +184,33 @@ func networkHeight() int64 {
 	}
 }
 
+// peerTarget is one live peer claim we may request a batch from.
+type peerTarget struct {
+	addr   [4]byte
+	height int64
+}
+
+// peersAhead returns the live claims above height, and how many live claims
+// there are in total. Self addresses are skipped here as well as at record time,
+// so a claim that predates that guard can never make us request a batch from
+// ourselves.
+func peersAhead(height int64) (targets []peerTarget, live int) {
+	peerHeightClaimsMutex.RLock()
+	defer peerHeightClaimsMutex.RUnlock()
+
+	now := time.Now()
+	for addr, claim := range peerHeightClaims {
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
+			continue
+		}
+		live++
+		if claim.height > height {
+			targets = append(targets, peerTarget{addr: addr, height: claim.height})
+		}
+	}
+	return targets, live
+}
+
 // requestHeadersFromPeersAhead asks every peer whose live claim is above height
 // for the next batch, and reports how many requests went out and how many live
 // claims exist.
@@ -182,24 +221,7 @@ func networkHeight() int64 {
 // nothing. So if a peer's 'hi' stops reaching us, the node can rewind forever
 // with nothing to import. This is the active push that does not wait for one.
 func requestHeadersFromPeersAhead(height int64) (sent int, live int) {
-	type target struct {
-		addr   [4]byte
-		height int64
-	}
-	targets := []target{}
-
-	peerHeightClaimsMutex.RLock()
-	now := time.Now()
-	for addr, claim := range peerHeightClaims {
-		if now.Sub(claim.timestamp) > ClaimExpiryDuration {
-			continue
-		}
-		live++
-		if claim.height > height {
-			targets = append(targets, target{addr: addr, height: claim.height})
-		}
-	}
-	peerHeightClaimsMutex.RUnlock()
+	targets, live := peersAhead(height)
 
 	// shouldSyncToHeight takes the same lock, so it is called only after release.
 	for _, t := range targets {
@@ -264,6 +286,13 @@ func OnMessage(addr [4]byte, m []byte) {
 	switch string(amsg.GetHead()) {
 	case "hi": // getheader
 
+		// Our own 'hi' coming back over the self-connection tells us nothing we do
+		// not already know, and acting on it (height claim, header request) makes
+		// the node sync against itself. Drop it before anything else.
+		if tcpip.IsSelfIP(addr) {
+			return
+		}
+
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		var topicip [6]byte
 		var ip4 [4]byte
@@ -278,6 +307,13 @@ func OnMessage(addr [4]byte, m []byte) {
 				copy(topicip[2:], ip)
 				copy(topicip[:2], tcpip.NonceTopic[:])
 				if bytes.Equal(ip4[:], addr[:]) {
+					continue
+				}
+				// A peer may advertise an address of ours - loopback above all,
+				// which every node has and which means "itself" to whoever reads
+				// it. Dialling it would connect us to our own listener and fill
+				// the peer set with a phantom peer that is really us.
+				if tcpip.IsSelfIP(ip4) {
 					continue
 				}
 				connectingPeersMutex.Lock()
@@ -703,6 +739,14 @@ func OnMessage(addr [4]byte, m []byte) {
 			err = account.StoreAccounts(block.GetHeader().Height)
 			if err != nil {
 				logger.GetLogger().Println(err)
+			}
+
+			// The sync path used to store no EVM snapshots at all, which left a
+			// rewind with nothing to reload ("could not reload EVM state on
+			// reset") and a restart with only the genesis state. Mirror the live
+			// path: persist whenever this block changed contract state.
+			if err := blocks.CommitEVMStateIfChanged(block.GetHeader().Height); err != nil {
+				logger.GetLogger().Println("cannot store EVM state", err)
 			}
 
 			err = account.StoreStakingAccounts(block.GetHeader().Height)

@@ -403,12 +403,17 @@ func parsePeerIP(tcpConn *net.TCPConn) ([4]byte, error) {
 	return ip, nil
 }
 
-// isSelfIP reports whether ip refers to this node itself — either configured
+// IsSelfIP reports whether ip refers to this node itself — either configured
 // self address or IPv4 loopback. Self-connections (e.g. the self-nonce topic)
 // dial our own listener, so the dial end and accept end are two ends of ONE TCP
 // link that collide on the same (topic, ip) map key; they must not be treated
 // as duplicate connections where the "old" one gets closed.
-func isSelfIP(ip [4]byte) bool {
+//
+// It is equally the answer to "is this a peer?": a self-connection carries our
+// own messages back to us, so counting it as a peer makes a node that is alone
+// on the network look connected, and makes our own height claim look like a
+// peer's.
+func IsSelfIP(ip [4]byte) bool {
 	return bytes.Equal(ip[:], MyIP[:]) ||
 		bytes.Equal(ip[:], MyIPSelfNonce[:]) ||
 		bytes.Equal(ip[:], []byte{127, 0, 0, 1})
@@ -464,7 +469,7 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 		// live receive loop and send both ends into an endless reconnect loop.
 		// So only close a genuinely distinct old connection to a remote peer;
 		// for self, just replace the map value (LoopSend then writes to A).
-		if previousAccepted, accepted := acceptedConnections[topic][ip]; accepted && oldConn == previousAccepted && oldConn != tcpConn && !isSelfIP(ip) {
+		if previousAccepted, accepted := acceptedConnections[topic][ip]; accepted && oldConn == previousAccepted && oldConn != tcpConn && !IsSelfIP(ip) {
 			// Close the old connection before replacing it, so the other node's
 			// outbound receive loop gets a clean EOF instead of lingering and
 			// triggering repeated reconnections.
@@ -501,7 +506,11 @@ func GetIPsConnected() [][]byte {
 		uniqueIPs := make(map[[4]byte]struct{})
 		for _, connections := range tcpConnections {
 			for ip := range connections {
-				if bytes.Equal(ip[:], MyIP[:]) {
+				// Never advertise our own addresses. Loopback in particular is
+				// meaningless to anyone else: a peer that learns 127.0.0.1 from us
+				// dials its OWN listener, ends up exchanging 'hi' with itself and
+				// then treats its own height as a peer's.
+				if IsSelfIP(ip) {
 					continue
 				}
 				uniqueIPs[ip] = struct{}{}
@@ -537,12 +546,28 @@ func GetPeersCount() int {
 	uniqueIPs := make(map[[4]byte]struct{})
 	for _, connections := range tcpConnections {
 		for ip := range connections {
-			if !bytes.Equal(ip[:], MyIP[:]) {
+			if !IsSelfIP(ip) {
 				uniqueIPs[ip] = struct{}{}
 			}
 		}
 	}
 	return len(uniqueIPs)
+}
+
+// CountPeersOnTopic returns how many distinct remote peers we hold a connection
+// to on topic. The self-connection is not counted: it can only echo our own
+// messages back, so a node whose only "peer" is itself has nobody to sync from
+// and must keep re-dialling its bootstrap peers.
+func CountPeersOnTopic(topic [2]byte) int {
+	PeersMutex.RLock()
+	defer PeersMutex.RUnlock()
+	n := 0
+	for ip := range tcpConnections[topic] {
+		if !IsSelfIP(ip) {
+			n++
+		}
+	}
+	return n
 }
 
 func LookUpForNewPeersToConnect(chanPeer chan []byte) {

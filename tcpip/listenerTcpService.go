@@ -126,9 +126,16 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 			PeersMutex.RLock()
 			if bytes.Equal(ipr[:], []byte{0, 0, 0, 0}) {
 				for k, tcpConn0 := range tcpConnections[topic] {
-					if _, ok := validPeersConnected[k]; ok && !bytes.Equal(k[:], MyIP[:]) {
+					// Broadcasts go to peers, never back into our own listener:
+					// a self-connection would hand us our own 'hi' and let the
+					// node treat itself as a peer that is ahead of it. The
+					// self-nonce path sends to itself directly, not by broadcast.
+					if IsSelfIP(k) {
+						continue
+					}
+					if _, ok := validPeersConnected[k]; ok {
 						targets = append(targets, connEntry{k, tcpConn0})
-					} else if !bytes.Equal(k[:], MyIP[:]) {
+					} else {
 						logger.GetLogger().Println("when send to all, ignore connection", k)
 					}
 				}
@@ -359,7 +366,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		default:
 			r := Receive(topic, conn)
 			if r == nil {
-				if !isSelfIP(ip) && time.Since(lastData) > quietConnTimeout {
+				if !IsSelfIP(ip) && time.Since(lastData) > quietConnTimeout {
 					logger.GetLogger().Printf("no data from %v on topic %c%c for %s - dropping dead connection and reconnecting",
 						ip, topic[0], topic[1], time.Since(lastData).Truncate(time.Second))
 					if conn != nil {

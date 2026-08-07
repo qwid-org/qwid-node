@@ -277,7 +277,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				if err != nil {
 					logger.GetLogger().Println(err)
 				}
-				if err := blocks.CommitEVMState(newBlock.GetHeader().Height); err != nil {
+				// Store-on-change: a snapshot is written only when this block executed
+				// a contract/DEX/token transaction, so the EV keyspace grows with
+				// contract activity, not chain length.
+				if err := blocks.CommitEVMStateIfChanged(newBlock.GetHeader().Height); err != nil {
 					logger.GetLogger().Println("cannot store EVM state", err)
 				}
 

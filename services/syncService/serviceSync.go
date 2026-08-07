@@ -212,6 +212,19 @@ func lockBlocksForRewind() bool {
 	}
 }
 
+// stallRewindUseful reports whether rewinding could achieve anything from
+// height, along with the number of live peer claims behind that answer.
+//
+// A rewind is only ever a way to make a peer re-send a batch. With nobody above
+// us to ask, giving blocks back achieves nothing and costs SyncStallRewind
+// blocks every SyncStallTimeout — a node left alone on the network (or one whose
+// only "peer" is its own self-connection echoing our pre-rewind height) would
+// walk its chain backwards for as long as it runs.
+func stallRewindUseful(height int64) (useful bool, live int) {
+	ahead, live := peersAhead(height)
+	return len(ahead) > 0, live
+}
+
 func checkSyncStall(now time.Time) {
 	h := common.GetHeight()
 
@@ -230,6 +243,18 @@ func checkSyncStall(now time.Time) {
 		return
 	}
 	if now.Sub(progress.since) < SyncStallTimeout {
+		return
+	}
+
+	if canRewind, live := stallRewindUseful(h); !canRewind {
+		// syncPeers counts real peers only, so the log separates "nobody is
+		// connected on the sync topic" from "connected, but their 'hi' is not
+		// arriving" - the two need different fixes.
+		logger.GetLogger().Printf("sync stalled at height %d for %s, but no live peer is ahead of us "+
+			"(livePeerClaims=%d syncPeers=%d) - not rewinding, waiting for a peer that can serve the batch",
+			h, now.Sub(progress.since).Truncate(time.Second), live, tcpip.CountPeersOnTopic(tcpip.SyncTopic))
+		// Pace this message by SyncStallTimeout rather than repeating it every second.
+		progress.since = now
 		return
 	}
 

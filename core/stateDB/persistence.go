@@ -283,7 +283,8 @@ func addrKeyAddrValMapFromHex(m map[string]map[string]int64) (map[[common.Addres
 	return result, nil
 }
 
-// Store persists the committed EVM state under EVMStateDBPrefix+height.
+// Store persists the committed EVM state under EVMStateDBPrefix+height and
+// marks the in-memory state as in sync with disk.
 func (sa *StateAccount) Store(height int64) error {
 	b, err := sa.Marshal()
 	if err != nil {
@@ -294,6 +295,7 @@ func (sa *StateAccount) Store(height int64) error {
 		logger.GetLogger().Println("cannot store EVM state", err)
 		return err
 	}
+	sa.changedSinceStore = false
 	return nil
 }
 
@@ -304,6 +306,9 @@ func (sa *StateAccount) Load(height int64) error {
 		if err != nil {
 			return err
 		}
+		if h < 0 {
+			return fmt.Errorf("no persisted EVM state")
+		}
 		height = h
 	}
 	prefix := append(common.EVMStateDBPrefix[:], common.GetByteInt64(height)...)
@@ -311,44 +316,97 @@ func (sa *StateAccount) Load(height int64) error {
 	if err != nil || b == nil {
 		return err
 	}
-	return sa.Unmarshal(b)
+	if err := sa.Unmarshal(b); err != nil {
+		return err
+	}
+	sa.changedSinceStore = false
+	return nil
 }
 
-// LastStoredHeight finds the highest stored EVM-state height via exponential +
-// binary search (heights are contiguous), mirroring account.LastHeightStoredInAccounts.
-func (sa *StateAccount) LastStoredHeight() (int64, error) {
-	exists := func(h int64) (bool, error) {
-		prefix := append(common.EVMStateDBPrefix[:], common.GetByteInt64(h)...)
-		return database.MainDB.IsKey(prefix)
-	}
-	if ok, err := exists(0); err != nil {
+// LoadAtOrBelow restores the closest persisted EVM snapshot at or below height
+// and returns the height it actually loaded. Under the store-on-change model
+// this is exact, not approximate: a snapshot is written at every height whose
+// block changed the state, so the state at the closest stored height below is
+// byte-for-byte the state at `height` itself.
+func (sa *StateAccount) LoadAtOrBelow(height int64) (int64, error) {
+	h, err := sa.ClosestStoredHeight(height)
+	if err != nil {
 		return -1, err
-	} else if !ok {
-		return -1, nil
 	}
-	lo, hi := int64(0), int64(1)
-	for {
-		ok, err := exists(hi)
-		if err != nil {
-			return lo, err
-		}
-		if !ok {
-			break
-		}
-		lo = hi
-		hi *= 2
+	if h < 0 {
+		return -1, fmt.Errorf("no persisted EVM state at or below height %d", height)
 	}
-	for hi-lo > 1 {
-		mid := lo + (hi-lo)/2
-		ok, err := exists(mid)
-		if err != nil {
-			return lo, err
+	if err := sa.Load(h); err != nil {
+		return -1, err
+	}
+	return h, nil
+}
+
+// storedHeights enumerates every height that has a persisted EVM snapshot.
+// The EV keyspace holds one key per contract-bearing block, so a full prefix
+// scan stays cheap regardless of chain length. The heights are little-endian
+// in the key, so RocksDB iteration order is meaningless — callers get an
+// unordered list.
+func (sa *StateAccount) storedHeights() ([]int64, error) {
+	keys, err := database.MainDB.LoadAllKeys(common.EVMStateDBPrefix[:])
+	if err != nil {
+		return nil, err
+	}
+	heights := make([]int64, 0, len(keys))
+	for _, k := range keys {
+		if len(k) != len(common.EVMStateDBPrefix)+8 {
+			continue
 		}
-		if ok {
-			lo = mid
-		} else {
-			hi = mid
+		heights = append(heights, common.GetInt64FromByte(k[len(common.EVMStateDBPrefix):]))
+	}
+	return heights, nil
+}
+
+// LastStoredHeight returns the highest stored EVM-state height, or -1 when
+// nothing is stored. Snapshot heights are NOT contiguous (store-on-change
+// leaves gaps at contract-free blocks), so this enumerates the EV keyspace
+// instead of binary-searching it.
+func (sa *StateAccount) LastStoredHeight() (int64, error) {
+	return sa.highestStored(func(int64) bool { return true })
+}
+
+// ClosestStoredHeight returns the highest stored EVM-state height that is
+// <= height, or -1 when there is none.
+func (sa *StateAccount) ClosestStoredHeight(height int64) (int64, error) {
+	return sa.highestStored(func(h int64) bool { return h <= height })
+}
+
+func (sa *StateAccount) highestStored(accept func(int64) bool) (int64, error) {
+	heights, err := sa.storedHeights()
+	if err != nil {
+		return -1, err
+	}
+	best := int64(-1)
+	for _, h := range heights {
+		if accept(h) && h > best {
+			best = h
 		}
 	}
-	return lo, nil
+	return best, nil
+}
+
+// RemoveStoredAbove deletes every persisted EVM snapshot above height. A rewind
+// must call this: an orphaned snapshot from the abandoned branch would otherwise
+// be picked up by LastStoredHeight/Load(-1) on the next restart and resurrect
+// state from a chain that no longer exists.
+func (sa *StateAccount) RemoveStoredAbove(height int64) error {
+	heights, err := sa.storedHeights()
+	if err != nil {
+		return err
+	}
+	for _, h := range heights {
+		if h <= height {
+			continue
+		}
+		key := append(common.EVMStateDBPrefix[:], common.GetByteInt64(h)...)
+		if err := database.MainDB.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }

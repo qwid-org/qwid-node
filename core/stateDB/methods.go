@@ -35,6 +35,16 @@ type StateAccount struct {
 	refund              uint64                                              // transient
 	HeightToSnapShotNum map[int64]int                                       `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
 	ContractsByHeight   map[int64][][common.AddressLength]byte              `json:"contractsByHeight"`
+	// changedSinceStore is true when the persistable EVM state may have changed
+	// since the last successful Store/Load. It drives the store-on-change
+	// persistence model: a full state snapshot is written only for blocks that
+	// actually executed a contract/DEX/token transaction, so disk usage grows
+	// with contract activity instead of chain length. The invariant that makes
+	// the closest-at-or-below snapshot lookup exact is: every height at which
+	// the state changed has its own snapshot. Marking is conservative — a mark
+	// without a real change costs one redundant snapshot; a change without a
+	// mark corrupts every later rewind, so when in doubt, mark.
+	changedSinceStore bool // transient, guarded by blocks.StateMutex like the rest
 }
 
 func CreateStateDB() StateAccount {
@@ -55,6 +65,18 @@ func CreateStateDB() StateAccount {
 	sa.HeightToSnapShotNum = map[int64]int{}
 	sa.ContractsByHeight = map[int64][][common.AddressLength]byte{}
 	return sa
+}
+
+// MarkChanged records that the persistable EVM state may differ from the last
+// stored snapshot. Store and Load clear it on success.
+func (sa *StateAccount) MarkChanged() {
+	sa.changedSinceStore = true
+}
+
+// ChangedSinceStore reports whether the state may differ from the last
+// successful Store/Load.
+func (sa *StateAccount) ChangedSinceStore() bool {
+	return sa.changedSinceStore
 }
 
 func (sa *StateAccount) SetSnapShotNum(height int64, snapNum int) {
