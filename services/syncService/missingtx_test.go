@@ -35,18 +35,18 @@ func TestDueMissingTxRequests(t *testing.T) {
 	t0 := time.Now()
 	h1, h2 := txHash(1), txHash(2)
 
-	due, esc := dueMissingTxRequests([][]byte{h1, h2}, t0)
+	due, esc, _ := dueMissingTxRequests([][]byte{h1, h2}, t0)
 	if len(due) != 2 || len(esc) != 0 {
 		t.Fatalf("pierwsza runda: due=%d esc=%d, oczekiwano 2/0", len(due), len(esc))
 	}
 
 	// Half a second later (the old spam cadence): nothing is due.
-	if due, _ = dueMissingTxRequests([][]byte{h1, h2}, t0.Add(500*time.Millisecond)); len(due) != 0 {
+	if due, _, _ = dueMissingTxRequests([][]byte{h1, h2}, t0.Add(500*time.Millisecond)); len(due) != 0 {
 		t.Fatalf("po 500ms due=%d, oczekiwano 0 (throttle)", len(due))
 	}
 
 	// After the retry interval both are due again.
-	if due, _ = dueMissingTxRequests([][]byte{h1, h2}, t0.Add(missingTxRetryInterval+time.Second)); len(due) != 2 {
+	if due, _, _ = dueMissingTxRequests([][]byte{h1, h2}, t0.Add(missingTxRetryInterval+time.Second)); len(due) != 2 {
 		t.Fatalf("po interwale due=%d, oczekiwano 2", len(due))
 	}
 
@@ -55,7 +55,7 @@ func TestDueMissingTxRequests(t *testing.T) {
 	escalated := false
 	for i := 0; i < missingTxEscalateAfter; i++ {
 		now = now.Add(missingTxRetryInterval + time.Second)
-		_, esc = dueMissingTxRequests([][]byte{h1}, now)
+		_, esc, _ = dueMissingTxRequests([][]byte{h1}, now)
 		if len(esc) == 1 {
 			escalated = true
 		}
@@ -66,9 +66,30 @@ func TestDueMissingTxRequests(t *testing.T) {
 
 	// clearMissingTx starts a fresh cycle: immediately due again, no escalation.
 	clearMissingTx()
-	due, esc = dueMissingTxRequests([][]byte{h1}, now)
+	due, esc, _ = dueMissingTxRequests([][]byte{h1}, now)
 	if len(due) != 1 || len(esc) != 0 {
 		t.Fatalf("po wyczyszczeniu due=%d esc=%d, oczekiwano 1/0", len(due), len(esc))
+	}
+}
+
+// TestMissingTxRecycleThreshold: after missingTxRecycleAfter unanswered tries
+// the caller must be told to recycle the transaction-topic connection - the
+// signature of a half-dead link is exactly "requests leave, answers never
+// come, forever".
+func TestMissingTxRecycleThreshold(t *testing.T) {
+	withFreshMissingTx(t)
+	h := txHash(7)
+	now := time.Now()
+	recycled := 0
+	for i := 0; i < 2*missingTxRecycleAfter; i++ {
+		now = now.Add(missingTxRetryInterval + time.Second)
+		if _, _, recycle := dueMissingTxRequests([][]byte{h}, now); recycle {
+			recycled++
+		}
+	}
+	if recycled != 2 {
+		t.Fatalf("recycle zasygnalizowany %d razy po %d próbach, oczekiwano 2 (co %d prób)",
+			recycled, 2*missingTxRecycleAfter, missingTxRecycleAfter)
 	}
 }
 

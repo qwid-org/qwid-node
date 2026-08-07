@@ -7,6 +7,7 @@ import (
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
 	"github.com/wonabru/qwid-node/services/transactionServices"
+	"github.com/wonabru/qwid-node/tcpip"
 )
 
 // Missing-transaction request bookkeeping.
@@ -26,6 +27,14 @@ const (
 	// the request is broadcast to every live peer ahead and the operator is
 	// pointed at the hash. 6 tries * 5s = ~30s of silence.
 	missingTxEscalateAfter = 6
+	// missingTxRecycleAfter is how many unanswered requests it takes before
+	// the transaction-topic connection to the unresponsive peer is torn down
+	// and re-dialed. The bt requests demonstrably leave this node while
+	// nothing comes back, which is the signature of a half-dead link: OUR
+	// receive loop is fine, but the peer's send side points at a stale stream
+	// (typically left over from our earlier restart) that no timeout on our
+	// side can detect. 12 tries * 5s = ~1 minute of silence.
+	missingTxRecycleAfter = 12
 	// missingTxForget drops bookkeeping for hashes not asked about for this
 	// long, so the map cannot grow without bound across a long sync.
 	missingTxForget = 10 * time.Minute
@@ -43,8 +52,9 @@ var (
 
 // dueMissingTxRequests returns the subset of hashes whose next request is due,
 // advancing their counters. It also reports the hashes that just crossed the
-// escalation threshold.
-func dueMissingTxRequests(hashes [][]byte, now time.Time) (due [][]byte, escalate [][]byte) {
+// escalation threshold, and whether any hash has gone unanswered long enough
+// that the link to the serving peer should be recycled.
+func dueMissingTxRequests(hashes [][]byte, now time.Time) (due [][]byte, escalate [][]byte, recycle bool) {
 	missingTxMutex.Lock()
 	defer missingTxMutex.Unlock()
 
@@ -71,8 +81,11 @@ func dueMissingTxRequests(hashes [][]byte, now time.Time) (due [][]byte, escalat
 		if st.tries%missingTxEscalateAfter == 0 {
 			escalate = append(escalate, h)
 		}
+		if st.tries%missingTxRecycleAfter == 0 {
+			recycle = true
+		}
 	}
-	return due, escalate
+	return due, escalate, recycle
 }
 
 // clearMissingTx drops all bookkeeping once a sync round finds nothing
@@ -91,7 +104,7 @@ func clearMissingTx() {
 // the log - by hash - so the operator can grep the serving peer's log for what
 // happened to the answer.
 func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested int) {
-	due, escalate := dueMissingTxRequests(hashes, time.Now())
+	due, escalate, recycle := dueMissingTxRequests(hashes, time.Now())
 	if len(due) == 0 {
 		return 0
 	}
@@ -112,15 +125,18 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 
 	if len(escalate) > 0 {
 		targets, _ := peersAhead(height)
+		others := make([]peerTarget, 0, len(targets))
+		for _, t := range targets {
+			if t.addr != addr {
+				others = append(others, t)
+			}
+		}
 		for _, h := range escalate {
 			logger.GetLogger().Printf("missing tx %x still unanswered after %d requests to %v - "+
 				"asking %d other peer(s); grep the peer's log for this hash ('bt'/'bx' lines)",
-				h[:8], missingTxEscalateAfter, addr, len(targets))
+				h[:8], missingTxEscalateAfter, addr, len(others))
 		}
-		for _, t := range targets {
-			if t.addr == addr {
-				continue
-			}
+		for _, t := range others {
 			for i := 0; i < len(escalate); i += maxChunk {
 				end := i + maxChunk
 				if end > len(escalate) {
@@ -129,6 +145,16 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 				transactionServices.SendGT(t.addr, escalate[i:end], "bt")
 			}
 		}
+	}
+
+	// A minute of one-way silence: our bt requests leave (Send would log
+	// otherwise) and no bx ever comes back, while the sync topic to the same
+	// peer keeps working. That is a half-dead transaction link - typically the
+	// peer's send side holds a stale stream from before our restart - and only
+	// a fresh dial can replace it.
+	if recycle {
+		logger.GetLogger().Printf("no bx answers from %v for ~1 minute - recycling the transaction-topic connection", addr)
+		tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
 	}
 	return len(due)
 }

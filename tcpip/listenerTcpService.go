@@ -56,6 +56,31 @@ const quietConnTimeout = 3 * time.Minute
 // for (topic, ip) - outbound or accepted. Used on quiet-death, where the whole
 // peer went silent: keeping a possibly-equally-dead accepted stream as the send
 // path would make the fresh dial reuse it and keep sending into the void.
+// RecycleTopicConnection tears down every connection to ip on topic and asks
+// discovery to re-establish it. This is the recovery of last resort for a
+// half-dead link: the local receive loop may be perfectly healthy while the
+// PEER's send side points at a stale stream (e.g. left over from our earlier
+// restart), in which case its replies never arrive and nothing on our side
+// times out. A fresh dial forces the peer to register a new stream for us.
+func RecycleTopicConnection(topic [2]byte, ip [4]byte) {
+	logger.GetLogger().Printf("recycling connection to %v on topic %c%c", ip, topic[0], topic[1])
+	deletedIP := closeAndRemovePeerTopic(topic, ip)
+	for _, d := range deletedIP {
+		select {
+		case ChanPeer <- d:
+		default:
+			logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+		}
+	}
+	if len(deletedIP) == 0 {
+		select {
+		case ChanPeer <- append(topic[:], ip[:]...):
+		default:
+			logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+		}
+	}
+}
+
 func closeAndRemovePeerTopic(topic [2]byte, ip [4]byte) [][]byte {
 	PeersMutex.Lock()
 	defer PeersMutex.Unlock()
