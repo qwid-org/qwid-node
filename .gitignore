@@ -21,3 +21,7 @@ docker
 
 __debug_bin*
 qtbox
+
+# Compiled node binaries
+/mining
+/webui
