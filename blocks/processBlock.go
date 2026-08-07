@@ -35,9 +35,17 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 		return fmt.Errorf("timestamp too far in future")
 	}
 
-	// 3. Reasonable progression
+	// 3. Reasonable progression. A large gap to the parent is only suspicious when
+	// the block also claims a time the wall clock has not reached yet. After a chain
+	// halt (node restart, network outage) longer than MaxBlockTimeInterval every
+	// honest candidate is necessarily stamped more than that far after its parent —
+	// producers stamp the current time — so bounding the gap on its own bricks the
+	// chain permanently: no successor block could ever be valid again. Comparing
+	// against currTime here also gives the sync path a future-timestamp bound, which
+	// rule 2 skips. No block already in the chain can trip this, since they all
+	// passed the old gap-only rule.
 	maxTime := lastTime + common.MaxBlockTimeInterval
-	if blockTime > maxTime {
+	if blockTime > maxTime && blockTime > currTime+common.MaxBlockForwardInTime {
 		return fmt.Errorf("timestamp progression too large")
 	}
 
