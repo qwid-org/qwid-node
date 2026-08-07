@@ -110,6 +110,17 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		return true, claimedHeight
 	}
 
+	// HEIGHT_OF_NETWORK is the operator's own statement of how high the network
+	// is, so a claim within it needs no multi-peer confirmation - the operator
+	// already confirmed it. Without this, a node with a single peer crawls one
+	// bucket per round toward a height its operator knows to be real, logging
+	// "not confirmed by enough peers" the whole way. This only lifts the rate
+	// limit: every block is still fully verified, so a lying peer gains nothing
+	// but the ability to serve us the chain faster.
+	if claimedHeight <= common.CurrentHeightOfNetwork {
+		return true, claimedHeight
+	}
+
 	// For large height differences, require multiple peers to agree
 	now := time.Now()
 	peersAtOrAboveHeight := 0
@@ -233,6 +244,25 @@ func requestHeadersFromPeersAhead(height int64) (sent int, live int) {
 		sent++
 	}
 	return sent, live
+}
+
+// nextBatchTarget decides whether the peer that just served us a batch should
+// immediately be asked for the next one, and up to what height. It requires a
+// live, still-ahead claim from that peer and runs the claim through the same
+// shouldSyncToHeight validation as the 'hi' path.
+func nextBatchTarget(addr [4]byte, height int64) (int64, bool) {
+	peerHeightClaimsMutex.RLock()
+	claim, ok := peerHeightClaims[addr]
+	peerHeightClaimsMutex.RUnlock()
+	if !ok || time.Since(claim.timestamp) > ClaimExpiryDuration || claim.height <= height {
+		return 0, false
+	}
+	// shouldSyncToHeight takes peerHeightClaimsMutex itself - called unlocked.
+	ok, validated := shouldSyncToHeight(claim.height, height)
+	if !ok || validated <= height {
+		return 0, false
+	}
+	return validated, true
 }
 
 // updateSyncTarget refreshes the network height used to decide whether this node
@@ -758,6 +788,18 @@ func OnMessage(addr [4]byte, m []byte) {
 			sm := statistics.GetStatsManager()
 			sm.UpdateStatistics(block, oldBlock)
 
+		}
+
+		// Pipeline: a batch is otherwise requested only when the peer's next
+		// 'hi' arrives, which caps sync at one bucket per second no matter how
+		// fast this node can verify and apply. Having just applied blocks from
+		// this peer, ask it for the next batch right away; requesting only
+		// after real progress (and only while still behind) keeps this from
+		// ping-ponging when a batch brought nothing new.
+		if newH := common.GetHeight(); newH > h && common.IsBehindNetwork() {
+			if target, ok := nextBatchTarget(addr, newH); ok {
+				SendGetHeaders(addr, target)
+			}
 		}
 
 	case "gh":

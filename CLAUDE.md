@@ -118,6 +118,11 @@ HEIGHT_OF_NETWORK=<current_height>  # Sync target while the local chain is BELOW
                                     # cannot pin the target below the real network height. Set it
                                     # at or above the true network height - a value that is too
                                     # low lets the node declare itself synced early and fork.
+                                    # Peer height claims up to this value also count as
+                                    # operator-confirmed: they skip the multi-peer consensus
+                                    # throttle in shouldSyncToHeight, so a node with a single
+                                    # peer syncs toward it at full speed (blocks are still
+                                    # fully verified).
 RPC_BIND_ADDRESS=<host>      # Optional. wallet<->node RPC bind host; default 127.0.0.1 (loopback only, NP-C4). Override only if wallet/UI runs on a different host — exposes unauthenticated RPC (e.g. TRAN).
 NODE_IP_SELF_NONCE=<ip>      # Optional. IP for the self-nonce connection; unset = default local behaviour.
 ```

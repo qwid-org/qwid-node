@@ -220,8 +220,15 @@ func TestSyncTargetFloorsAtHint(t *testing.T) {
 }
 
 // TestShouldSyncToHeightStepsByBucket documents the throttled step used when not
-// enough peers confirm a large height claim.
+// enough peers confirm a large height claim and the operator has not confirmed
+// it either. The hint is pinned low: the test binary may inherit a real
+// HEIGHT_OF_NETWORK from the environment, which would legitimately lift the
+// throttle.
 func TestShouldSyncToHeightStepsByBucket(t *testing.T) {
+	savedHint := common.CurrentHeightOfNetwork
+	common.CurrentHeightOfNetwork = 23
+	defer func() { common.CurrentHeightOfNetwork = savedHint }()
+
 	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
 		ok, target := shouldSyncToHeight(105000, 500)
 		if !ok {
@@ -229,6 +236,30 @@ func TestShouldSyncToHeightStepsByBucket(t *testing.T) {
 		}
 		if want := int64(500) + common.NumberOfHashesInBucket; target != want {
 			t.Fatalf("throttled target = %d, want %d", target, want)
+		}
+	})
+}
+
+// TestShouldSyncToHeightTrustsOperatorHint: a claim within HEIGHT_OF_NETWORK is
+// operator-confirmed and must be approved in full even with a single peer -
+// this is what lets a lone-peer node sync at full speed instead of one bucket
+// per round. Claims beyond the hint still need multi-peer consensus.
+func TestShouldSyncToHeightTrustsOperatorHint(t *testing.T) {
+	savedHint := common.CurrentHeightOfNetwork
+	common.CurrentHeightOfNetwork = 110000
+	defer func() { common.CurrentHeightOfNetwork = savedHint }()
+
+	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
+		ok, target := shouldSyncToHeight(105000, 500)
+		if !ok || target != 105000 {
+			t.Fatalf("shouldSyncToHeight = %v, %d; oczekiwano pełnej wysokości 105000 "+
+				"(deklaracja w granicach HEIGHT_OF_NETWORK)", ok, target)
+		}
+		// Beyond the operator hint the throttle still applies.
+		ok, target = shouldSyncToHeight(120000, 500)
+		if !ok || target != 500+common.NumberOfHashesInBucket {
+			t.Fatalf("shouldSyncToHeight powyżej HEIGHT_OF_NETWORK = %v, %d; "+
+				"oczekiwano dławienia do %d", ok, target, 500+common.NumberOfHashesInBucket)
 		}
 	})
 }
