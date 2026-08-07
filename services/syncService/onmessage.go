@@ -2,6 +2,7 @@ package syncServices
 
 import (
 	"bytes"
+	"fmt"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -244,6 +245,33 @@ func requestHeadersFromPeersAhead(height int64) (sent int, live int) {
 		sent++
 	}
 	return sent, live
+}
+
+// slowBlockThreshold is the per-block wall time above which the sync apply loop
+// logs the block individually, so a pathological block is visible by height.
+const slowBlockThreshold = 250 * time.Millisecond
+
+// batchTiming accumulates per-phase durations across one "sh" batch. Sync speed
+// complaints are unanswerable from the regular logs - this prints one line per
+// batch naming where the time went.
+type batchTiming struct {
+	start      time.Time
+	verify     time.Duration // CheckBaseBlock across the verify pass
+	funds      time.Duration // CheckBlockAndTransferFunds (tx sigs, EVM, transfers)
+	storeBlock time.Duration // block persistence
+	accounts   time.Duration // accounts snapshot per block
+	staking    time.Duration // staking snapshots (256 buckets) per block
+	evm        time.Duration // EVM snapshot (store-on-change, usually 0)
+	applied    int
+	lastBlock  blocks.Block
+	lastParent blocks.Block
+}
+
+func (t *batchTiming) summary() string {
+	ms := func(d time.Duration) time.Duration { return d.Truncate(time.Millisecond) }
+	return fmt.Sprintf("applied %d blocks in %s (verify=%s funds=%s storeBlock=%s accounts=%s staking=%s evm=%s)",
+		t.applied, ms(time.Since(t.start)), ms(t.verify), ms(t.funds), ms(t.storeBlock),
+		ms(t.accounts), ms(t.staking), ms(t.evm))
 }
 
 // nextBatchTarget decides whether the peer that just served us a batch should
@@ -492,6 +520,9 @@ func OnMessage(addr [4]byte, m []byte) {
 		was := false
 		hashesMissingAll := [][]byte{}
 		lastGoodBlock := indices[0]
+		// timing accumulates per-phase durations for this batch, so a slow sync
+		// names the phase that eats the time instead of leaving it to guesswork.
+		timing := batchTiming{start: time.Now()}
 		// verifiedUpTo is the highest new block in this batch that passed
 		// verification. Blocks past it must not be applied: this phase checks the
 		// whole batch against pre-batch state, while state a block introduces
@@ -590,7 +621,6 @@ func OnMessage(addr [4]byte, m []byte) {
 			parentFromPeer := was
 			if was {
 				oldBlock = blcks[i-1]
-				logger.GetLogger().Printf("Using previous block from received blocks for index %d", index)
 			} else {
 				oldBlock, err = blocks.LoadBlock(index - 1)
 				if err != nil {
@@ -598,7 +628,6 @@ func OnMessage(addr [4]byte, m []byte) {
 					return
 				}
 				was = true
-				logger.GetLogger().Printf("Loaded previous block from storage for index %d", index)
 			}
 
 			// Special logging for second block
@@ -632,11 +661,8 @@ func OnMessage(addr [4]byte, m []byte) {
 				}
 			}
 
-			// Add detailed logging for block hash verification
-			logger.GetLogger().Printf("block %d hash: %x", index, block.BlockHash.GetBytes())
-			logger.GetLogger().Printf("Verifying block %d previous hash: %x", index, block.GetHeader().PreviousHash.GetBytes())
-			logger.GetLogger().Printf("Previous block %d hash: %x", index-1, oldBlock.BlockHash.GetBytes())
-			logger.GetLogger().Printf("Previous block %d previous hash: %x", index-1, oldBlock.GetHeader().PreviousHash.GetBytes())
+			// Hash dumps only on mismatch - four hex lines per verified block told
+			// us nothing when everything was fine.
 			if !bytes.Equal(block.GetHeader().PreviousHash.GetBytes(), oldBlock.BlockHash.GetBytes()) {
 				logger.GetLogger().Printf("ERROR: Block %d previous hash mismatch - Expected: %x, Got: %x",
 					index,
@@ -654,8 +680,9 @@ func OnMessage(addr [4]byte, m []byte) {
 				return
 			}
 
-			logger.GetLogger().Printf("Performing base block verification for block %d", index)
+			verifyStart := time.Now()
 			merkleTrie, err := blocks.CheckBaseBlock(block, oldBlock, false)
+			timing.verify += time.Since(verifyStart)
 			defer merkleTrie.Destroy()
 			if err != nil {
 				logger.GetLogger().Printf("ERROR: Base block verification failed for block %d: %v", index, err)
@@ -723,7 +750,6 @@ func OnMessage(addr [4]byte, m []byte) {
 				continue
 			}
 
-			logger.GetLogger().Printf("Processing final verification and fund transfer for block %d", index)
 			oldBlock := blocks.Block{}
 			if was == true {
 				oldBlock = blcks[i-1]
@@ -736,7 +762,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				was = true
 			}
 
+			blockStart := time.Now()
 			err := blocks.CheckBlockAndTransferFunds(&block, oldBlock, merkleTries[index], false)
+			fundsDur := time.Since(blockStart)
+			timing.funds += fundsDur
 			if err != nil {
 				logger.GetLogger().Printf("ERROR: Fund transfer failed for block %d: %v", index, err)
 				hashesMissing := blocks.IsAllTransactions(block)
@@ -757,8 +786,9 @@ func OnMessage(addr [4]byte, m []byte) {
 				return
 			}
 
-			logger.GetLogger().Printf("Storing block %d", index)
+			phase := time.Now()
 			err = block.StoreBlock()
+			timing.storeBlock += time.Since(phase)
 			if err != nil {
 				logger.GetLogger().Printf("ERROR: Failed to store block %d: %v", index, err)
 				services.ResetAccountsAndBlocksSyncLocked(oldBlock.GetHeader().Height)
@@ -766,7 +796,9 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 
 			logger.GetLogger().Println("Sync New Block success -------------------------------------", block.GetHeader().Height)
+			phase = time.Now()
 			err = account.StoreAccounts(block.GetHeader().Height)
+			timing.accounts += time.Since(phase)
 			if err != nil {
 				logger.GetLogger().Println(err)
 			}
@@ -775,19 +807,35 @@ func OnMessage(addr [4]byte, m []byte) {
 			// rewind with nothing to reload ("could not reload EVM state on
 			// reset") and a restart with only the genesis state. Mirror the live
 			// path: persist whenever this block changed contract state.
+			phase = time.Now()
 			if err := blocks.CommitEVMStateIfChanged(block.GetHeader().Height); err != nil {
 				logger.GetLogger().Println("cannot store EVM state", err)
 			}
+			timing.evm += time.Since(phase)
 
+			phase = time.Now()
 			err = account.StoreStakingAccounts(block.GetHeader().Height)
+			timing.staking += time.Since(phase)
 			if err != nil {
 				logger.GetLogger().Println(err)
 			}
 			common.SetHeight(block.GetHeader().Height)
+			timing.applied++
 
+			if slow := time.Since(blockStart); slow > slowBlockThreshold {
+				logger.GetLogger().Printf("slow sync block %d: %s total, %s of it in CheckBlockAndTransferFunds",
+					index, slow.Truncate(time.Millisecond), fundsDur.Truncate(time.Millisecond))
+			}
+
+			// Stats are informational; refreshing them once per batch (below)
+			// instead of per block keeps their DB write off the hot path.
+			timing.lastBlock, timing.lastParent = block, oldBlock
+		}
+
+		if timing.applied > 0 {
 			sm := statistics.GetStatsManager()
-			sm.UpdateStatistics(block, oldBlock)
-
+			sm.UpdateStatistics(timing.lastBlock, timing.lastParent)
+			logger.GetLogger().Println("sync batch timing:", timing.summary())
 		}
 
 		// Pipeline: a batch is otherwise requested only when the peer's next

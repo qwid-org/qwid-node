@@ -134,7 +134,6 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	blockTime := newBlock.GetBlockTimeStamp()
 	currTime := common.GetCurrentTimeStampInSecond()
 	shouldCheck := !((currTime - blockTime) > int64(common.BlockTimeInterval)*common.VotingHeightDistance)
-	logger.GetLogger().Println("should check pausing:", shouldCheck)
 	if forceShouldCheck == false {
 		shouldCheck = false
 	}
