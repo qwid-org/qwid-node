@@ -41,6 +41,35 @@ func endDial(topic [2]byte, ip [4]byte) {
 	dialingMutex.Unlock()
 }
 
+// quietConnTimeout is how long an outbound connection may deliver nothing
+// before it is declared dead and torn down. A peer lost to a NAT-mapping drop
+// or a silent reboot produces no EOF and no read error - just an endless run of
+// 30s read timeouts - so without this guard the receive loop spins forever,
+// the dialing dedup blocks every reconnection attempt ("connection already
+// active or pending"), and requests sent to the stale connection vanish. In a
+// syncing node that shows up as transactions that never arrive and a sync
+// wedged on the same height until restart. Every live topic carries traffic
+// far more often than this (sync 'hi' each second, nonces each block).
+const quietConnTimeout = 3 * time.Minute
+
+// closeAndRemovePeerTopic closes and unregisters whatever connection is stored
+// for (topic, ip) - outbound or accepted. Used on quiet-death, where the whole
+// peer went silent: keeping a possibly-equally-dead accepted stream as the send
+// path would make the fresh dial reuse it and keep sending into the void.
+func closeAndRemovePeerTopic(topic [2]byte, ip [4]byte) [][]byte {
+	PeersMutex.Lock()
+	defer PeersMutex.Unlock()
+	deletedIP := [][]byte{}
+	if conn, ok := tcpConnections[topic][ip]; ok {
+		deletedIP = CloseAndRemoveConnection(conn)
+	}
+	if accepted, ok := acceptedConnections[topic][ip]; ok {
+		accepted.Close()
+		delete(acceptedConnections[topic], ip)
+	}
+	return deletedIP
+}
+
 func StartNewListener(topic [2]byte) {
 
 	conn, err := Listen([4]byte{0, 0, 0, 0}, Ports[topic])
@@ -197,6 +226,10 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		logger.GetLogger().Printf("Failed to establish connection to %s after %d attempts: %v", ipport, maxRetries, err)
 		return
 	}
+	// Keepalive on the outbound stream too (the accepted path already sets it),
+	// so the kernel notices a vanished peer instead of buffering writes forever.
+	tcpConn.SetKeepAlive(true)
+	tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	logger.GetLogger().Printf("Connection successful to %s topic %c%c", ipport, topic[0], topic[1])
 
 	// NP-C3: run the peer-auth handshake on the freshly dialed connection BEFORE
@@ -309,6 +342,13 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 
 	rTopic := map[[2]byte][]byte{}
 
+	// lastData tracks the last moment ANY bytes arrived on this connection, so a
+	// silently dead peer (NAT drop, hard reboot - no EOF, no error, only read
+	// timeouts) is detected instead of spinning here forever while the dialing
+	// dedup blocks every reconnection. Self/loopback connections are exempt: they
+	// cannot die to a NAT and may be legitimately quiet.
+	lastData := time.Now()
+
 	for {
 		select {
 		case <-Quit:
@@ -319,8 +359,35 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		default:
 			r := Receive(topic, conn)
 			if r == nil {
+				if !isSelfIP(ip) && time.Since(lastData) > quietConnTimeout {
+					logger.GetLogger().Printf("no data from %v on topic %c%c for %s - dropping dead connection and reconnecting",
+						ip, topic[0], topic[1], time.Since(lastData).Truncate(time.Second))
+					if conn != nil {
+						conn.Close()
+					}
+					deletedIP := closeAndRemovePeerTopic(topic, ip)
+					receiveChan <- []byte("EXIT")
+					for _, d := range deletedIP {
+						select {
+						case ChanPeer <- d:
+						default:
+							logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+						}
+					}
+					// Ask discovery to re-establish this exact (topic, ip) even if
+					// the map held nothing to delete.
+					if len(deletedIP) == 0 {
+						select {
+						case ChanPeer <- append(topic[:], ip[:]...):
+						default:
+							logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+						}
+					}
+					return
+				}
 				continue
 			}
+			lastData = time.Now()
 			if bytes.Equal(r, []byte("<-ERR->")) {
 				if reconnectionTries > common.ConnectionMaxTries {
 					logger.GetLogger().Println("error in read. Closing connection", ip, string(r))
@@ -333,6 +400,8 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						receiveChan <- []byte("EXIT")
 						return
 					}
+					tcpConn.SetKeepAlive(true)
+					tcpConn.SetKeepAlivePeriod(30 * time.Second)
 					// NP-C3: the re-dial produced a brand-new TCP stream, so it
 					// must be re-authenticated with a fresh handshake before the
 					// receive loop resumes reading from it — otherwise an
@@ -378,6 +447,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						}
 					}
 					reconnectionTries = 0
+					lastData = time.Now() // fresh stream - restart the quiet clock
 					continue
 				}
 				reconnectionTries++
