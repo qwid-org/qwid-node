@@ -85,6 +85,7 @@ func StoreStakingAccounts(height int64) error {
 			logger.GetLogger().Println("cannot store accounts", err)
 		}
 	}
+	raiseLastStoredHeightMeta(common.StakingAccountsDBPrefix, height)
 	return nil
 }
 
@@ -163,6 +164,11 @@ func StakingAccountsStoredAtHeight(height int64) bool {
 }
 
 func LastHeightStoredInStakingAccounts() (int64, error) {
+	// Meta key first - snapshot heights have gaps since they are stored once
+	// per sync batch. The contiguity search is the pre-meta-database fallback.
+	if h, ok := lastStoredHeightMeta(common.StakingAccountsDBPrefix); ok {
+		return h, nil
+	}
 	return database.LastContiguousHeight(database.MainDB, func(h int64) []byte {
 		prefix := append(common.StakingAccountsDBPrefix[:], common.GetByteInt64(h)...)
 		return append(prefix, byte(1))

@@ -31,6 +31,50 @@ type StakingDetail struct {
 	LastUpdated int64 `json:"last_updated"`
 }
 
+// pruneStakingDetails folds detail entries older than
+// common.StakingDetailsRetentionBlocks below height into a single aggregate
+// entry at key 0. Rewards append an entry EVERY block, so without this the
+// map grows one entry per block forever and the staking snapshot marshals
+// O(chain history). Details are informational (wallet display) - consensus
+// reads only StakedBalance/StakingRewards/locks - so folding them changes no
+// validation, and the totals a wallet shows stay exact because amounts and
+// rewards are summed, never dropped. Callers hold StakingRWMutex.
+func pruneStakingDetails(acc *StakingAccount, height int64) {
+	cutoff := height - common.StakingDetailsRetentionBlocks
+	if cutoff <= 0 || acc.StakingDetails == nil {
+		return
+	}
+	agg := StakingDetail{}
+	if existing, ok := acc.StakingDetails[0]; ok && len(existing) > 0 {
+		// Previous aggregate (or genesis-height details) - keep folding into it.
+		for _, d := range existing {
+			agg.Amount += d.Amount
+			agg.Reward += d.Reward
+			if d.LastUpdated > agg.LastUpdated {
+				agg.LastUpdated = d.LastUpdated
+			}
+		}
+	}
+	folded := false
+	for h, details := range acc.StakingDetails {
+		if h == 0 || h >= cutoff {
+			continue
+		}
+		for _, d := range details {
+			agg.Amount += d.Amount
+			agg.Reward += d.Reward
+			if d.LastUpdated > agg.LastUpdated {
+				agg.LastUpdated = d.LastUpdated
+			}
+		}
+		delete(acc.StakingDetails, h)
+		folded = true
+	}
+	if folded {
+		acc.StakingDetails[0] = []StakingDetail{agg}
+	}
+}
+
 func GetLockedAmount(accb []byte, height int64, delegatedAccount int) (int64, error) {
 	if len(accb) != common.AddressLength {
 		return 0, fmt.Errorf("wrong address length, must be %v", common.AddressLength)
@@ -114,6 +158,7 @@ func Stake(accb []byte, amount int64, height int64, stakingTime int64, delegated
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 	da := common.GetDelegatedAccountAddress(int16(delegatedAccount))
 	copy(acc.DelegatedAccount[:], da.GetBytes())
 	copy(acc.Address[:], accb[:])
@@ -199,6 +244,7 @@ func Unstake(accb []byte, amount int64, height int64, stakingTime int64, delegat
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
 	StakingAccounts[delegatedAccount].StakeChangedAt = stakingTime
@@ -234,6 +280,7 @@ func Reward(accb []byte, reward int64, height int64, delegatedAccount int) error
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
 	return nil
 }
@@ -270,6 +317,7 @@ func WithdrawReward(accb []byte, amount int64, height int64, delegatedAccount in
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
 	return nil

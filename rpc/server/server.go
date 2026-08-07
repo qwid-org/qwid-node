@@ -482,13 +482,12 @@ func handleACCT(line []byte, reply *[]byte) {
 	account.AccountsRWMutex.RLock()
 	acc := account.Accounts.AllAccounts[byt] // value copy
 	account.AccountsRWMutex.RUnlock()
-	// Limit to last 50 transaction hashes
-	if len(acc.TransactionsSender) > 50 {
-		acc.TransactionsSender = acc.TransactionsSender[len(acc.TransactionsSender)-50:]
-	}
-	if len(acc.TransactionsRecipient) > 50 {
-		acc.TransactionsRecipient = acc.TransactionsRecipient[len(acc.TransactionsRecipient)-50:]
-	}
+	// The state no longer carries the history lists - fill the transport
+	// slices with the last 50 hashes from the DB index. SentCount and
+	// ReceivedCount travel alongside, so clients see the true totals even
+	// though the lists are capped.
+	acc.TransactionsSender = account.GetTxHistorySent(byt, 50)
+	acc.TransactionsRecipient = account.GetTxHistoryReceived(byt, 50)
 	am := acc.Marshal()
 
 	*reply = am

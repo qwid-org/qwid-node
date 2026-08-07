@@ -151,6 +151,7 @@ func TestGetBalance(t *testing.T) {
 func TestAddTransactionsSender(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
+	withHistoryTempDB(t)
 
 	// Initialize
 	AccountsRWMutex.Lock()
@@ -163,8 +164,7 @@ func TestAddTransactionsSender(t *testing.T) {
 
 		AccountsRWMutex.Lock()
 		Accounts.AllAccounts[addr] = Account{
-			Address:            addr,
-			TransactionsSender: []common.Hash{},
+			Address: addr,
 		}
 		AccountsRWMutex.Unlock()
 
@@ -174,7 +174,10 @@ func TestAddTransactionsSender(t *testing.T) {
 		acc := Accounts.AllAccounts[addr]
 		AccountsRWMutex.RUnlock()
 
-		assert.Equal(t, 1, len(acc.TransactionsSender))
+		// The state carries only the counter; the hash lives in the DB index.
+		assert.Equal(t, int64(1), acc.SentCount)
+		assert.Equal(t, 0, len(acc.TransactionsSender))
+		assert.Equal(t, []common.Hash{hash}, GetTxHistorySent(addr, 0))
 	})
 
 	t.Run("add multiple transactions", func(t *testing.T) {
@@ -182,8 +185,7 @@ func TestAddTransactionsSender(t *testing.T) {
 
 		AccountsRWMutex.Lock()
 		Accounts.AllAccounts[addr] = Account{
-			Address:            addr,
-			TransactionsSender: []common.Hash{},
+			Address: addr,
 		}
 		AccountsRWMutex.Unlock()
 
@@ -195,13 +197,16 @@ func TestAddTransactionsSender(t *testing.T) {
 		acc := Accounts.AllAccounts[addr]
 		AccountsRWMutex.RUnlock()
 
-		assert.Equal(t, 5, len(acc.TransactionsSender))
+		assert.Equal(t, int64(5), acc.SentCount)
+		assert.Equal(t, 5, len(GetTxHistorySent(addr, 0)))
+		assert.Equal(t, 2, len(GetTxHistorySent(addr, 2)), "tail query returns the requested count")
 	})
 }
 
 func TestAddTransactionsRecipient(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
+	withHistoryTempDB(t)
 
 	// Initialize
 	AccountsRWMutex.Lock()
@@ -214,8 +219,7 @@ func TestAddTransactionsRecipient(t *testing.T) {
 
 		AccountsRWMutex.Lock()
 		Accounts.AllAccounts[addr] = Account{
-			Address:               addr,
-			TransactionsRecipient: []common.Hash{},
+			Address: addr,
 		}
 		AccountsRWMutex.Unlock()
 
@@ -225,7 +229,9 @@ func TestAddTransactionsRecipient(t *testing.T) {
 		acc := Accounts.AllAccounts[addr]
 		AccountsRWMutex.RUnlock()
 
-		assert.Equal(t, 1, len(acc.TransactionsRecipient))
+		assert.Equal(t, int64(1), acc.ReceivedCount)
+		assert.Equal(t, 0, len(acc.TransactionsRecipient))
+		assert.Equal(t, []common.Hash{hash}, GetTxHistoryReceived(addr, 0))
 	})
 }
 

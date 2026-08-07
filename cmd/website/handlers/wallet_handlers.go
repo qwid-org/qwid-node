@@ -129,8 +129,8 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 		TotalHoldings:  conf + stake + rewards,
 		StakingDetails: stakingDetails,
 		EscrowDelay:    acc.TransactionDelay,
-		SentCount:      len(acc.TransactionsSender),
-		ReceivedCount:  len(acc.TransactionsRecipient),
+		SentCount:      int(acc.SentCount),
+		ReceivedCount:  int(acc.ReceivedCount),
 	}
 	JsonResponse(w, resp)
 }

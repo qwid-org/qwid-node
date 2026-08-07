@@ -11,13 +11,29 @@ import (
 )
 
 type Account struct {
-	Balance               int64                        `json:"balance"`
-	Address               [common.AddressLength]byte   `json:"address"`
-	TransactionDelay      int64                        `json:"transactionDelay"`
-	MultiSignNumber       uint8                        `json:"multiSignNumber"`
-	MultiSignAddresses    [][common.AddressLength]byte `json:"multiSignAddresses,omitempty"`
-	TransactionsSender    []common.Hash                `json:"transactionsSender,omitempty"`
-	TransactionsRecipient []common.Hash                `json:"transactionsRecipient,omitempty"`
+	Balance            int64                        `json:"balance"`
+	Address            [common.AddressLength]byte   `json:"address"`
+	TransactionDelay   int64                        `json:"transactionDelay"`
+	MultiSignNumber    uint8                        `json:"multiSignNumber"`
+	MultiSignAddresses [][common.AddressLength]byte `json:"multiSignAddresses,omitempty"`
+	// TransactionsSender/TransactionsRecipient no longer live in the account
+	// state. They grew by one hash per transaction forever, which made every
+	// state snapshot marshal O(chain history) - at height ~100k that was ~2s
+	// of pure serialization per snapshot. The full history now lives in a
+	// DB-side index (txHistory.go) keyed by (address, sequence); the state
+	// keeps only the two sequence counters below. The slices remain as a
+	// transport container: the RPC layer fills them from the index for
+	// wallet/explorer responses, and Unmarshal fills them when reading a
+	// pre-index snapshot (LoadAccounts then migrates them into the index).
+	TransactionsSender    []common.Hash `json:"transactionsSender,omitempty"`
+	TransactionsRecipient []common.Hash `json:"transactionsRecipient,omitempty"`
+	// SentCount/ReceivedCount are the lengths of this account's history in the
+	// index. They are part of the state snapshot ON PURPOSE: a rewind restores
+	// the counters, and subsequent re-applied transactions overwrite the index
+	// entries above them - which rolls the visible history back without ever
+	// scanning the index.
+	SentCount     int64 `json:"sentCount,omitempty"`
+	ReceivedCount int64 `json:"receivedCount,omitempty"`
 }
 
 func GetAccountByAddressBytes(address []byte) (Account, bool) {
@@ -134,6 +150,11 @@ func (a Account) Marshal() []byte {
 	for _, txHash := range a.TransactionsRecipient {
 		b = append(b, txHash.GetBytes()...)
 	}
+	// Appended for backward-compatible decoding: pre-index snapshots end after
+	// the recipient list, and Unmarshal then derives the counters from the
+	// list lengths instead.
+	b = append(b, common.GetByteInt64(a.SentCount)...)
+	b = append(b, common.GetByteInt64(a.ReceivedCount)...)
 	return b
 }
 
@@ -190,6 +211,16 @@ func (a *Account) Unmarshal(data []byte) error {
 			a.TransactionsRecipient[i] = th
 			data = data[32:]
 		}
+	}
+	// History counters. A pre-index snapshot ends right after the lists; its
+	// full history IS the lists, so the counters equal their lengths and
+	// LoadAccounts migrates the hashes into the DB index afterwards.
+	if len(data) >= 16 {
+		a.SentCount = common.GetInt64FromByte(data[:8])
+		a.ReceivedCount = common.GetInt64FromByte(data[8:16])
+	} else {
+		a.SentCount = int64(len(a.TransactionsSender))
+		a.ReceivedCount = int64(len(a.TransactionsRecipient))
 	}
 	return nil
 }
