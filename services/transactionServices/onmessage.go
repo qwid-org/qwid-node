@@ -123,6 +123,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		rawTxn := msg.GetTransactionsBytes()
 
 		storedCount := 0
+		skippedExisting := 0
 		for _, v := range rawTxn {
 			for _, tb := range v {
 				tx := transactionsDefinition.Transaction{}
@@ -132,9 +133,11 @@ func OnMessage(addr [4]byte, m []byte) {
 					continue
 				}
 				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
+					skippedExisting++
 					continue
 				}
 				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
+					skippedExisting++
 					continue
 				}
 				// NP-C6: verify the signature whenever the sender's public key is
@@ -161,11 +164,12 @@ func OnMessage(addr [4]byte, m []byte) {
 				if err != nil {
 					logger.GetLogger().Printf("bx: FAILED to store transaction %x: %v", t.Hash.GetBytes()[:8], err)
 				} else {
+					logger.GetLogger().Printf("bx: stored tx %x", t.Hash.GetBytes()[:8])
 					storedCount++
 				}
 			}
 		}
-		logger.GetLogger().Printf("bx: stored %d transactions", storedCount)
+		logger.GetLogger().Printf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
 	case "st":
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {

@@ -570,7 +570,8 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 			hashesMissing := blocks.IsAllTransactions(block)
 			if len(hashesMissing) > 0 {
-				logger.GetLogger().Printf("Block %d is missing %d transactions", index, len(hashesMissing))
+				logger.GetLogger().Printf("Block %d is missing %d transaction(s), first: %x",
+					index, len(hashesMissing), hashesMissing[0][:8])
 				hashesMissingAll = append(hashesMissingAll, hashesMissing...)
 				continue
 			}
@@ -581,20 +582,10 @@ func OnMessage(addr [4]byte, m []byte) {
 
 		// Ask for everything this batch needs in one round trip, so the next batch
 		// can be verified and applied whole instead of crawling forward one block
-		// per message.
+		// per message. Requests are throttled per hash and escalate to other
+		// peers when the batch sender keeps not answering (missingtx.go).
 		if len(hashesMissingAll) > 0 {
-			logger.GetLogger().Printf("Sync incomplete - requesting %d missing transactions from peer in chunks", len(hashesMissingAll))
-			maxChunk := common.MaxNumberTransactionInChunk
-			for i := 0; i < len(hashesMissingAll); i += maxChunk {
-				end := i + maxChunk
-				if end > len(hashesMissingAll) {
-					end = len(hashesMissingAll)
-				}
-				chunk := hashesMissingAll[i:end]
-				logger.GetLogger().Printf("Sending bt chunk %d-%d of %d to %v", i, end, len(hashesMissingAll), addr)
-				transactionServices.SendGT(addr, chunk, "bt")
-				time.Sleep(500 * time.Millisecond)
-			}
+			requestMissingTxs(addr, hashesMissingAll, h)
 			if completeUpTo <= h {
 				logger.GetLogger().Println("Waiting for missing transactions before continuing sync")
 				return
@@ -602,6 +593,11 @@ func OnMessage(addr [4]byte, m []byte) {
 			// Do not stand still while the peer answers: the blocks we do hold form
 			// a contiguous run from our tip, so they can be applied right away.
 			logger.GetLogger().Printf("Requested missing transactions - applying the complete run up to %d meanwhile", completeUpTo)
+		} else {
+			// Nothing missing in this batch - whatever we were chasing arrived.
+			// Clearing the bookkeeping makes a future re-miss of the same hash
+			// start a fresh escalation cycle instead of inheriting a stale count.
+			clearMissingTx()
 		}
 
 		for i := 0; i < len(blcks); i++ {
@@ -817,16 +813,9 @@ func OnMessage(addr [4]byte, m []byte) {
 				logger.GetLogger().Printf("ERROR: Fund transfer failed for block %d: %v", index, err)
 				hashesMissing := blocks.IsAllTransactions(block)
 				if len(hashesMissing) > 0 {
-					logger.GetLogger().Printf("Detected %d missing transactions during fund transfer", len(hashesMissing))
-					maxChunk := common.MaxNumberTransactionInChunk
-					for j := 0; j < len(hashesMissing); j += maxChunk {
-						end := j + maxChunk
-						if end > len(hashesMissing) {
-							end = len(hashesMissing)
-						}
-						transactionServices.SendGT(addr, hashesMissing[j:end], "bt")
-						time.Sleep(500 * time.Millisecond)
-					}
+					logger.GetLogger().Printf("Detected %d missing transaction(s) during fund transfer, first: %x",
+						len(hashesMissing), hashesMissing[0][:8])
+					requestMissingTxs(addr, hashesMissing, h)
 				}
 				// Locked variant: common.BlockMutex is held for this whole apply loop.
 				services.ResetAccountsAndBlocksSyncLocked(oldBlock.GetHeader().Height)
