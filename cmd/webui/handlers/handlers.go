@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/blocks"
@@ -44,6 +45,12 @@ type StatsResponse struct {
 	RandOracle          int64   `json:"randOracle"`
 	NodeIP              string  `json:"nodeIP"`
 	DelegatedAccount    int     `json:"delegatedAccount"`
+	// Sync progress: how many blocks remain to the network height, the import
+	// rate over the last two minutes, and the estimated seconds until synced
+	// (-1 when no honest estimate exists - fresh window, stall or rewind).
+	SyncRemaining    int64   `json:"syncRemaining"`
+	SyncBlocksPerSec float64 `json:"syncBlocksPerSec"`
+	SyncEtaSeconds   int64   `json:"syncEtaSeconds"`
 }
 
 type AccountResponse struct {
@@ -101,6 +108,12 @@ func GetStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	remaining := st.HeightMax - st.Height
+	if remaining < 0 {
+		remaining = 0
+	}
+	rate, eta := syncEta.observe(time.Now(), st.Height, remaining)
+
 	resp := StatsResponse{
 		Height:              st.Height,
 		HeightMax:           st.HeightMax,
@@ -114,6 +127,9 @@ func GetStats(w http.ResponseWriter, r *http.Request) {
 		RandOracle:          st.RandOracle,
 		NodeIP:              NodeIP,
 		DelegatedAccount:    DelegatedAccount,
+		SyncRemaining:       remaining,
+		SyncBlocksPerSec:    rate,
+		SyncEtaSeconds:      eta,
 	}
 	jsonResponse(w, resp)
 }

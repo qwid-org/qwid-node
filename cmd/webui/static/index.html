@@ -1069,6 +1069,14 @@ contract Coin {
             }
         }
 
+        // Format a seconds count as a compact ETA, e.g. "2h 15m", "4m 36s", "45s".
+        function formatEta(s) {
+            if (s < 60) return s + 's';
+            if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+            if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+            return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+        }
+
         // Update stats
         async function updateStats() {
             try {
@@ -1090,7 +1098,14 @@ contract Coin {
                     if (res.syncing) {
                         syncIndicator.classList.remove('synced');
                         accountSyncIndicator.classList.remove('synced');
-                        syncStatusText.textContent = 'Syncing...';
+                        let txt = 'Syncing... ' + res.syncRemaining.toLocaleString() + ' blocks left';
+                        if (res.syncBlocksPerSec > 0) {
+                            txt += ' @ ' + res.syncBlocksPerSec.toFixed(1) + ' blk/s';
+                        }
+                        txt += (res.syncEtaSeconds >= 0)
+                            ? ', ETA ' + formatEta(res.syncEtaSeconds)
+                            : ', ETA: estimating…';
+                        syncStatusText.textContent = txt;
                     } else {
                         syncIndicator.classList.add('synced');
                         accountSyncIndicator.classList.add('synced');
