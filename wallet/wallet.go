@@ -17,8 +17,6 @@ import (
 	"io"
 	"sync"
 
-	"github.com/wonabru/bip39"
-
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/crypto/oqs"
 	"golang.org/x/crypto/argon2"
@@ -54,16 +52,24 @@ type Wallet struct {
 	// decryption re-derive keys from it.
 	password      []byte
 	passwordBytes []byte
-	Iv            []byte             `json:"iv"`
-	KdfSalt       []byte             `json:"kdf_salt"`
-	HomePath      string             `json:"home_path"`
-	WalletNumber  uint8              `json:"wallet_number"`
-	MainAddress   common.Address     `json:"main_address"`
-	SigName       string             `json:"sig_name"`
-	SigName2      string             `json:"sig_name_2"`
-	Account1      Account            `json:"account_1"`
-	Account2      Account            `json:"account_2"`
-	Accounts      map[string]Account `json:"accounts"`
+	// seed is the 64-byte BIP39 seed derived from the recovery phrase. Present
+	// only while the wallet is unlocked; Wipe() zeroes it.
+	seed []byte
+	// EncryptedMnemonic holds the recovery phrase under the same AES-256-GCM /
+	// Argon2id key as the secret keys. The phrase is stored rather than the seed
+	// because PBKDF2 is one-way: from a seed the words cannot be shown again.
+	// omitempty keeps pre-existing wallet files byte-identical.
+	EncryptedMnemonic []byte             `json:"encrypted_mnemonic,omitempty"`
+	Iv                []byte             `json:"iv"`
+	KdfSalt           []byte             `json:"kdf_salt"`
+	HomePath          string             `json:"home_path"`
+	WalletNumber      uint8              `json:"wallet_number"`
+	MainAddress       common.Address     `json:"main_address"`
+	SigName           string             `json:"sig_name"`
+	SigName2          string             `json:"sig_name_2"`
+	Account1          Account            `json:"account_1"`
+	Account2          Account            `json:"account_2"`
+	Accounts          map[string]Account `json:"accounts"`
 }
 
 var activeWallet *Wallet
@@ -127,6 +133,10 @@ func (w *Wallet) Wipe() {
 	for i := range w.passwordBytes {
 		w.passwordBytes[i] = 0
 	}
+	for i := range w.seed {
+		w.seed[i] = 0
+	}
+	w.seed = nil
 	w.password = nil
 	w.passwordBytes = nil
 	// CW-H2: cleanse the live post-quantum secret keys. signer.Clean() runs
@@ -253,6 +263,110 @@ func EmptyAccount() Account {
 	}
 }
 
+// SetMnemonic validates a recovery phrase, derives the wallet seed from it and
+// keeps the phrase encrypted so it can be shown again later. Requires the wallet
+// password to be set first, since the phrase is encrypted with the key derived
+// from it.
+func (w *Wallet) SetMnemonic(mnemonic []byte) error {
+	if len(w.passwordBytes) == 0 {
+		return fmt.Errorf("set the wallet password before the recovery phrase")
+	}
+	seed, err := SeedFromMnemonic(mnemonic)
+	if err != nil {
+		return err
+	}
+	enc, err := w.encrypt(mnemonic)
+	if err != nil {
+		return err
+	}
+	// Zero any previously derived seed before replacing it, so a phrase change
+	// (or a second SetMnemonic call) never leaves the old seed lingering in memory.
+	ZeroBytes(w.seed)
+	w.seed = seed
+	w.EncryptedMnemonic = enc
+	return nil
+}
+
+// HasSeed reports whether this wallet can derive keys from a recovery phrase.
+// Wallets created before this feature return false and keep their previous,
+// random key generation. This only checks presence, not integrity: a struct
+// copy taken concurrently with Wipe() can observe a zeroed backing array with
+// a non-zero length (slices share their backing array across a value copy).
+// GenerateNewAccountFromSeed guards against that case before deriving
+// anything from the seed.
+func (w *Wallet) HasSeed() bool {
+	return len(w.seed) > 0
+}
+
+// bip39SeedLength is the exact size of the seed SeedFromMnemonic produces
+// (standard BIP39: PBKDF2-HMAC-SHA512, 64-byte output).
+const bip39SeedLength = 64
+
+// isAllZero reports whether every byte of b is zero. Used to detect a seed
+// that has been wiped out from under a stale struct copy (see HasSeed).
+func isAllZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// GenerateNewAccountFromSeed creates the account that this wallet's recovery
+// phrase determines for one signature scheme and role. Without a seed it falls
+// back to GenerateNewAccount, so pre-existing wallets are unaffected.
+func GenerateNewAccountFromSeed(w Wallet, sigName string, primary bool) (Account, error) {
+	if !w.HasSeed() {
+		return GenerateNewAccount(w, sigName)
+	}
+	if len(w.password) < 1 {
+		return Account{}, fmt.Errorf("password cannot be empty")
+	}
+	// A struct copy of Wallet taken just before the original's Wipe() runs
+	// shares the same seed backing array; Wipe() zeroing it in place would
+	// otherwise leave this copy reporting HasSeed()==true over an all-zero
+	// seed, silently deriving keys from no entropy at all.
+	if len(w.seed) != bip39SeedLength || isAllZero(w.seed) {
+		return Account{}, fmt.Errorf("wallet seed is invalid (wrong length or zeroed out); reload the wallet or restore it from its recovery phrase")
+	}
+
+	var signer oqs.Signature
+	if err := signer.Init(sigName, nil); err != nil {
+		return Account{}, err
+	}
+
+	keySeed := DeriveKeySeed(w.seed, sigName, primary)
+	defer ZeroBytes(keySeed)
+
+	pubKey, drawn, err := signer.GenerateKeyPairFromSeed(keySeed)
+	if err != nil {
+		return Account{}, err
+	}
+	logger.GetLogger().Printf("derived %s key from the recovery phrase (%d RNG bytes consumed)", sigName, drawn)
+
+	acc := EmptyAccount()
+	if err := acc.PublicKey.Init(pubKey, w.MainAddress); err != nil {
+		return Account{}, err
+	}
+	acc.Address = acc.PublicKey.GetAddress()
+
+	if err := acc.secretKey.Init(signer.ExportSecretKey(), acc.Address, false); err != nil {
+		return Account{}, err
+	}
+	acc.signer = signer
+
+	se, err := w.encrypt(acc.secretKey.GetBytes())
+	if err != nil {
+		logger.GetLogger().Println(err)
+		return Account{}, err
+	}
+	acc.EncryptedSecretKey = make([]byte, len(se))
+	copy(acc.EncryptedSecretKey, se)
+
+	return acc, nil
+}
+
 func GenerateNewAccount(w Wallet, sigName string) (Account, error) {
 	if len(w.password) < 1 {
 		return Account{}, fmt.Errorf("password cannot be empty")
@@ -307,9 +421,31 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 	if err != nil {
 		return err
 	}
-	pubKey, err := signer.GenerateKeyPair()
-	if err != nil {
-		return err
+	var pubKey []byte
+	if w.HasSeed() {
+		keySeed := DeriveKeySeed(w.seed, sigName, primary)
+		defer ZeroBytes(keySeed)
+		var drawn int
+		pubKey, drawn, err = signer.GenerateKeyPairFromSeed(keySeed)
+		if err != nil {
+			return err
+		}
+		logger.GetLogger().Printf("derived the %s key for the new scheme from the recovery phrase (%d RNG bytes)", sigName, drawn)
+	} else {
+		// Refuse, exactly as the load path does (loadWalletFromStruct's
+		// scheme-change branches). Generating a random key here would mint a
+		// brand-new, unstaked identity and — because the caller archives it with
+		// StoreJSON — persist it, so the load path's refusal would never get the
+		// chance to fire on the next restart: it would find the archived entry,
+		// take it, and repoint MainAddress at it. The staked identity would be
+		// replaced anyway, silently, which is precisely what the refusal exists
+		// to prevent. Failing loudly here leaves the node following the chain
+		// with no key for the new scheme until the operator intervenes.
+		return fmt.Errorf("the network switched signature scheme to %q, but this wallet has no recovery phrase to derive a %q key from; "+
+			"generating a random key would silently replace this wallet's staked identity with a new, unstaked one. "+
+			"Restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup that already contains a %q key. "+
+			"Until then this node cannot produce with %q",
+			sigName, sigName, sigName, sigName)
 	}
 	mainAddress, err := common.PubKeyToAddress(pubKey, primary)
 	if err != nil {
@@ -428,79 +564,127 @@ func (w *Wallet) decryptLegacyCTR(v []byte) ([]byte, error) {
 	return plaintext[len(common.ValidationTag):], nil
 }
 
+// GetMnemonicWords returns the recovery phrase this wallet was created from.
+//
+// Note the direction: the phrase is the input the keys were derived from, not an
+// encoding of a key. Encoding a post-quantum secret key as a phrase is
+// impossible (Falcon-512 is ~1281 bytes against BIP39's 64), which is why
+// wallets created before this feature have no phrase and never can (CW-M2).
 func (w *Wallet) GetMnemonicWords(primary bool) (string, error) {
-	var secret []byte
-	var secretLength int
-	if primary {
-		secret = w.GetSecretKey().GetBytes()
-		secretLength = w.GetSecretKey().GetLength()
-	} else {
-		secret = w.GetSecretKey2().GetBytes()
-		secretLength = w.GetSecretKey2().GetLength()
+	if len(w.passwordBytes) == 0 {
+		return "", fmt.Errorf("set the wallet password before the recovery phrase")
 	}
-	if secret == nil {
-		return "", fmt.Errorf("you need load wallet first")
+	if len(w.EncryptedMnemonic) == 0 {
+		return "", fmt.Errorf("this wallet was created without a recovery phrase; " +
+			"use the encrypted wallet-file backup instead")
 	}
-
-	if secretLength > 64 {
-		// CW-M2: BIP39-style mnemonics cannot represent a post-quantum secret key
-		// (e.g. Falcon-512 is ~1281 bytes) — the 64-byte ceiling is intentional.
-		// Give a clear, actionable error instead of the misleading "< 64 bytes" one.
-		return "", fmt.Errorf("mnemonic backup is unavailable for keys larger than 64 bytes (post-quantum secret keys); use the encrypted wallet-file backup instead")
+	mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+	if err != nil {
+		return "", fmt.Errorf("cannot decrypt the recovery phrase: %w", err)
 	}
-	if secretLength < 64 {
-		logger.GetLogger().Println("not all mnemonic words are important. secret is less than 64 bytes")
-		secretTmp := make([]byte, 64)
-		copy(secretTmp, secret)
-		secret = secretTmp[:]
-	}
-	mnemonic, _ := bip39.NewMnemonic(secret)
-
-	secretKey, _ := bip39.MnemonicToByteArray(mnemonic)
-	if !bytes.Equal(secretKey[:secretLength], secret[:secretLength]) {
-		logger.GetLogger().Println("Can not restore secret key from mnemonic")
-		return "", fmt.Errorf("can not restore secret key from mnemonic")
-	}
-	return mnemonic, nil
+	// string(mnemonic) copies, so the decrypted plaintext can be zeroed right
+	// after — same pattern as every other decrypt site in this file (wallet.go
+	// loadKeys / ChangePassword / ChangePasswordInPlace).
+	words := string(mnemonic)
+	ZeroBytes(mnemonic)
+	// The phrase covers every scheme and both roles, so `primary` does not select
+	// between two phrases — it is kept only so existing callers still compile.
+	_ = primary
+	return words, nil
 }
 
+// RestoreSecretKeyFromMnemonic rebuilds the wallet's keys — both roles, every
+// scheme — from a recovery phrase. One phrase covers the whole wallet, so a
+// partial restore (only Account1 or only Account2) would leave the stored
+// phrase claiming to back up a wallet it cannot actually reconstruct: the
+// phrase GetMnemonicWords hands back afterwards must reconstruct BOTH
+// accounts, not just the one the caller happened to ask for. `primary` is
+// accepted but ignored, for the same reason GetMnemonicWords ignores it —
+// existing callers keep compiling; Task 7 updates them to drop the parameter.
+// This also makes repeated calls idempotent regardless of the primary value
+// passed, which matters because cmd/gui/qtwidgets/wallet.go calls this twice
+// in a row (once with primary=true, once with primary=false) to restore one
+// wallet.
+//
+// The whole operation is atomic, including against a derivation failure, not
+// just a bad phrase: the phrase is validated and encrypted, and both accounts
+// are derived, on a scratch copy of the wallet before anything on w is
+// touched. w.seed, w.EncryptedMnemonic, w.Account1, w.Account2 and
+// w.MainAddress are only written once every step above has succeeded — so a
+// bad phrase, or a derivation failure partway through (for example the
+// network having voted in a signature scheme this build of liboqs does not
+// support — loadKeys already has to handle exactly that case, see its "has
+// neither a stored key ... nor a recovery phrase" error path), leaves w
+// exactly as it was. The stored phrase and the keys it backs can never
+// disagree.
 func (w *Wallet) RestoreSecretKeyFromMnemonic(mnemonic string, primary bool) error {
-	secretKey, err := bip39.MnemonicToByteArray(mnemonic)
+	_ = primary
+	if len(w.passwordBytes) == 0 {
+		return fmt.Errorf("set the wallet password before the recovery phrase")
+	}
+	seed, err := SeedFromMnemonic([]byte(mnemonic))
 	if err != nil {
-		logger.GetLogger().Println("Can not restore secret key")
 		return err
 	}
-	var signer oqs.Signature
-	if primary {
-		//if len(secretKey) < common.PrivateKeyLength() {
-		//	return fmt.Errorf("not enough bytes for primary encryption private key")
-		//}
-		err = w.Account1.secretKey.Init(secretKey[:], w.Account1.Address, true)
-		if err != nil {
-			return err
-		}
-
-		err = signer.Init(common.SigName(), w.Account1.secretKey.GetBytes())
-		if err != nil {
-			return err
-		}
-		(*w).Account1.signer = signer
-	} else {
-		//if len(secretKey) < common.PrivateKeyLength2() {
-		//	return fmt.Errorf("not enough bytes for secondary encryption private key")
-		//}
-		err = w.Account2.secretKey.Init(secretKey[:], w.Account2.Address, false)
-		if err != nil {
-			return err
-		}
-		err = signer.Init(common.SigName2(), w.Account2.secretKey.GetBytes())
-		if err != nil {
-			return err
-		}
-		(*w).Account2.signer = signer
+	enc, err := w.encrypt([]byte(mnemonic))
+	if err != nil {
+		ZeroBytes(seed)
+		return err
 	}
 
+	// Derive both accounts on a scratch copy that carries the NEW seed. Wallet
+	// is passed by value into GenerateNewAccountFromSeed, and neither it nor
+	// DeriveKeySeed mutates the seed slice they're given, so nothing here can
+	// touch w — if either derivation fails, w has not been written to at all.
+	scratch := *w
+	scratch.seed = seed
+	acc1, err := GenerateNewAccountFromSeed(scratch, w.SigName, true)
+	if err != nil {
+		ZeroBytes(seed)
+		return err
+	}
+	acc2, err := GenerateNewAccountFromSeed(scratch, w.SigName2, false)
+	if err != nil {
+		ZeroBytes(seed)
+		return err
+	}
+
+	// Every step above succeeded — commit atomically.
+	ZeroBytes(w.seed)
+	w.seed = seed
+	w.EncryptedMnemonic = enc
+	w.Account1 = acc1
+	w.Account2 = acc2
+	w.MainAddress = w.Account1.Address
+	// Rebuild the per-scheme key archive from scratch. Whatever was in it before
+	// belongs to the identity this restore just replaced (or to another wallet
+	// entirely) and the new phrase does not derive it; leaving it would put two
+	// disagreeing identities in the same file, and the load path would then have
+	// to choose between them. The archive now holds exactly the two accounts the
+	// phrase derives — a key for any other scheme is re-derived from the seed on
+	// demand, which is why dropping the rest loses nothing.
+	// (Written secondary-first so that if a chain ever runs the same scheme in
+	// both roles, the single surviving entry is the primary one — Account1 is
+	// the wallet's identity.)
+	w.Accounts = map[string]Account{w.SigName2: acc2}
+	w.Accounts[w.SigName] = acc1
+	// Realigns role metadata (Primary flags, PublicKey.MainAddress) across both
+	// accounts with the new MainAddress — the same fix-up loadKeys applies after
+	// reading a wallet off disk, so a restored wallet matches its reloaded form.
+	w.normalizeAccountRoles()
 	return nil
+}
+
+// setArchivedAccount records acc as the per-scheme archive entry for sigName,
+// replacing whatever was there. Called after deriving a key from the seed so the
+// archive is refreshed with the entry the phrase actually derives instead of
+// keeping a stale one next to it; the map is created if the wallet was
+// unmarshalled from JSON without an "accounts" object (nil map).
+func (w *Wallet) setArchivedAccount(sigName string, acc Account) {
+	if w.Accounts == nil {
+		w.Accounts = map[string]Account{}
+	}
+	w.Accounts[sigName] = acc
 }
 
 // normalizeAccountRoles sets the primary/secondary role metadata (the Primary
@@ -535,17 +719,6 @@ func (w *Wallet) StoreJSON() error {
 	walletFile := filepath.Join(w.HomePath, "wallet"+strconv.Itoa(int(w.WalletNumber)))
 	logger.GetLogger().Println("walletFile:", walletFile+".json")
 
-	if _, ok := w.Accounts[w.SigName]; !ok {
-		logger.GetLogger().Println("not properly structured wallet. Now OK")
-		w.Accounts[w.SigName] = w.Account1
-		copy(w.Accounts[w.SigName].EncryptedSecretKey[:], w.Account1.EncryptedSecretKey[:])
-	}
-	if _, ok := w.Accounts[w.SigName2]; !ok {
-		logger.GetLogger().Println("not properly structured wallet. Now OK")
-		w.Accounts[w.SigName2] = w.Account2
-		copy(w.Accounts[w.SigName2].EncryptedSecretKey[:], w.Account2.EncryptedSecretKey[:])
-	}
-
 	se, err := w.encrypt(w.Account1.secretKey.GetBytes())
 	if err != nil {
 		logger.GetLogger().Println(err)
@@ -564,14 +737,81 @@ func (w *Wallet) StoreJSON() error {
 	w.Account2.EncryptedSecretKey = make([]byte, len(se))
 	copy(w.Account2.EncryptedSecretKey, se)
 
+	// Archive the two live accounts under their scheme names, if the archive does
+	// not already carry an entry for them. Done AFTER the re-encryption above so
+	// the archived struct carries the ciphertext just written, not the previous
+	// one. setArchivedAccount also creates the map, which a wallet unmarshalled
+	// from a JSON file without an "accounts" object does not have (a nil map here
+	// used to panic on assignment).
+	if _, ok := w.Accounts[w.SigName]; !ok {
+		logger.GetLogger().Println("wallet carried no archive entry for the primary scheme; adding it")
+		w.setArchivedAccount(w.SigName, w.Account1)
+	}
+	if _, ok := w.Accounts[w.SigName2]; !ok {
+		logger.GetLogger().Println("wallet carried no archive entry for the secondary scheme; adding it")
+		w.setArchivedAccount(w.SigName2, w.Account2)
+	}
+
+	// Refresh the per-scheme key archive.
+	//
+	// OB-55. This loop used to do, for EVERY entry:
+	//
+	//	se, _ := w.encrypt(v.secretKey.GetBytes())
+	//	copy(w.Accounts[k].EncryptedSecretKey, se)
+	//
+	// which silently destroyed the archive of any wallet loaded from disk, on
+	// every single save. Two mistakes compounded:
+	//
+	//  1. Account.secretKey is unexported, so it is never marshalled and never
+	//     restored: for an entry read back from the wallet file it is the zero
+	//     value. Encrypting it produced a ~28-byte GCM blob of nothing at all,
+	//     not the key.
+	//  2. copy() writes min(len(dst), len(src)) bytes, so those 28 bytes were
+	//     spliced over the HEAD of the real ~1300-byte ciphertext, leaving the
+	//     tail in place. The result authenticates against nothing and can never
+	//     be decrypted again, by any password. (The damage was invisible for
+	//     entries created in the same session, where secretKey is live and the
+	//     two blobs happen to be the same length, so copy() was a full
+	//     overwrite — which is why this survived so long.)
+	//
+	// copy() was used because a field of a map value is not addressable in Go
+	// (w.Accounts[k].EncryptedSecretKey = se does not compile). The fix is to
+	// take the struct out, change it, and put it back.
+	//
+	// The empty-secretKey case must not be re-encrypted at all: StoreJSON never
+	// changes the password, so an entry read off disk already holds correct
+	// ciphertext under the CURRENT key and the right thing to do with it is
+	// nothing. Re-encrypting under a *different* password is exclusively
+	// ChangePassword's and ChangePasswordInPlace's job, and both do it by
+	// decrypting under the old key first — the empty secretKey is no substitute.
 	for k, v := range w.Accounts {
-		se, err := w.encrypt(v.secretKey.GetBytes())
+		sk := v.secretKey.GetBytes()
+		if len(sk) == 0 {
+			// Loaded from disk and never unlocked into this entry: leave the
+			// stored ciphertext exactly as it is.
+			continue
+		}
+		se, err := w.encrypt(sk)
 		if err != nil {
 			logger.GetLogger().Println(err)
 			return err
 		}
-		copy(w.Accounts[k].EncryptedSecretKey, se)
+		v.EncryptedSecretKey = se
+		w.Accounts[k] = v
 	}
+
+	// EncryptedMnemonic is deliberately NOT re-encrypted here. It is only ever
+	// correct to re-encrypt it against a *specific* old/new key pair, which only
+	// ChangePassword and ChangePasswordInPlace know; StoreJSON only ever sees the
+	// current password, so trying to "refresh" the encryption here by decrypting
+	// under the current key and re-encrypting under the same current key is pure
+	// churn on the normal path. Worse, during ChangePasswordInPlace's transition
+	// window w.passwordBytes is already the *new* key while EncryptedMnemonic is
+	// still under the *old* one, so a decrypt attempted here would fail, and a
+	// swallowed failure used to persist an unopenable phrase permanently. Both
+	// password-change functions now re-encrypt EncryptedMnemonic explicitly
+	// before calling StoreJSON, so by the time we get here it is already correct
+	// under the current key (or absent, for legacy wallets).
 
 	// OB-122: normalize account role metadata before persisting so a freshly
 	// generated wallet is identical to its own reloaded form. GenerateNewAccount
@@ -645,36 +885,77 @@ func LoadJSON(walletNumber uint8, password string, sigName, sigName2 string) (*W
 }
 
 func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 string) (*Wallet, error) {
+	w.SetPassword(password)
+
+	// Recover the seed before anything can need it: the scheme-change branches
+	// below generate keys, and with a seed those must be derived, not random.
+	if len(w.EncryptedMnemonic) > 0 {
+		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+		if err != nil {
+			logger.GetLogger().Println("cannot decrypt the recovery phrase, continuing without a seed:", err)
+		} else {
+			seed, serr := SeedFromMnemonic(mnemonic)
+			ZeroBytes(mnemonic)
+			if serr != nil {
+				logger.GetLogger().Println("stored recovery phrase is not valid, continuing without a seed:", serr)
+			} else {
+				w.seed = seed
+			}
+		}
+	}
+
 	if !common.IsPaused() && w.SigName != sigName {
 		w.SigName = sigName
-		if a, ok := w.Accounts[sigName]; ok {
-			w.Account1 = a
-			copy(w.Account1.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
-		} else {
-			acc, err := GenerateNewAccount(*w, sigName)
+		// The seed outranks the per-scheme key archive, and is consulted FIRST.
+		// For a seeded wallet the phrase defines the identity: derivation is
+		// self-verifying (the same phrase always yields the same key), so an
+		// archive entry that disagrees is by definition stale (written before a
+		// restore) or foreign (copied in from another wallet). Taking the
+		// archive first, as this used to, meant that after
+		// RestoreSecretKeyFromMnemonic the wallet loaded its PRE-restore
+		// identity back — silently, and with MainAddress repointed at it.
+		if w.HasSeed() {
+			acc, err := GenerateNewAccountFromSeed(*w, sigName, true)
 			if err != nil {
 				return nil, err
 			}
 			w.Account1 = acc
 			copy(w.Account1.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
+			w.setArchivedAccount(sigName, acc)
+		} else if a, ok := w.Accounts[sigName]; ok {
+			w.Account1 = a
+			copy(w.Account1.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
+		} else {
+			// No stored key for the new scheme and no recovery phrase to derive
+			// one from: generating a random key here would silently hand this
+			// wallet a brand-new, unstaked identity (loadWalletFromStruct later
+			// overwrites MainAddress from Account1.Address). Refuse instead.
+			// The recovery phrase is the reliable route (StoreJSON's per-scheme
+			// key archive can itself go stale across reloads, a separate,
+			// pre-existing issue), so lead with that and mention a file backup
+			// only as a secondary option.
+			return nil, fmt.Errorf("the network switched primary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup taken after a %q key was already present", sigName, sigName, sigName)
 		}
 	}
 	if !common.IsPaused2() && w.SigName2 != sigName2 {
 		w.SigName2 = sigName2
-		if a, ok := w.Accounts[sigName2]; ok {
-			w.Account2 = a
-			copy(w.Account2.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
-		} else {
-			acc, err := GenerateNewAccount(*w, sigName2)
+		// Seed first — see the matching comment in the primary branch above.
+		if w.HasSeed() {
+			acc, err := GenerateNewAccountFromSeed(*w, sigName2, false)
 			if err != nil {
 				return nil, err
 			}
 			w.Account2 = acc
 			copy(w.Account2.EncryptedSecretKey[:], acc.EncryptedSecretKey[:])
+			w.setArchivedAccount(sigName2, acc)
+		} else if a, ok := w.Accounts[sigName2]; ok {
+			w.Account2 = a
+			copy(w.Account2.EncryptedSecretKey[:], a.EncryptedSecretKey[:])
+		} else {
+			// See the matching comment in the primary branch above.
+			return nil, fmt.Errorf("the network switched secondary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup taken after a %q key was already present", sigName2, sigName2, sigName2)
 		}
 	}
-
-	w.SetPassword(password)
 
 	// Try to init Account1 - always try, tolerate failure if encryption is paused
 	account1OK := false
@@ -803,6 +1084,16 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
 
+	// w2 gets its OWN copy of the per-scheme archive map. Handing it w.Accounts
+	// directly (as this used to) meant the re-encryption below rewrote w's own
+	// entries in place, so any failure between here and the reload at the end left
+	// w holding new-key ciphertext while w.passwordBytes was still the old key. w
+	// picks the archive back up from the reloaded wallet once the change has
+	// actually landed on disk.
+	accounts := make(map[string]Account, len(w.Accounts))
+	for k, v := range w.Accounts {
+		accounts[k] = v
+	}
 	w2 := Wallet{
 		Iv:           w.Iv,
 		HomePath:     w.HomePath,
@@ -812,30 +1103,70 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 		SigName2:     w.SigName2,
 		Account1:     w.Account1,
 		Account2:     w.Account2,
-		Accounts:     w.Accounts,
+		Accounts:     accounts,
 	}
 	// Fresh Argon2id salt + key for the new password (KdfSalt left nil so
 	// SetPassword generates one).
 	w2.SetPassword(newPassword)
 
-	for k, v := range w.Accounts {
+	// Re-encrypt the per-scheme key archive under the new key. OB-55: the write
+	// back is an assignment, not `copy(w2.Accounts[k].EncryptedSecretKey, se)` —
+	// see the long note in StoreJSON for why that truncating copy was destroying
+	// archives.
+	for k, v := range accounts {
 		if err := func() error {
-			ds, err := w.decrypt(v.EncryptedSecretKey)
-			if err != nil {
-				logger.GetLogger().Println(err)
-				return err
-			}
-			defer func() { // CW-H2: cleanse the ephemeral decrypted key
-				if len(ds) > 0 {
-					oqs.MemCleanse(ds)
+			var plain []byte
+			if sk := v.secretKey.GetBytes(); len(sk) > 0 {
+				// Unlocked in this session: authoritative, and needs no decrypt.
+				// Never cleansed here — it is the live key, not a copy.
+				plain = sk
+			} else {
+				ds, err := w.decrypt(v.EncryptedSecretKey)
+				if err != nil {
+					// The password was already verified against w.passwordBytes
+					// above, so this is not a wrong password: this one archived
+					// blob cannot be opened. KEEP it, byte for byte, and carry
+					// on with the password change.
+					//
+					// Keeping rather than dropping (the opposite of what is done
+					// with EncryptedMnemonic just below) because the two are not
+					// the same case. An unopenable phrase blob is provably dead
+					// forever — it is verified against THE wallet key, the only
+					// one there is — and leaving it on disk would advertise a
+					// backup that does not exist. An archived key blob may simply
+					// be under an older password (an earlier password change that
+					// hit this same path), in which case its plaintext is still
+					// recoverable offline from the file and deleting it here would
+					// be the one irreversible act in an otherwise routine
+					// operation. It is also inert: the archive is consulted only
+					// on a chain scheme change, and a bad entry then fails loudly
+					// at load ("Account1 init failed") rather than silently.
+					//
+					// Aborting is not an option either: that is exactly the
+					// behaviour that has left wallets damaged by this very bug
+					// unable to change their password at all.
+					logger.GetLogger().Printf("WARNING: the archived key for signature scheme %q cannot be decrypted "+
+						"with the current (verified correct) password: %v. It is being carried over UNCHANGED, still "+
+						"under whatever key it was written with, so nothing is destroyed — but it will NOT open with "+
+						"the new password. The wallet's live keys are unaffected and the password change continues. "+
+						"If the network ever switches to %q this wallet will refuse to load until it is restored from "+
+						"its recovery phrase or a wallet-file backup", k, err, k)
+					return nil
 				}
-			}()
-			se, err := w2.encrypt(ds)
+				defer func() { // CW-H2: cleanse the ephemeral decrypted key
+					if len(ds) > 0 {
+						oqs.MemCleanse(ds)
+					}
+				}()
+				plain = ds
+			}
+			se, err := w2.encrypt(plain)
 			if err != nil {
 				logger.GetLogger().Println(err)
 				return err
 			}
-			copy(w2.Accounts[k].EncryptedSecretKey, se)
+			v.EncryptedSecretKey = se
+			accounts[k] = v
 			return nil
 		}(); err != nil {
 			return err
@@ -875,6 +1206,35 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 		}
 		w2.Account2.EncryptedSecretKey = se
 	}
+
+	// Carry the recovery phrase across the password change, re-encrypted under
+	// w2's new key. Without this, w2 (built field by field above) never gets an
+	// EncryptedMnemonic at all and the phrase backup is silently lost forever
+	// (PBKDF2 is one-way, so it can never be recovered from the seed).
+	//
+	// If it fails to decrypt under the just-verified-correct old password, the
+	// phrase was already unrecoverable before this call (the load path already
+	// degrades the same way — see Finding 4) and re-encrypting it under the new
+	// password can never fix that. Aborting the whole password change here would
+	// just be a dead end, contradicting the degrade-not-abort rule everywhere
+	// else. w2.EncryptedMnemonic is left at its zero value (nil), dropping the
+	// blob rather than carrying forward ciphertext now known to never decrypt:
+	// keeping it would leave a field on disk that looks like a phrase backup
+	// but provably isn't one.
+	if len(w.EncryptedMnemonic) > 0 {
+		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+		if err != nil {
+			logger.GetLogger().Println("cannot decrypt the recovery phrase during password change, dropping it:", err)
+		} else {
+			enc, eerr := w2.encrypt(mnemonic)
+			ZeroBytes(mnemonic)
+			if eerr != nil {
+				return fmt.Errorf("failed to encrypt recovery phrase: %v", eerr)
+			}
+			w2.EncryptedMnemonic = enc
+		}
+	}
+
 	err := w2.StoreJSON()
 	if err != nil {
 		logger.GetLogger().Println("Can not store new wallet")
@@ -889,6 +1249,9 @@ func (w *Wallet) ChangePassword(password, newPassword string) error {
 	w.Iv = loaded.Iv
 	w.KdfSalt = loaded.KdfSalt
 	w.Accounts = loaded.Accounts
+	w.EncryptedMnemonic = loaded.EncryptedMnemonic
+	ZeroBytes(w.seed) // the old seed (if any) is superseded by loaded.seed below
+	w.seed = loaded.seed
 	return nil
 }
 
@@ -914,25 +1277,48 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 	newSalt := newKdfSalt()
 	newPasswordBytes := argon2Key(newPassword, newSalt)
 
-	// Temporarily keep old password for decryption
+	// Re-encrypt the per-scheme key archive under the new key. w.passwordBytes is
+	// still the OLD key throughout this loop (it is swapped only after every blob
+	// has been rewritten), which is what makes w.decrypt work here.
+	//
+	// OB-55: the write back is an assignment, not
+	// `copy(w.Accounts[k].EncryptedSecretKey, se)` — see the long note in
+	// StoreJSON for why that truncating copy was destroying archives. The
+	// undecryptable-entry policy (keep, log, continue) is explained in
+	// ChangePassword above; the two must agree, since they are the same operation
+	// reached from different callers.
 	for k, v := range w.Accounts {
 		if err := func() error {
-			ds, err := w.decrypt(v.EncryptedSecretKey)
-			if err != nil {
-				logger.GetLogger().Println(err)
-				return err
-			}
-			defer func() { // CW-H2: cleanse the ephemeral decrypted key
-				if len(ds) > 0 {
-					oqs.MemCleanse(ds)
+			var plain []byte
+			if sk := v.secretKey.GetBytes(); len(sk) > 0 {
+				// Unlocked in this session: authoritative, no decrypt needed, and
+				// never cleansed here — it is the live key, not a copy.
+				plain = sk
+			} else {
+				ds, err := w.decrypt(v.EncryptedSecretKey)
+				if err != nil {
+					logger.GetLogger().Printf("WARNING: the archived key for signature scheme %q cannot be decrypted "+
+						"with the current (verified correct) password: %v. It is being carried over UNCHANGED, still "+
+						"under whatever key it was written with, so nothing is destroyed — but it will NOT open with "+
+						"the new password. The wallet's live keys are unaffected and the password change continues. "+
+						"If the network ever switches to %q this wallet will refuse to load until it is restored from "+
+						"its recovery phrase or a wallet-file backup", k, err, k)
+					return nil
 				}
-			}()
-			se, err := w.encryptWithKey(newPasswordBytes, ds) // CW-M3: no toggle
+				defer func() { // CW-H2: cleanse the ephemeral decrypted key
+					if len(ds) > 0 {
+						oqs.MemCleanse(ds)
+					}
+				}()
+				plain = ds
+			}
+			se, err := w.encryptWithKey(newPasswordBytes, plain) // CW-M3: no toggle
 			if err != nil {
 				logger.GetLogger().Println(err)
 				return err
 			}
-			copy(w.Accounts[k].EncryptedSecretKey, se)
+			v.EncryptedSecretKey = se
+			w.Accounts[k] = v
 			return nil
 		}(); err != nil {
 			return err
@@ -971,6 +1357,33 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 			return fmt.Errorf("failed to encrypt Account2: %v", err)
 		}
 		w.Account2.EncryptedSecretKey = se
+	}
+
+	// Re-encrypt the recovery phrase under the new key while the old key is
+	// still live in w.passwordBytes (decrypt uses w.decrypt, which reads
+	// w.passwordBytes). Doing this after the password swap below would try to
+	// decrypt an old-key blob with the new key: that fails, and the wallet
+	// would otherwise persist a phrase that can never be opened again.
+	//
+	// If decrypt fails here even under the still-old (just-verified-correct)
+	// key, the phrase was already unrecoverable before this call — same
+	// degrade-not-abort case as ChangePassword above and as loading (Finding
+	// 4). Drop the blob (w.EncryptedMnemonic = nil) instead of aborting the
+	// whole password change or carrying forward ciphertext now known to never
+	// decrypt.
+	if len(w.EncryptedMnemonic) > 0 {
+		mnemonic, err := w.decrypt(w.EncryptedMnemonic)
+		if err != nil {
+			logger.GetLogger().Println("cannot decrypt the recovery phrase during password change, dropping it:", err)
+			w.EncryptedMnemonic = nil
+		} else {
+			enc, eerr := w.encryptWithKey(newPasswordBytes, mnemonic) // CW-M3: no toggle
+			ZeroBytes(mnemonic)
+			if eerr != nil {
+				return fmt.Errorf("failed to encrypt recovery phrase: %v", eerr)
+			}
+			w.EncryptedMnemonic = enc
+		}
 	}
 
 	// Now update to new password

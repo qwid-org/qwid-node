@@ -1007,11 +1007,13 @@ contract Coin {
                 if (res.error) {
                     showMessage(res.error, 'error');
                 } else {
-                    showMessage('Wallet created successfully!');
+                    showMessage('Wallet created. It has NO recovery phrase — back up the wallet file!');
                     walletLoaded = true;
                     document.getElementById('walletInfoCard').style.display = 'block';
                     document.getElementById('walletDetails').innerHTML =
-                        '<p class="wallet-info">Address: ' + res.address + '</p>';
+                        '<p class="wallet-info">Address: ' + res.address + '</p>' +
+                        (res.warning ? '<p class="wallet-info"><strong>No recovery phrase:</strong> ' +
+                            res.warning.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</p>' : '');
                     updateAccount();
                     checkWallet();
                 }

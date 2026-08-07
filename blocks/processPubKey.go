@@ -30,6 +30,7 @@ func StoreAddress(mainAddress common.Address, pk common.PubKey) error {
 func AddNewPubKeyToActiveWallet(sigName string, primary bool, height int64) error {
 	w := wallet.GetActiveWallet()
 	if w.GetSigName(primary) != sigName {
+		previousSigName := w.GetSigName(primary)
 		if primary {
 			w.SigName = sigName
 		} else {
@@ -37,6 +38,20 @@ func AddNewPubKeyToActiveWallet(sigName string, primary bool, height int64) erro
 		}
 		err := w.AddNewEncryptionToActiveWallet(sigName, primary)
 		if err != nil {
+			// Put the scheme name back. AddNewEncryptionToActiveWallet refuses
+			// for a wallet with no recovery phrase, and leaving SigName pointing
+			// at a scheme this wallet holds no key for would make any later
+			// StoreJSON archive the OLD key under the NEW scheme name — the very
+			// stale-archive confusion the refusal is meant to avoid.
+			if primary {
+				w.SigName = previousSigName
+			} else {
+				w.SigName2 = previousSigName
+			}
+			logger.GetLogger().Printf("CANNOT ADOPT THE NEW SIGNATURE SCHEME %q: %v — "+
+				"this node keeps following the chain, but it now has NO key for %q and cannot produce "+
+				"blocks or sign transactions under it until the operator restores this wallet from its "+
+				"recovery phrase or from a wallet-file backup", sigName, err, sigName)
 			return err
 		}
 	}

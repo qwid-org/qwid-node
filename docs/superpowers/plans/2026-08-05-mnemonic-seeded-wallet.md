@@ -63,7 +63,7 @@ Czysty Go, bez liboqs. Buduje fundament, na którym stoją wszystkie kolejne zad
 - Test: `wallet/mnemonic_seed_test.go`
 
 **Interfaces:**
-- Consumes: `github.com/wonabru/bip39` — `NewMnemonic(entropy []byte) (string, error)`, `IsMnemonicValid(mnemonic string) bool`, `NewSeed(mnemonic, password string) []byte`
+- Consumes: `github.com/wonabru/bip39` — `NewMnemonic(entropy []byte) (string, error)`, `MnemonicToByteArray(mnemonic string) ([]byte, error)` (validates the checksum; `IsMnemonicValid` does **not**), `NewSeed(mnemonic, password string) []byte`
 - Produces:
   - `func NewMnemonic24() ([]byte, error)` — 24 słowa rozdzielone pojedynczymi spacjami
   - `func SeedFromMnemonic(mnemonic []byte) ([]byte, error)` — 64 bajty
@@ -259,7 +259,13 @@ func SeedFromMnemonic(mnemonic []byte) ([]byte, error) {
 	if n := len(strings.Fields(phrase)); n != MnemonicWordCount {
 		return nil, fmt.Errorf("fraza musi mieć dokładnie %d słów, podano %d", MnemonicWordCount, n)
 	}
-	if !bip39.IsMnemonicValid(phrase) {
+	// bip39.IsMnemonicValid only checks word count and wordlist membership; it
+	// does not verify the checksum bits. bip39.MnemonicToByteArray calls
+	// IsMnemonicValid internally and then verifies the checksum, so it is the
+	// only one of the two that actually rejects a mnemonic with a bad checksum.
+	// This matters: without the checksum check a typo in a recovery phrase would
+	// silently derive a different wallet instead of reporting an error.
+	if _, err := bip39.MnemonicToByteArray(phrase); err != nil {
 		return nil, fmt.Errorf("nieprawidłowa fraza: słowo spoza listy BIP39 albo błędna suma kontrolna")
 	}
 	return bip39.NewSeed(phrase, ""), nil
@@ -789,8 +795,10 @@ import (
 	"github.com/wonabru/qwid-node/common"
 )
 
-// newTestWallet builds a wallet whose files land in a throwaway directory.
-func newTestWallet(t *testing.T, number uint8) *Wallet {
+// newSeedTestWallet builds a wallet whose files land in a throwaway directory.
+// Named to avoid colliding with the pre-existing newTestWallet(password string)
+// in wallet/encrypt_test.go.
+func newSeedTestWallet(t *testing.T, number uint8) *Wallet {
 	t.Helper()
 	w := EmptyWallet(number, common.SigName(), common.SigName2())
 	w.HomePath = t.TempDir()
@@ -817,7 +825,7 @@ func fillAccountsFromSeed(t *testing.T, w *Wallet) {
 }
 
 func TestSetMnemonicRejectsInvalidPhrase(t *testing.T) {
-	w := newTestWallet(t, 200)
+	w := newSeedTestWallet(t, 200)
 	if err := w.SetMnemonic([]byte("not a real phrase")); err == nil {
 		t.Fatal("oczekiwano błędu dla nieprawidłowej frazy")
 	}
@@ -832,13 +840,13 @@ func TestSeededWalletIsReproducibleFromPhrase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w1 := newTestWallet(t, 201)
+	w1 := newSeedTestWallet(t, 201)
 	if err := w1.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
 	fillAccountsFromSeed(t, w1)
 
-	w2 := newTestWallet(t, 201)
+	w2 := newSeedTestWallet(t, 201)
 	if err := w2.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
@@ -863,13 +871,13 @@ func TestDifferentPhrasesGiveDifferentWallets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w1 := newTestWallet(t, 202)
+	w1 := newSeedTestWallet(t, 202)
 	if err := w1.SetMnemonic(m1); err != nil {
 		t.Fatal(err)
 	}
 	fillAccountsFromSeed(t, w1)
 
-	w2 := newTestWallet(t, 202)
+	w2 := newSeedTestWallet(t, 202)
 	if err := w2.SetMnemonic(m2); err != nil {
 		t.Fatal(err)
 	}
@@ -885,7 +893,7 @@ func TestMnemonicSurvivesStoreAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := newTestWallet(t, 203)
+	w := newSeedTestWallet(t, 203)
 	if err := w.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
@@ -910,7 +918,7 @@ func TestMnemonicSurvivesStoreAndLoad(t *testing.T) {
 }
 
 func TestLegacyWalletLoadsWithoutSeed(t *testing.T) {
-	w := newTestWallet(t, 204)
+	w := newSeedTestWallet(t, 204)
 	acc, err := GenerateNewAccount(*w, w.SigName)
 	if err != nil {
 		t.Fatal(err)
@@ -952,7 +960,7 @@ func TestWipeClearsSeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := newTestWallet(t, 205)
+	w := newSeedTestWallet(t, 205)
 	if err := w.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
@@ -1201,7 +1209,7 @@ func TestSchemeChangeIsReproducibleFromPhrase(t *testing.T) {
 
 	newScheme := common.SigName2()
 
-	w1 := newTestWallet(t, 210)
+	w1 := newSeedTestWallet(t, 210)
 	if err := w1.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
@@ -1210,7 +1218,7 @@ func TestSchemeChangeIsReproducibleFromPhrase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w2 := newTestWallet(t, 210)
+	w2 := newSeedTestWallet(t, 210)
 	if err := w2.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
@@ -1231,7 +1239,7 @@ func TestSchemeChangeStaysRandomWithoutPhrase(t *testing.T) {
 	newScheme := common.SigName2()
 
 	addr := func() string {
-		w := newTestWallet(t, 211)
+		w := newSeedTestWallet(t, 211)
 		acc, err := GenerateNewAccount(*w, w.SigName)
 		if err != nil {
 			t.Fatal(err)
@@ -1363,7 +1371,7 @@ func TestGetMnemonicWordsReturnsThePhraseThatCreatedTheWallet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := newTestWallet(t, 220)
+	w := newSeedTestWallet(t, 220)
 	if err := w.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
@@ -1385,7 +1393,7 @@ func TestGetMnemonicWordsReturnsThePhraseThatCreatedTheWallet(t *testing.T) {
 // feature has no phrase and never can — the caller must be told to back up the
 // file instead.
 func TestGetMnemonicWordsOnLegacyWalletExplainsWhy(t *testing.T) {
-	w := newTestWallet(t, 221)
+	w := newSeedTestWallet(t, 221)
 	_, err := w.GetMnemonicWords(true)
 	if err == nil {
 		t.Fatal("oczekiwano błędu dla portfela bez frazy")
@@ -1400,13 +1408,13 @@ func TestRestoreFromMnemonicRebuildsTheSameKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	original := newTestWallet(t, 222)
+	original := newSeedTestWallet(t, 222)
 	if err := original.SetMnemonic(mnemonic); err != nil {
 		t.Fatal(err)
 	}
 	fillAccountsFromSeed(t, original)
 
-	restored := newTestWallet(t, 222)
+	restored := newSeedTestWallet(t, 222)
 	if err := restored.RestoreSecretKeyFromMnemonic(string(mnemonic), true); err != nil {
 		t.Fatal(err)
 	}
@@ -1432,7 +1440,7 @@ func TestRestoreFromMnemonicRebuildsTheSameKeys(t *testing.T) {
 }
 
 func TestRestoreFromMnemonicRejectsBadPhrase(t *testing.T) {
-	w := newTestWallet(t, 223)
+	w := newSeedTestWallet(t, 223)
 	if err := w.RestoreSecretKeyFromMnemonic("abandon abandon abandon", true); err == nil {
 		t.Fatal("oczekiwano błędu dla frazy o złej długości")
 	}
@@ -1884,14 +1892,13 @@ Zamień etykietę przycisku i tekst pola, tak by opisywały nową semantykę:
 	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore keys from recovery phrase", nil)
 	buttonRestoreMnemonic.ConnectClicked(func(bool) {
 		phrase := inputRestoreMnemonic.Text()
+		// One call rebuilds the WHOLE wallet: RestoreSecretKeyFromMnemonic ignores
+		// its role argument and derives both accounts atomically (Task 5). Calling
+		// it a second time would repeat both post-quantum derivations and, on a
+		// transient failure, report an error for a restore that already succeeded.
 		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, true); err != nil {
 			widgets.QMessageBox_Information(nil, "OK",
-				fmt.Sprintf("Cannot restore the primary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-			return
-		}
-		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, false); err != nil {
-			widgets.QMessageBox_Information(nil, "OK",
-				fmt.Sprintf("Cannot restore the secondary key:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+				fmt.Sprintf("Cannot restore the keys:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 			return
 		}
 		widgets.QMessageBox_Information(nil, "OK",
@@ -1960,7 +1967,7 @@ func TestGenerateKATValues(t *testing.T) {
 		"abandon abandon abandon abandon abandon abandon abandon abandon " +
 		"abandon abandon abandon abandon abandon abandon abandon art"
 
-	w := newTestWallet(t, 240)
+	w := newSeedTestWallet(t, 240)
 	if err := w.SetMnemonic([]byte(phrase)); err != nil {
 		t.Fatal(err)
 	}
@@ -2012,7 +2019,7 @@ const (
 )
 
 func TestKnownAnswerDerivation(t *testing.T) {
-	w := newTestWallet(t, 241)
+	w := newSeedTestWallet(t, 241)
 	if err := w.SetMnemonic([]byte(katPhrase)); err != nil {
 		t.Fatal(err)
 	}

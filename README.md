@@ -157,7 +157,7 @@ Examples:
 Then open http://localhost:8080 (or your custom port) in a web browser.
 
 Web UI Features:
-- **Wallet**: Load wallet, change password (see "Wallet backup & recovery" below — mnemonic backup is not available for post-quantum keys)
+- **Wallet**: Load wallet, change password, create a new wallet — note that a wallet created here has **no** 24-word recovery phrase (the phrase never travels over HTTP); its encrypted file is the only backup. See "Wallet backup & recovery" below.
 - **Account**: View balances, staking details, network stats
 - **Send**: Send QWD with locked amounts, multi-sig, smart contract data
 - **Staking**: Stake, unstake, withdraw rewards
@@ -181,7 +181,7 @@ Examples:
 Then open http://localhost:9090 in a web browser. Users register with username+password and each gets their own wallet.
 
 Website Features:
-- **Multi-user**: Each user registers and gets a unique quantum-resistant wallet
+- **Multi-user**: Each user registers and gets a unique quantum-resistant wallet. These wallets have **no** 24-word recovery phrase (it would have to cross the network) — the server-side encrypted wallet file and the user's password are the only way back in; see "Wallet backup & recovery"
 - **Dashboard**: View balance, staking, rewards, network stats, receive address
 - **Send**: Send QWD to any address or delegated account
 - **Staking**: Stake, unstake, withdraw rewards to any delegated account
@@ -206,7 +206,40 @@ The read-only `cmd/explorer` also honours `BIND_ADDRESS` (defaults to all interf
 
 Wallet backup & recovery
 
-- Post-quantum secret keys (Falcon-512 / MAYO-5) are far larger than a BIP39 mnemonic can encode, so **the mnemonic-phrase backup is not available** for real wallets — requesting it returns a clear error directing you here.
-- Back up the **encrypted wallet file** instead. Node/CLI/GUI wallets live under `~/.qwid/`; website user wallets under `~/.qwid/website/users/<username>/`. The file is AES-256-GCM encrypted with an Argon2id-derived key from your password — keep a copy of the file and remember the password.
+Only two creation flows produce a wallet with a recovery phrase. Which flow you
+used decides what your backup is:
+
+| Creation flow | Recovery phrase? | Your only backup |
+|---|---|---|
+| `go run cmd/generateNewWallet/main.go` (CLI) | **yes**, 24 BIP39 words | the phrase (plus, optionally, the wallet file) |
+| Qt GUI, "Restore keys from recovery phrase" | **yes** — it restores an existing phrase | the phrase |
+| Web UI (`cmd/webui`), "Create New Wallet" button | **no** | the encrypted wallet file + its password |
+| Public website (`cmd/website`) registration | **no** | the encrypted wallet file + its password |
+| Any wallet created before this feature existed | **no**, and never can | the encrypted wallet file + its password |
+
+- Wallets created by the **CLI generator** are generated **from a 24-word BIP39
+  recovery phrase**. The phrase is shown once, before the wallet is created, and
+  you must type three of its words back to continue. Keep it offline: it derives
+  every key of the wallet, for the current signature schemes and any the chain
+  votes in later.
+- To restore on a clean machine, run `go run cmd/generateNewWallet/main.go` and
+  pick the restore option. The same phrase always rebuilds the same addresses.
+  Use a **free wallet number**: the generator refuses to overwrite an occupied
+  one unless you type an explicit confirmation naming that wallet number, because
+  overwriting destroys the keys in that file for good.
+- The phrase is only ever handled by the CLI generator and the Qt GUI. It is
+  never served over HTTP, so `/api/wallet/mnemonic` returns an explanation
+  instead — and, for the same reason, **wallets created through the Web UI or
+  the public website have no recovery phrase at all**. Their keys are random and
+  exist in exactly one place: the AES-256-GCM / Argon2id-encrypted wallet file.
+  Back that file up, with its password, or the funds are unrecoverable.
+- Wallets created before this change have no phrase — a post-quantum secret key
+  is far too large to encode as one (CW-M2). Back up their AES-256-GCM /
+  Argon2id-encrypted wallet file instead.
+- If the chain votes in a new signature scheme, a wallet **with** a phrase
+  derives the new key from it automatically. A wallet **without** one refuses,
+  loudly, instead of minting a random replacement identity: the node keeps
+  following the chain but cannot sign under the new scheme until you restore the
+  wallet from a phrase or a wallet-file backup.
 - Passwords must be at least 8 characters on password-change and website-registration flows.
 

@@ -136,7 +136,15 @@ COOKIE_INSECURE=true                 # Local HTTP dev only; unset in prod so the
 SMTP_USER / SMTP_PASS                # Optional, for website email features.
 ```
 
-Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); the BIP39 mnemonic backup is unavailable for post-quantum keys (CW-M2 — back up the AES-256-GCM/Argon2id-encrypted wallet file instead); password minimum is 8 chars on password-change and website-registration flows.
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change and website-registration flows.
+
+Recovery phrases — exactly which flows produce one:
+- **CLI generator** (`go run cmd/generateNewWallet/main.go`): creates a wallet **from** a fresh 24-word BIP39 phrase (shown once, three words typed back to confirm), and restores a wallet from an existing phrase. The phrase is read without echo and stored encrypted in the wallet file.
+- **Qt GUI** (`cmd/gui`): restores from a phrase, and displays the stored phrase after the wallet password is re-entered (WH-C5).
+- **Web UI** (`cmd/webui` "Create New Wallet") and **public website** (`cmd/website` registration): create wallets with **random** keys and **no** recovery phrase — the phrase must never cross HTTP (design decision 3). The encrypted wallet file plus its password is the only backup, and both handlers say so in their creation response.
+- Wallets created before this feature have no phrase and never can, since a post-quantum secret key cannot be encoded as one (CW-M2) — back up their encrypted wallet file instead.
+- A phrase-less wallet meeting a chain-voted signature-scheme change **refuses** to generate a replacement key, on both the load path (`loadWalletFromStruct`) and the live path (`AddNewEncryptionToActiveWallet`), rather than silently replacing its staked identity with a random one. Block processing continues; the node just cannot sign under the new scheme until the operator restores the wallet.
+- The CLI generator refuses to overwrite an occupied wallet number in either mode unless the operator types a confirmation naming that wallet number.
 
 Genesis config: `~/.qwid/genesis/config/genesis.json` (copy from `genesis/config/genesis_internal_tests.json`)
 

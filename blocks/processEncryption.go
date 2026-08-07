@@ -2,6 +2,7 @@ package blocks
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
@@ -18,39 +19,49 @@ func init() {
 }
 
 // ProcessBlockEncryption : store encryption
+//
+// The primary and secondary halves are independent and BOTH are always
+// attempted: the errors are collected and returned together rather than the
+// first one short-circuiting the function. This matters now that a wallet
+// without a recovery phrase refuses to adopt a new scheme
+// (AddNewEncryptionToActiveWallet). A scheme change the node cannot follow with
+// its own key is a wallet problem; it must not stop the node from applying the
+// chain's *other* scheme change in the same block, because the encryption change
+// is only detected once — by comparing this block's header against the previous
+// one — so a skipped SetVoteEncryption is never retried, and the node would keep
+// verifying with the wrong scheme configuration forever.
 func ProcessBlockEncryption(block Block, lastBlock Block) error {
 	if lastBlock.GetHeader().Height < 3 {
 		return nil
 	}
+	var errs []error
 	if !bytes.Equal(block.BaseBlock.BaseHeader.Encryption1[:], lastBlock.BaseBlock.BaseHeader.Encryption1[:]) {
 		enc1, err := FromBytesToEncryptionConfig(block.BaseBlock.BaseHeader.Encryption1[:], true)
 		if err != nil {
-			return err
-		}
-		logger.GetLogger().Println("new encryption: ", enc1.ToString())
-		SetVoteEncryption(block.BaseBlock.BaseHeader.Encryption1[:], true)
-		voting.ResetLastVoting()
-		err = AddNewPubKeyToActiveWallet(enc1.SigName, true, block.GetHeader().Height)
-		if err != nil {
-			return err
+			errs = append(errs, err)
+		} else {
+			logger.GetLogger().Println("new encryption: ", enc1.ToString())
+			SetVoteEncryption(block.BaseBlock.BaseHeader.Encryption1[:], true)
+			voting.ResetLastVoting()
+			if err := AddNewPubKeyToActiveWallet(enc1.SigName, true, block.GetHeader().Height); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 
 	if !bytes.Equal(block.BaseBlock.BaseHeader.Encryption2[:], lastBlock.BaseBlock.BaseHeader.Encryption2[:]) {
 		enc2, err := FromBytesToEncryptionConfig(block.BaseBlock.BaseHeader.Encryption2[:], false)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+		} else {
+			SetVoteEncryption(block.BaseBlock.BaseHeader.Encryption2[:], false)
+			voting.ResetLastVoting()
+			if err := AddNewPubKeyToActiveWallet(enc2.SigName, false, block.GetHeader().Height); err != nil {
+				errs = append(errs, err)
+			}
 		}
-
-		SetVoteEncryption(block.BaseBlock.BaseHeader.Encryption2[:], false)
-		voting.ResetLastVoting()
-		err = AddNewPubKeyToActiveWallet(enc2.SigName, false, block.GetHeader().Height)
-		if err != nil {
-			return err
-		}
-
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func SetVoteEncryption(enc []byte, primary bool) {
