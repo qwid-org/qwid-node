@@ -237,6 +237,9 @@ func ResetAccountsAndBlocksSyncLocked(height int64) {
 			logger.GetLogger().Println(err)
 		}
 	}
+	// The snapshots above height are gone; the recorded last-stored heights
+	// must follow, or the next lookup would point into the removed range.
+	account.SetLastStoredSnapshotHeights(height)
 	for i := hd; i > height; i-- {
 		err := account.RemoveDexAccountsFromDB(i)
 		if err != nil {

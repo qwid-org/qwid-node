@@ -117,7 +117,21 @@ var (
 	DexAccountsDBPrefix              = [2]byte{'D', 'A'}
 	BadTransactionDBPrefix           = [2]byte{'B', 'T'}
 	EscrowPoolDBPrefix               = [2]byte{'E', 'P'}
+	// Per-account transaction-history index (account/txHistory.go):
+	// prefix | address | sequence -> tx hash. Kept OUTSIDE the account state
+	// snapshot so the snapshot stops growing with transaction history.
+	TxHistorySentDBPrefix     = [2]byte{'H', 'S'}
+	TxHistoryReceivedDBPrefix = [2]byte{'H', 'R'}
 )
+
+// StakingDetailsRetentionBlocks is how many recent blocks of per-event staking
+// detail (stakes, unstakes, per-block rewards) a staking account keeps in the
+// state. Rewards append an entry EVERY block, so an unbounded map made the
+// staking snapshot marshal O(chain history) - entries older than this window
+// are folded into a single aggregate entry at key 0. Details are informational
+// (wallet display); consensus reads only the balances, so the fold changes no
+// validation. ~1 day of blocks.
+var StakingDetailsRetentionBlocks int64 = 8640
 
 var chainID = int16(23)
 var chainIDMutex = sync.Mutex{}

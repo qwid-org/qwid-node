@@ -179,8 +179,8 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 			"balance":          acc.GetBalanceConfirmedFloat(),
 			"transactionDelay": acc.TransactionDelay,
 			"multiSignNumber":  acc.MultiSignNumber,
-			"sentCount":        len(acc.TransactionsSender),
-			"receivedCount":    len(acc.TransactionsRecipient),
+			"sentCount":        acc.SentCount,
+			"receivedCount":    acc.ReceivedCount,
 			"transactions":     transactions,
 		})
 	case "BL":

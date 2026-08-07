@@ -258,10 +258,10 @@ type batchTiming struct {
 	start      time.Time
 	verify     time.Duration // CheckBaseBlock across the verify pass
 	funds      time.Duration // CheckBlockAndTransferFunds (tx sigs, EVM, transfers)
-	storeBlock time.Duration // block persistence
-	accounts   time.Duration // accounts snapshot per block
-	staking    time.Duration // staking snapshots (256 buckets) per block
-	evm        time.Duration // EVM snapshot (store-on-change, usually 0)
+	storeBlock time.Duration // block persistence, per block
+	accounts   time.Duration // accounts snapshot, once per batch
+	staking    time.Duration // staking snapshots (256 buckets), once per batch
+	evm        time.Duration // EVM snapshot (store-on-change), once per batch
 	applied    int
 	lastBlock  blocks.Block
 	lastParent blocks.Block
@@ -732,6 +732,53 @@ func OnMessage(addr [4]byte, m []byte) {
 		}()
 		common.BlockMutex.Lock()
 		defer common.BlockMutex.Unlock()
+
+		// Persist the account/staking/EVM state once per BATCH, not once per
+		// block. Accounts carry their full per-account transaction history and
+		// staking accounts their full reward detail, so a snapshot marshals
+		// O(chain history) bytes - at height ~100k that took ~1.9s per block,
+		// which was nearly all of the sync time. The reset/startup machinery
+		// walks down to the closest stored snapshot (restorableHeight,
+		// consistentRewindTarget, checkMainChain), so batch-end-only snapshots
+		// stay restorable; a crash mid-batch costs at most one re-fetched batch
+		// (bucket size << MaxStartupRewind). Registered as a defer so every
+		// exit path that applied blocks persists; when a mid-batch error reset
+		// the state, the height no longer matches the last applied block and
+		// the store is correctly skipped - the reset already stored/loaded a
+		// consistent state of its own.
+		defer func() {
+			if timing.applied == 0 {
+				return
+			}
+			hNow := common.GetHeight()
+			if hNow != timing.lastBlock.GetHeader().Height {
+				return
+			}
+			phase := time.Now()
+			if err := account.StoreAccounts(hNow); err != nil {
+				logger.GetLogger().Println(err)
+			}
+			timing.accounts += time.Since(phase)
+
+			// EVM snapshot at the batch end is exact for every restorable rewind
+			// target: those are all batch-end heights themselves, and any
+			// contract change inside a batch is included in that batch's
+			// end-of-batch snapshot.
+			phase = time.Now()
+			if err := blocks.CommitEVMStateIfChanged(hNow); err != nil {
+				logger.GetLogger().Println("cannot store EVM state", err)
+			}
+			timing.evm += time.Since(phase)
+
+			phase = time.Now()
+			if err := account.StoreStakingAccounts(hNow); err != nil {
+				logger.GetLogger().Println(err)
+			}
+			timing.staking += time.Since(phase)
+
+			logger.GetLogger().Println("sync batch timing:", timing.summary())
+		}()
+
 		// Re-read height after acquiring lock — another goroutine may have advanced it
 		h = common.GetHeight()
 		was = false
@@ -796,29 +843,9 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 
 			logger.GetLogger().Println("Sync New Block success -------------------------------------", block.GetHeader().Height)
-			phase = time.Now()
-			err = account.StoreAccounts(block.GetHeader().Height)
-			timing.accounts += time.Since(phase)
-			if err != nil {
-				logger.GetLogger().Println(err)
-			}
-
-			// The sync path used to store no EVM snapshots at all, which left a
-			// rewind with nothing to reload ("could not reload EVM state on
-			// reset") and a restart with only the genesis state. Mirror the live
-			// path: persist whenever this block changed contract state.
-			phase = time.Now()
-			if err := blocks.CommitEVMStateIfChanged(block.GetHeader().Height); err != nil {
-				logger.GetLogger().Println("cannot store EVM state", err)
-			}
-			timing.evm += time.Since(phase)
-
-			phase = time.Now()
-			err = account.StoreStakingAccounts(block.GetHeader().Height)
-			timing.staking += time.Since(phase)
-			if err != nil {
-				logger.GetLogger().Println(err)
-			}
+			// Accounts/staking/EVM snapshots are stored once per batch in the
+			// deferred store above - marshaling the full account history for
+			// every single block was where nearly all sync time went.
 			common.SetHeight(block.GetHeader().Height)
 			timing.applied++
 
@@ -835,7 +862,6 @@ func OnMessage(addr [4]byte, m []byte) {
 		if timing.applied > 0 {
 			sm := statistics.GetStatsManager()
 			sm.UpdateStatistics(timing.lastBlock, timing.lastParent)
-			logger.GetLogger().Println("sync batch timing:", timing.summary())
 		}
 
 		// Pipeline: a batch is otherwise requested only when the peer's next

@@ -154,8 +154,8 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 		"stakingDetails":  stakingDetails,
 		"escrowDelay":     acc.TransactionDelay,
 		"multiSignNumber": acc.MultiSignNumber,
-		"sentCount":       len(acc.TransactionsSender),
-		"receivedCount":   len(acc.TransactionsRecipient),
+		"sentCount":       acc.SentCount,
+		"receivedCount":   acc.ReceivedCount,
 		"transactions":    transactions,
 	})
 }
