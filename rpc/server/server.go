@@ -410,6 +410,11 @@ func handleDETS(line []byte, reply *[]byte) {
 		account.AccountsRWMutex.RLock()
 		acc := account.Accounts.AllAccounts[byt]
 		account.AccountsRWMutex.RUnlock()
+		// Same as handleACCT: the state no longer carries the history lists,
+		// so fill the transport slices from the DB index - the address-details
+		// views (webui explorer, tx history) are built from this reply.
+		acc.TransactionsSender = account.GetTxHistorySent(byt, 50)
+		acc.TransactionsRecipient = account.GetTxHistoryReceived(byt, 50)
 		am := acc.Marshal()
 		*reply = append([]byte("AC"), am...)
 		break
