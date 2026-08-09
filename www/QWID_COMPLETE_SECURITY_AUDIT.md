@@ -1,6 +1,8 @@
-# QWID Blockchain - Complete Security Audit Report
+# QWID Blockchain - Complete Internal Security Review
 
-**Audit Date:** May 17-18, 2026 &nbsp;·&nbsp; **Comprehensive re-audit & remediation:** through July 13, 2026  
+> **Scope and provenance.** This is an *internal* review, conducted by the QWID team with AI assistance. It is **not** a third-party audit and no external firm attests to it. It is published unedited so that readers can verify the findings against the source themselves. An external audit is planned before mainnet.
+
+**Review Date:** May 17-18, 2026 &nbsp;·&nbsp; **Comprehensive re-review & remediation:** through July 13, 2026  
 **Repository:** https://github.com/wonabru/qwid-node (branch: security-fixes)  
 **Status:** ✅ **MAINNET READY** — every enumerated Critical / High / Medium finding is fixed or a documented, deferred-by-design item; **0 open**.
 
@@ -72,7 +74,7 @@ func (bh *BaseHeader) Verify(pub *PubKey) error {
 
 **Key Features:**
 - ✅ Dual post-quantum cryptography (Falcon-512 + MAYO-5)
-- ✅ NIST-approved algorithms (L1 + L5)
+- ✅ Algorithms from the NIST PQC process at security levels 1 and 5 (Falcon-512 selected for standardisation as FN-DSA/FIPS 206, still draft; MAYO-5 a round-3 Additional Signatures candidate)
 - ✅ Proper signature validation before state changes
 - ✅ No signature malleability issues
 - ✅ Deterministic verification (no randomness exploits)
@@ -87,7 +89,7 @@ func (bh *BaseHeader) Verify(pub *PubKey) error {
 2. **MAYO-5** (NIST Level 5)
    - Multivariate polynomial system
    - Maximum security level
-   - Larger signatures (~838 bytes)
+   - Larger signatures (964 bytes)
    - Completely different math family than Falcon
    - Safety net if one breaks
 
@@ -123,7 +125,7 @@ func (bh *BaseHeader) Verify(pub *PubKey) error {
 **Design Insight:**
 The optional public key registration is elegant:
 - **First transaction:** Includes full public key (897 bytes Falcon or 5,554 bytes MAYO)
-- **Subsequent transactions:** Public key already registered, only signature required (~752-838 bytes)
+- **Subsequent transactions:** Public key already registered, only signature required (752 bytes Falcon or 964 bytes MAYO)
 - **Result:** Up to 5,000 TX/block with full quantum-resistant signatures
 
 **Verdict:** ✅ **EXCELLENT** - Efficient and secure
@@ -857,7 +859,7 @@ Example:
 
 | Practice | Status | Details |
 |----------|--------|---------|
-| **Cryptography** | ✅ | NIST-approved PQC, dual algorithm redundancy |
+| **Cryptography** | ✅ | NIST-process PQC across two mathematical families, dual algorithm redundancy |
 | **Consensus** | ✅ | Hybrid PoW/PoS/PoA with proper incentives |
 | **Validation** | ✅ | Multi-layer checks on all inputs |
 | **State Safety** | ✅ | Proper locking, no race conditions |
