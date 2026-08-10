@@ -31,7 +31,14 @@ func SaveVotesEncryption1(value []byte, height int64, delegatedAccount common.Ad
 		return err
 	}
 
-	if id >= 256 {
+	// Delegated accounts are 1..255. The lower bound matters as much as the
+	// upper one: GetIDFromDelegatedAccountAddress returns an int16, so the two
+	// leading address bytes from 0x8000 up arrive negative, sail past an
+	// `id >= 256` check and index uint8(id) — an arbitrary other account's
+	// slot. The network path rejects such ids earlier (IsTop128StakingNode
+	// bounds-checks), so this is the last line of defence rather than a live
+	// hole, and it has to hold on its own.
+	if id < 1 || id >= 256 {
 		return fmt.Errorf("delegated account is invalid: %d", id)
 	}
 	VotesEncryptionMutex.Lock()
@@ -62,7 +69,9 @@ func SaveVotesEncryption2(value []byte, height int64, delegatedAccount common.Ad
 		return err
 	}
 
-	if id >= 256 {
+	// See SaveVotesEncryption1: the lower bound rejects ids that wrapped
+	// negative through int16 and would otherwise index another account's slot.
+	if id < 1 || id >= 256 {
 		return fmt.Errorf("delegated account is invalid: %d", id)
 	}
 	VotesEncryptionMutex.Lock()
@@ -155,6 +164,17 @@ func VerifyEncryptionForPausing(height int64, totalStaked int64, primary bool) b
 		_, _, staked = GenerateEncryption2Data(height)
 	}
 
+	// An empty tally authorises nothing, and neither does an unmeasurable one.
+	// The ratio below cannot express either case: with totalStaked at zero it
+	// reads `0 < 0`, which is false, so a signature-scheme change was approved
+	// on zero votes; a non-positive total makes the threshold a fraction of
+	// nothing, which no tally should be able to clear.
+	if staked <= 0 || totalStaked <= 0 {
+		logger.GetLogger().Println("pausing not authorised - staked:", staked,
+			"total staked:", totalStaked)
+		return false
+	}
+
 	// 1/3 for pausing (use integer arithmetic to avoid float32 precision loss)
 	if staked*3 < totalStaked {
 		logger.GetLogger().Println("staked:", account.Int64toFloat64(staked), "total staked", account.Int64toFloat64(totalStaked))
@@ -171,6 +191,14 @@ func VerifyEncryptionForReplacing(height int64, totalStaked int64, primary bool)
 		_, _, staked = GenerateEncryption1Data(height)
 	} else {
 		_, _, staked = GenerateEncryption2Data(height)
+	}
+
+	// See VerifyEncryptionForPausing: neither an empty tally nor a non-positive
+	// total can authorise anything, and the ratio alone expresses neither.
+	if staked <= 0 || totalStaked <= 0 {
+		logger.GetLogger().Println("replacement not authorised - staked:", staked,
+			"total staked:", totalStaked)
+		return false
 	}
 
 	// 2/3 for replacing (use integer arithmetic to avoid float32 precision loss)

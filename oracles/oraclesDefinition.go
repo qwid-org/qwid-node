@@ -55,8 +55,10 @@ func SaveOracleProof(delegatedAccount common.Address, height int64, txBytes []by
 	oracleProofsRWMutex.Lock()
 	defer oracleProofsRWMutex.Unlock()
 
+	// See SaveRandOracle: the proof must back the submission that was actually
+	// retained, so it follows the same strictly-newer rule.
 	p, exists := oracleProofs[uint8(id)]
-	if !exists || p.height <= height {
+	if !exists || p.height < height {
 		cp := make([]byte, len(txBytes))
 		copy(cp, txBytes)
 		oracleProofs[uint8(id)] = oracleProof{height: height, txBytes: cp}
@@ -96,8 +98,10 @@ func SavePriceOracle(price int64, height int64, delegatedAccount common.Address,
 	PriceOraclesRWMutex.Lock()
 	defer PriceOraclesRWMutex.Unlock()
 
+	// See SaveRandOracle: first submission at a height wins, and all three
+	// oracle stores have to agree on which one that is.
 	po, exists := PriceOracles[uint8(id)]
-	if !exists || po.Height <= height {
+	if !exists || po.Height < height {
 		PriceOracles[uint8(id)] = PriceOracle{
 			Price:  price,
 			Height: height,
@@ -122,8 +126,18 @@ func SaveRandOracle(rand int64, height int64, delegatedAccount common.Address, s
 	RandOraclesRWMutex.Lock()
 	defer RandOraclesRWMutex.Unlock()
 
+	// Strictly newer only, as in the voting path under AC-M4. Accepting a
+	// resubmission at the same height let a delegated account replace its own
+	// randomness contribution after seeing what the others had sent — a
+	// grinding lever on top of the documented subset-grinding one.
+	//
+	// SavePriceOracle and SaveOracleProof must use the same rule: blocks.
+	// matchOracleData requires the (id, height, value) triple in the block to
+	// equal the one inside the signed proof, so a store that keeps the first
+	// submission while another keeps the second makes every block built from
+	// that state unverifiable.
 	po, exists := RandOracles[uint8(id)]
-	if !exists || po.Height <= height {
+	if !exists || po.Height < height {
 		RandOracles[uint8(id)] = RandOracle{
 			Rand:   rand,
 			Height: height,
