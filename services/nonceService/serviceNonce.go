@@ -12,6 +12,7 @@ import (
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
+	"github.com/qwid-org/qwid-node/oracles"
 	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/services"
 	"github.com/qwid-org/qwid-node/tcpip"
@@ -129,8 +130,15 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	optData := common.GetByteInt64(h)
 	optData = append(optData, lastBlockHash...)
 
-	//TODO Price oracle currently is random: 0.9 - 1.1 KURA/USD
-	priceOracle := cryptoRandIntn(10000000) - 5000000 + 100000000
+	// The real BTC/USD quote, taken from the cache the background price feed
+	// keeps warm (oracles.StartPriceFeed). This read never blocks and never
+	// fails: a node whose feed is down submits 0, which GeneratePriceData skips,
+	// so it drops out of the median instead of dragging it with a made-up
+	// number. Block production is unaffected either way.
+	priceOracle, ok := oracles.CurrentPrice()
+	if !ok {
+		priceOracle = 0
+	}
 	randOracle := cryptoRandInt63()
 	optData = append(optData, common.GetByteInt64(priceOracle)...)
 	optData = append(optData, common.GetByteInt64(randOracle)...)

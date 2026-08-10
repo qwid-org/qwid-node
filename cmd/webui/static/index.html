@@ -1095,7 +1095,10 @@ contract Coin {
                     document.getElementById('txPending').textContent = res.transactionsPending;
                     document.getElementById('difficulty').textContent = res.difficulty;
                     document.getElementById('tps').textContent = res.tps.toFixed(2);
-                    document.getElementById('priceOracle').textContent = res.priceOracle.toFixed(2) + ' QWD/USD';
+                    // No ticker while on testnet: QWD is not traded anywhere,
+                    // so the oracle carries a stand-in quote and calling it
+                    // QWD/USD would assert a market price that does not exist.
+                    document.getElementById('priceOracle').textContent = res.priceOracle.toFixed(2);
                     document.getElementById('randOracle').textContent = res.randOracle;
 
                     const syncIndicator = document.getElementById('syncIndicator');

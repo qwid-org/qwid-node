@@ -1535,7 +1535,7 @@ a.htrust-item:hover{color:var(--cyan)}
           <circle cx="12" cy="20" r="1.5" fill="var(--cyan)"/>
         </svg>
         <h3>PRICE &amp; RAND Oracles</h3>
-        <p>Two on-chain oracles included at the protocol layer. PRICE Oracle provides decentralized QWD/USD rates. RAND Oracle generates verifiable random numbers for DeFi and GameFi — both completely free.</p>
+        <p>Two on-chain oracles included at the protocol layer. PRICE Oracle provides decentralized USD price rates. RAND Oracle generates verifiable random numbers for DeFi and GameFi — both completely free.</p>
       </div>
 
       <!-- 7 Governance -->
@@ -1922,7 +1922,7 @@ a.htrust-item:hover{color:var(--cyan)}
             <a href="https://explorer.qwid.org" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Live ↗</a>
           </div>
           <div class="timeline-title">Phase 3 — DeFi Primitives</div>
-          <p class="timeline-desc">Protocol-level DEX with constant-product AMM. PRICE Oracle providing decentralized QWD/USD rates. RAND Oracle for verifiable on-chain randomness. Staking system with 256 delegated accounts and 128 active validators.</p>
+          <p class="timeline-desc">Protocol-level DEX with constant-product AMM. PRICE Oracle providing decentralized USD price rates. RAND Oracle for verifiable on-chain randomness. Staking system with 256 delegated accounts and 128 active validators.</p>
         </div>
 
         <div class="timeline-item done">
@@ -2019,7 +2019,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What is the QWID PRICE Oracle?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">The PRICE Oracle provides decentralized access to QWD token USD exchange rates within smart contracts. Network incentives encourage nodes to submit pricing data, with the median price determining the rate. Included per-block on the main chain at no charge.</div>
+          <div class="faq-a">The PRICE Oracle provides decentralized access to QWD token USD exchange rates within smart contracts. Network incentives encourage nodes to submit pricing data, and the rate is the median of what validators report, with the highest and lowest submissions discarded. Included per-block on the main chain at no charge.<br><br><strong>On the public testnet the figure is a stand-in, not a QWD price.</strong> QWD is not traded on any exchange yet, so there is no market rate to report; validators currently submit an external reference quote to exercise the mechanism end to end. The oracle carries a real QWD/USD rate once the token trades. The value shown in the wallet and the explorer is deliberately labelled without a ticker for that reason.</div>
         </div>
 
         <div class="faq-item">
