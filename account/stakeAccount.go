@@ -21,7 +21,7 @@ type StakingAccount struct {
 	// the first operator signal. It is consensus data used to resolve equal
 	// operator stakes according to the whitepaper's "fastest signal" rule.
 	OperationalSince int64                     `json:"operational_since,omitempty"`
-	LastStakeHeight  int64                     `json:last_stake_height,omitempty`
+	LastStakeHeight  int64                     `json:"last_stake_height,omitempty"`
 	StakingDetails   map[int64][]StakingDetail `json:"staking_details,omitempty"` // block number as key of map
 }
 
@@ -359,6 +359,10 @@ func (sa StakingAccount) Marshal() []byte {
 	}
 	// Appended for backward-compatible decoding of existing snapshots.
 	buffer.Write(common.GetByteInt64(sa.OperationalSince))
+	// LastStakeHeight gates the MinNumberOfBlocksInStake delay in Stake and
+	// Unstake, so it is consensus data and has to round-trip. Appended last,
+	// for the same backward-compatible reason as OperationalSince.
+	buffer.Write(common.GetByteInt64(sa.LastStakeHeight))
 
 	return buffer.Bytes()
 }
@@ -424,6 +428,9 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 	}
 	if buffer.Len() >= 8 {
 		sa.OperationalSince = common.GetInt64FromByte(buffer.Next(8))
+	}
+	if buffer.Len() >= 8 {
+		sa.LastStakeHeight = common.GetInt64FromByte(buffer.Next(8))
 	}
 	return nil
 }
