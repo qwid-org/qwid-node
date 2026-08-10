@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wonabru/qwid-node/cmd/webui/handlers"
-	"github.com/wonabru/qwid-node/common"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
-	"github.com/wonabru/qwid-node/statistics"
-	"github.com/wonabru/qwid-node/tcpip"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/cmd/webui/handlers"
+	"github.com/qwid-org/qwid-node/common"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 //go:embed static/*

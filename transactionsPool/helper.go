@@ -3,9 +3,9 @@ package transactionsPool
 import (
 	"fmt"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
 func RemoveBadTransactionByHash(hash []byte, height int64, tree *MerkleTree) error {

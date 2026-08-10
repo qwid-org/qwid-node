@@ -19,9 +19,9 @@ package vm
 import (
 	"errors"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/common/math"
-	"github.com/wonabru/qwid-node/params"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common/math"
+	"github.com/qwid-org/qwid-node/params"
 )
 
 func makeGasSStoreFunc(clearingRefund uint64) gasFunc {

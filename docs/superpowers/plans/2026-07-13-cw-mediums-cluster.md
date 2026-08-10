@@ -241,7 +241,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // TestGetMnemonicWordsRejectsOversizedKeyHonestly verifies CW-M2: a secret key

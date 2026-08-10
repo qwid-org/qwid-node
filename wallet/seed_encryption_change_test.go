@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // TestSchemeChangeIsReproducibleFromPhrase: when the chain votes in a new

@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func TestRPCSlotAcquireReleaseBounded(t *testing.T) {

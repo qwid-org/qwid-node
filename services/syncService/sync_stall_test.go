@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // resetProgress puts the stall tracker back to its zero value and restores the

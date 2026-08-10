@@ -8,12 +8,12 @@ import (
 	"math/rand"
 	"net/http"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
-	"github.com/wonabru/qwid-node/services/transactionServices"
-	"github.com/wonabru/qwid-node/statistics"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
+	"github.com/qwid-org/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
 func GetTokens(w http.ResponseWriter, r *http.Request) {

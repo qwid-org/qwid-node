@@ -20,7 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/wonabru/qwid-node/common/hexutil"
+	"github.com/qwid-org/qwid-node/common/hexutil"
 )
 
 type MyType [5]byte

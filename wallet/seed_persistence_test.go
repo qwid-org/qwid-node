@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // newSeedTestWallet builds a wallet whose files land in a throwaway directory.

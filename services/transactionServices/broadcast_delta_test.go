@@ -3,8 +3,8 @@ package transactionServices
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
 // mkTx builds a Transaction whose GetHash() returns a hash tagged by b.

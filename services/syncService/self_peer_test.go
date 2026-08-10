@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/tcpip"
 )
 
 // withMyIP pins tcpip.MyIP for the duration of a test, so "is this address ours"

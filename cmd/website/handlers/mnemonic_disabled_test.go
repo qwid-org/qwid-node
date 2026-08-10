@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 // TestGetMnemonicIsDisabledOverHTTP: this server is multi-user and

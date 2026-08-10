@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // TestRequestHeadersFromPeersAheadCountsLiveClaims: the counts this returns are

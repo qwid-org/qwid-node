@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
 	"golang.org/x/exp/rand"
 )
 

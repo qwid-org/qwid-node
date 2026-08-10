@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // TestNextBatchTarget: after applying a batch the node asks the serving peer

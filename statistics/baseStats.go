@@ -2,14 +2,14 @@ package statistics
 
 import (
 	"encoding/json"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/logger"
 	"sync"
 
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/transactionsPool"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 )
 
 // Stats represents the main statistics structure

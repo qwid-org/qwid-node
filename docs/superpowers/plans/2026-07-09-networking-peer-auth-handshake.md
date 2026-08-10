@@ -51,9 +51,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto/oqs"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 // newTestIdentity builds a real Falcon-512 identity for handshake tests.
@@ -182,8 +182,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 var handshakeDomainTag = []byte("QWID-P2P-HS-v1")

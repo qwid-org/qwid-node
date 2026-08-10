@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 type StakingAccount struct {

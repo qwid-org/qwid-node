@@ -9,8 +9,8 @@ import (
 	"sync"
 
 	"github.com/joho/godotenv"
-	"github.com/wonabru/qwid-node/crypto/oqs"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/logger"
 )
 
 var (

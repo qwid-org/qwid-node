@@ -3,7 +3,7 @@
 > **Scope and provenance.** This is an *internal* review, conducted by the QWID team with AI assistance. It is **not** a third-party audit and no external firm attests to it. It is published unedited so that readers can verify the findings against the source themselves. An external audit is planned before mainnet.
 
 **Review Date:** May 17-18, 2026 &nbsp;·&nbsp; **Comprehensive re-review & remediation:** through July 13, 2026  
-**Repository:** https://github.com/wonabru/qwid-node (branch: security-fixes)  
+**Repository:** https://github.com/qwid-org/qwid-node (branch: security-fixes)  
 **Status:** ✅ **MAINNET READY** — every enumerated Critical / High / Medium finding is fixed or a documented, deferred-by-design item; **0 open**.
 
 ---
@@ -959,6 +959,6 @@ The blockchain is production-ready for mainnet launch.
 ---
 
 **Audit completed:** May 18, 2026 12:00 GMT+2  
-**Repository:** https://github.com/wonabru/qwid-node  
+**Repository:** https://github.com/qwid-org/qwid-node  
 **Lead Auditor:** [AI Security Analysis]  
 **Classification:** Public (no sensitive vulnerabilities disclosed)

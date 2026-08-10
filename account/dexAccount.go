@@ -3,7 +3,7 @@ package account
 import (
 	"bytes"
 	"fmt"
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 type DexAccount struct {

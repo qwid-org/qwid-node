@@ -3,8 +3,8 @@ package pubkeys
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
 )
 
 func AddPubKeyToAddress(pk common.PubKey, mainAddress common.Address) error {

@@ -12,13 +12,13 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/logger"
 
 	"io"
 	"sync"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/sha3"
 )

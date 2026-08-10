@@ -20,9 +20,9 @@ import (
 	"sync/atomic"
 
 	"github.com/holiman/uint256"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/core/types"
-	"github.com/wonabru/qwid-node/params"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/core/types"
+	"github.com/qwid-org/qwid-node/params"
 	"golang.org/x/crypto/sha3"
 )
 

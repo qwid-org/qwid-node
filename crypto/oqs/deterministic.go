@@ -5,8 +5,8 @@ import (
 	"errors"
 	"io"
 
-	oqsrand "github.com/wonabru/qwid-node/crypto/oqs/rand"
-	"github.com/wonabru/qwid-node/logger"
+	oqsrand "github.com/qwid-org/qwid-node/crypto/oqs/rand"
+	"github.com/qwid-org/qwid-node/logger"
 	"golang.org/x/crypto/hkdf"
 )
 

@@ -3,8 +3,8 @@ package serverrpc
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
 	"github.com/stretchr/testify/assert"
 )
 

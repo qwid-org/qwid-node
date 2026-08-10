@@ -1,8 +1,8 @@
 package clientrpc
 
 import (
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/tcpip"
 	"net/rpc"
 	"strconv"
 	"sync"

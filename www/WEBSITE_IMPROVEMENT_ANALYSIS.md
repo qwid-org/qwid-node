@@ -569,7 +569,7 @@ QUANTUM TIMELINE
   "url": "https://qwid.org",
   "logo": "https://qwid.org/logo.png",
   "sameAs": [
-    "https://github.com/wonabru/qwid-node",
+    "https://github.com/qwid-org/qwid-node",
     "https://twitter.com/QWID_org"
   ]
 }
@@ -974,7 +974,7 @@ For `/tmp/qwid-node/www/index.html`:
     </div>
     <div class="badge">
       <span>✓</span> Open Source
-      <a href="https://github.com/wonabru/qwid-node">GitHub</a>
+      <a href="https://github.com/qwid-org/qwid-node">GitHub</a>
     </div>
   </div>
 </section>

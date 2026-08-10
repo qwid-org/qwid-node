@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // withClaims installs a fresh peerHeightClaims map for the duration of fn.

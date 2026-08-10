@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/pubkeys"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/pubkeys"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 var cancelTransactionPrefix = []byte("QWID_CANCEL_V1")

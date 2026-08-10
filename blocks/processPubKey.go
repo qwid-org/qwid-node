@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/pubkeys"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/pubkeys"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 func StoreAddress(mainAddress common.Address, pk common.PubKey) error {

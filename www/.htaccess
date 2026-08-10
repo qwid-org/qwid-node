@@ -6,8 +6,18 @@
 # The rules below map every known legacy path onto the section of the new page
 # that replaced it.
 #
-# Requires: mod_rewrite, mod_headers. The vhost must allow this file to take
-# effect:
+# REQUIRES mod_rewrite AND mod_headers:
+#
+#     sudo a2enmod rewrite headers && sudo systemctl reload apache2
+#
+# Both are hard requirements, not optional. If mod_headers is missing, the
+# Header directives at the bottom of this file are an unknown command and
+# Apache answers EVERY request with 500 — the whole site, not just the cache
+# headers. That is not hypothetical; it happened on first deploy. The usual
+# guard against it, <IfModule mod_headers.c>, is rejected inside .htaccess
+# unless AllowOverride is All, so verify the modules instead.
+#
+# The vhost must also allow this file to take effect:
 #
 #   <Directory /var/www/qwid.org>
 #       AllowOverride FileInfo Options Indexes Limit

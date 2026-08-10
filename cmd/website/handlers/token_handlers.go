@@ -12,12 +12,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
-	"github.com/wonabru/qwid-node/services/transactionServices"
-	"github.com/wonabru/qwid-node/statistics"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
+	"github.com/qwid-org/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
 var validTokenName = regexp.MustCompile(`^[a-zA-Z0-9 _-]{1,32}$`)

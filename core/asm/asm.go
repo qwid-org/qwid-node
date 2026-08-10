@@ -21,7 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/wonabru/qwid-node/core/evm"
+	"github.com/qwid-org/qwid-node/core/evm"
 )
 
 // Iterator for disassembled EVM instructions
