@@ -1,11 +1,14 @@
 package stateDB
 
 import (
+	"math"
+	"math/big"
+
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/core/types"
 	"github.com/wonabru/qwid-node/crypto"
-	"math/big"
+	"github.com/wonabru/qwid-node/logger"
 )
 
 type TokenInfo struct {
@@ -24,9 +27,24 @@ type StateAccount struct {
 	Balances            map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64 `json:"balances"`
 	Tokens              map[[common.AddressLength]byte]TokenInfo                            `json:"tokens"`
 	SnapShotNum         int                                                                 `json:"snapShotNum"`
-	SnapShotPreimage    map[int]map[[common.AddressLength]byte]common.Hash                  `json:"snapShotPreimage"`
-	HeightToSnapShotNum map[int64]int                                                       `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
-	ContractsByHeight   map[int64][][common.AddressLength]byte                              `json:"contractsByHeight"`
+	journal             []changeEntry
+	logs                []*types.Log                                        // transient
+	suicided            map[[common.AddressLength]byte]bool                 // transient
+	accessAddrs         map[[common.AddressLength]byte]bool                 // transient, EIP-2929 warm addresses
+	accessSlots         map[[common.AddressLength]byte]map[common.Hash]bool // transient, EIP-2929 warm slots
+	refund              uint64                                              // transient
+	HeightToSnapShotNum map[int64]int                                       `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
+	ContractsByHeight   map[int64][][common.AddressLength]byte              `json:"contractsByHeight"`
+	// changedSinceStore is true when the persistable EVM state may have changed
+	// since the last successful Store/Load. It drives the store-on-change
+	// persistence model: a full state snapshot is written only for blocks that
+	// actually executed a contract/DEX/token transaction, so disk usage grows
+	// with contract activity instead of chain length. The invariant that makes
+	// the closest-at-or-below snapshot lookup exact is: every height at which
+	// the state changed has its own snapshot. Marking is conservative — a mark
+	// without a real change costs one redundant snapshot; a change without a
+	// mark corrupts every later rewind, so when in doubt, mark.
+	changedSinceStore bool // transient, guarded by blocks.StateMutex like the rest
 }
 
 func CreateStateDB() StateAccount {
@@ -40,10 +58,25 @@ func CreateStateDB() StateAccount {
 	sa.Balances = map[[common.AddressLength]byte]map[[common.AddressLength]byte]int64{}
 	sa.Tokens = map[[common.AddressLength]byte]TokenInfo{}
 	sa.SnapShotNum = 0
-	sa.SnapShotPreimage = map[int]map[[common.AddressLength]byte]common.Hash{}
+	sa.journal = nil
+	sa.suicided = map[[common.AddressLength]byte]bool{}
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
 	sa.HeightToSnapShotNum = map[int64]int{}
 	sa.ContractsByHeight = map[int64][][common.AddressLength]byte{}
 	return sa
+}
+
+// MarkChanged records that the persistable EVM state may differ from the last
+// stored snapshot. Store and Load clear it on success.
+func (sa *StateAccount) MarkChanged() {
+	sa.changedSinceStore = true
+}
+
+// ChangedSinceStore reports whether the state may differ from the last
+// successful Store/Load.
+func (sa *StateAccount) ChangedSinceStore() bool {
+	return sa.changedSinceStore
 }
 
 func (sa *StateAccount) SetSnapShotNum(height int64, snapNum int) {
@@ -100,14 +133,62 @@ func (sa *StateAccount) RegisterNewToken(a common.Address, name string, symbol s
 	(*sa).Tokens[a.ByteValue] = ti
 }
 
-func (sa *StateAccount) SubBalance(common.Address, *big.Int) {
-
+// bigToBaseUnits converts an EVM *big.Int amount (base units, 1:1 with native
+// QWD) to int64. ok is false when the amount is outside int64 range; callers
+// saturate rather than wrap (unreachable with valid balances).
+func bigToBaseUnits(amount *big.Int) (v int64, ok bool) {
+	if amount == nil {
+		return 0, true
+	}
+	if !amount.IsInt64() {
+		return 0, false
+	}
+	return amount.Int64(), true
 }
-func (sa *StateAccount) AddBalance(common.Address, *big.Int) {
 
+func (sa *StateAccount) AddBalance(a common.Address, amount *big.Int) {
+	amt, ok := bigToBaseUnits(amount)
+	if !ok {
+		logger.GetLogger().Println("EVM AddBalance: amount exceeds int64 range, saturating", a.GetHex())
+		amt = math.MaxInt64
+	}
+	prev := account.GetBalance(a.ByteValue)
+	next := prev + amt
+	if next < prev { // int64 overflow => saturate
+		next = math.MaxInt64
+	}
+	if next == prev {
+		return
+	}
+	sa.journal = append(sa.journal, balanceChange{addr: a.ByteValue, prev: prev})
+	sa.SnapShotNum = len(sa.journal)
+	account.SetBalance(a.ByteValue, next)
 }
-func (sa *StateAccount) GetBalance(common.Address) *big.Int {
-	return new(big.Int).SetInt64(0)
+
+func (sa *StateAccount) SubBalance(a common.Address, amount *big.Int) {
+	amt, ok := bigToBaseUnits(amount)
+	if !ok {
+		logger.GetLogger().Println("EVM SubBalance: amount exceeds int64 range, saturating", a.GetHex())
+		amt = math.MaxInt64
+	}
+	prev := account.GetBalance(a.ByteValue)
+	// amt is non-negative (EVM balances are uint256-derived) and both operands
+	// are in [0, MaxInt64], so prev-amt cannot int64-underflow; a negative
+	// result just means "insufficient balance" => floor at 0 (a native balance
+	// must never go negative).
+	next := prev - amt
+	if next < 0 {
+		next = 0
+	}
+	if next == prev {
+		return
+	}
+	sa.journal = append(sa.journal, balanceChange{addr: a.ByteValue, prev: prev})
+	sa.SnapShotNum = len(sa.journal)
+	account.SetBalance(a.ByteValue, next)
+}
+func (sa *StateAccount) GetBalance(a common.Address) *big.Int {
+	return new(big.Int).SetInt64(account.GetBalance(a.ByteValue))
 }
 
 func (sa *StateAccount) GetNonce(a common.Address) uint64 {
@@ -134,14 +215,18 @@ func (sa *StateAccount) GetCodeSize(a common.Address) int {
 	return len(sa.Codes[a.ByteValue])
 }
 
-func (sa *StateAccount) AddRefund(uint64) {
-
+func (sa *StateAccount) AddRefund(gas uint64) {
+	sa.refund += gas
 }
-func (sa *StateAccount) SubRefund(uint64) {
-
+func (sa *StateAccount) SubRefund(gas uint64) {
+	if gas > sa.refund {
+		sa.refund = 0 // clamp; refund is not applied to the fee this phase (DB-C4 accounting-only)
+		return
+	}
+	sa.refund -= gas
 }
 func (sa *StateAccount) GetRefund() uint64 {
-	return 0
+	return sa.refund
 }
 
 func (sa *StateAccount) GetCommittedState(a common.Address, h common.Hash) common.Hash {
@@ -159,24 +244,34 @@ func (sa *StateAccount) GetState(a common.Address, h common.Hash) common.Hash {
 	return common.Hash{}
 }
 func (sa *StateAccount) SetState(a common.Address, h common.Hash, h2 common.Hash) {
-	(*sa).SnapShotNum++
-
-	_, ok := (*sa).StatesHashes[a.ByteValue]
-	if ok {
-		(*sa).SnapShotPreimage[(*sa).SnapShotNum] = map[[common.AddressLength]byte]common.Hash{a.ByteValue: (*sa).StatesHashes[a.ByteValue][h]}
-		(*sa).StatesHashes[a.ByteValue][h] = h2
-		return
+	m, ok := sa.StatesHashes[a.ByteValue]
+	if !ok {
+		m = map[common.Hash]common.Hash{}
+		sa.StatesHashes[a.ByteValue] = m
 	}
-	(*sa).SnapShotPreimage[(*sa).SnapShotNum] = map[[common.AddressLength]byte]common.Hash{a.ByteValue: common.EmptyHash()}
-	(*sa).StatesHashes[a.ByteValue] = map[common.Hash]common.Hash{}
-	(*sa).StatesHashes[a.ByteValue][h] = h2
+	prev, existed := m[h]
+	sa.journal = append(sa.journal, slotChange{addr: a.ByteValue, key: h, prev: prev, existed: existed})
+	sa.SnapShotNum = len(sa.journal)
+	m[h] = h2
 }
 
-func (sa *StateAccount) Suicide(common.Address) bool {
-	return false
+func (sa *StateAccount) Suicide(a common.Address) bool {
+	if _, ok := sa.Accounts[a.ByteValue]; !ok {
+		return false
+	}
+	if sa.suicided == nil {
+		sa.suicided = map[[common.AddressLength]byte]bool{}
+	}
+	if !sa.suicided[a.ByteValue] {
+		sa.journal = append(sa.journal, suicideChange{addr: a.ByteValue})
+		sa.SnapShotNum = len(sa.journal)
+		sa.suicided[a.ByteValue] = true
+	}
+	return true
 }
-func (sa *StateAccount) HasSuicided(common.Address) bool {
-	return false
+
+func (sa *StateAccount) HasSuicided(a common.Address) bool {
+	return sa.suicided[a.ByteValue]
 }
 
 // Exist reports whether the given account exists in state.
@@ -186,53 +281,140 @@ func (sa *StateAccount) Exist(a common.Address) bool {
 	return ok
 }
 
-// Empty returns whether the given account is empty. Empty
-// is defined according to EIP161 (balance = nonce = code = 0).
+// Empty returns whether the given account is empty per EIP-161
+// (nonce == 0 && code == 0 && balance == 0).
 func (sa *StateAccount) Empty(a common.Address) bool {
-	return sa.Nonces[a.ByteValue] == 0 && len(sa.Codes[a.ByteValue]) == 0
+	return sa.Nonces[a.ByteValue] == 0 && len(sa.Codes[a.ByteValue]) == 0 &&
+		sa.GetBalance(a).Sign() == 0
 }
 
+// PrepareAccessList resets the warm address/slot sets for a new transaction
+// and pre-warms the sender, destination, precompiles, and the tx's EIP-2930
+// access list, per EIP-2929/2930. This bypasses the journal since it only
+// happens at the start of a transaction, before any snapshot can be taken.
 func (sa *StateAccount) PrepareAccessList(sender common.Address, dest *common.Address, precompiles []common.Address, txAccesses types.AccessList) {
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+	sa.addAddrNoJournal(sender)
+	if dest != nil {
+		sa.addAddrNoJournal(*dest)
+	}
+	for _, p := range precompiles {
+		sa.addAddrNoJournal(p)
+	}
+	for _, tuple := range txAccesses {
+		sa.addAddrNoJournal(tuple.Address)
+		for _, h := range tuple.StorageKeys {
+			sa.addSlotNoJournal(tuple.Address, h)
+		}
+	}
+}
 
+func (sa *StateAccount) addAddrNoJournal(a common.Address) {
+	sa.accessAddrs[a.ByteValue] = true
 }
+
+func (sa *StateAccount) addSlotNoJournal(a common.Address, slot common.Hash) {
+	m, ok := sa.accessSlots[a.ByteValue]
+	if !ok {
+		m = map[common.Hash]bool{}
+		sa.accessSlots[a.ByteValue] = m
+	}
+	m[slot] = true
+}
+
 func (sa *StateAccount) AddressInAccessList(addr common.Address) bool {
-	return true
+	return sa.accessAddrs[addr.ByteValue]
 }
+
 func (sa *StateAccount) SlotInAccessList(addr common.Address, slot common.Hash) (addressOk bool, slotOk bool) {
-	return true, true
+	addressOk = sa.accessAddrs[addr.ByteValue]
+	if m, ok := sa.accessSlots[addr.ByteValue]; ok {
+		slotOk = m[slot]
+	}
+	return addressOk, slotOk
 }
 
 // AddAddressToAccessList adds the given address to the access list. This operation is safe to perform
 // even if the feature/fork is not active yet
 func (sa *StateAccount) AddAddressToAccessList(addr common.Address) {
-
+	if sa.accessAddrs == nil {
+		sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	}
+	if !sa.accessAddrs[addr.ByteValue] {
+		sa.journal = append(sa.journal, accessAddrChange{addr: addr.ByteValue})
+		sa.SnapShotNum = len(sa.journal)
+		sa.accessAddrs[addr.ByteValue] = true
+	}
 }
 
 // AddSlotToAccessList adds the given (address,slot) to the access list. This operation is safe to perform
 // even if the feature/fork is not active yet
 func (sa *StateAccount) AddSlotToAccessList(addr common.Address, slot common.Hash) {
-
+	sa.AddAddressToAccessList(addr)
+	if sa.accessSlots == nil {
+		sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+	}
+	m, ok := sa.accessSlots[addr.ByteValue]
+	if !ok || !m[slot] {
+		sa.journal = append(sa.journal, accessSlotChange{addr: addr.ByteValue, slot: slot})
+		sa.SnapShotNum = len(sa.journal)
+		sa.addSlotNoJournal(addr, slot)
+	}
 }
 
 func (sa *StateAccount) RevertToSnapshot(sn int) {
-	for s := sn + 1; s <= sa.SnapShotNum; s++ {
-		for a, h := range sa.SnapShotPreimage[s] {
-			if sa.SnapShotPreimage[s][a] == common.EmptyHash() {
-				delete((*sa).StatesHashes[a], h)
-				continue
-			}
-			(*sa).StatesHashes[a][h] = sa.SnapShotPreimage[s][a]
-		}
+	if sn < 0 {
+		sn = 0
 	}
-	(*sa).SnapShotNum = sn
+	if sn > len(sa.journal) {
+		sn = len(sa.journal)
+	}
+	for i := len(sa.journal) - 1; i >= sn; i-- {
+		sa.journal[i].revert(sa)
+	}
+	sa.journal = sa.journal[:sn]
+	sa.SnapShotNum = sn
 }
 
 func (sa *StateAccount) Snapshot() int {
-	return sa.SnapShotNum
+	return len(sa.journal)
 }
 
-func (sa *StateAccount) AddLog(*types.Log) {
+func (sa *StateAccount) AddLog(l *types.Log) {
+	sa.journal = append(sa.journal, logChange{})
+	sa.SnapShotNum = len(sa.journal)
+	sa.logs = append(sa.logs, l)
+}
 
+// GetLogs returns the logs accumulated during the current execution.
+func (sa *StateAccount) GetLogs() []*types.Log { return sa.logs }
+
+// ClearLogs resets the per-execution log buffer (call before running a tx).
+func (sa *StateAccount) ClearLogs() { sa.logs = nil }
+
+// ClearSuicided resets the per-execution suicide set (call before running a tx).
+func (sa *StateAccount) ClearSuicided() { sa.suicided = map[[common.AddressLength]byte]bool{} }
+
+// ClearAccessList resets the per-execution EIP-2929 warm address/slot sets
+// (call before running a tx).
+func (sa *StateAccount) ClearAccessList() {
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+}
+
+// ResetTransient clears all per-transaction execution state (journal, snapshot
+// counter, logs, suicides, access list). Call it before each top-level VM
+// invocation so transient state never leaks across transactions on the shared
+// singleton StateAccount.
+func (sa *StateAccount) ResetTransient() {
+	sa.journal = nil
+	sa.SnapShotNum = 0
+	sa.logs = nil
+	sa.suicided = map[[common.AddressLength]byte]bool{}
+	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
+	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
+	sa.refund = 0
 }
 func (sa *StateAccount) AddPreimage(h common.Hash, b []byte) {
 	(*sa).States[h] = b
@@ -266,12 +448,9 @@ func (sa *StateAccount) ForEachStorage(a common.Address, cb func(key common.Hash
 	if !ok {
 		return nil
 	}
-	for h, _ := range shs {
-		if value, dirty := shs[h]; dirty {
-			if !cb(h, value) {
-				return nil
-			}
-			continue
+	for h, value := range shs {
+		if !cb(h, value) {
+			return nil
 		}
 	}
 

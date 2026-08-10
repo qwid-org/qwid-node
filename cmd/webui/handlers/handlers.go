@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/blocks"
@@ -43,6 +45,12 @@ type StatsResponse struct {
 	RandOracle          int64   `json:"randOracle"`
 	NodeIP              string  `json:"nodeIP"`
 	DelegatedAccount    int     `json:"delegatedAccount"`
+	// Sync progress: how many blocks remain to the network height, the import
+	// rate over the last two minutes, and the estimated seconds until synced
+	// (-1 when no honest estimate exists - fresh window, stall or rewind).
+	SyncRemaining    int64   `json:"syncRemaining"`
+	SyncBlocksPerSec float64 `json:"syncBlocksPerSec"`
+	SyncEtaSeconds   int64   `json:"syncEtaSeconds"`
 }
 
 type AccountResponse struct {
@@ -86,8 +94,7 @@ func walletReady() bool {
 }
 
 func GetStats(w http.ResponseWriter, r *http.Request) {
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -100,6 +107,12 @@ func GetStats(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Failed to unmarshal stats", http.StatusInternalServerError)
 		return
 	}
+
+	remaining := st.HeightMax - st.Height
+	if remaining < 0 {
+		remaining = 0
+	}
+	rate, eta := syncEta.observe(time.Now(), st.Height, remaining)
 
 	resp := StatsResponse{
 		Height:              st.Height,
@@ -114,6 +127,9 @@ func GetStats(w http.ResponseWriter, r *http.Request) {
 		RandOracle:          st.RandOracle,
 		NodeIP:              NodeIP,
 		DelegatedAccount:    DelegatedAccount,
+		SyncRemaining:       remaining,
+		SyncBlocksPerSec:    rate,
+		SyncEtaSeconds:      eta,
 	}
 	jsonResponse(w, resp)
 }
@@ -168,6 +184,7 @@ func LoadWallet(w http.ResponseWriter, r *http.Request) {
 
 	MainWallet = loadedWallet
 	TestAndSetEncryption()
+	startSession(w) // WH-C3: authenticate this browser session
 
 	warnings := []string{}
 	if MainWallet.GetSigName(true) != common.SigName() {
@@ -249,7 +266,7 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 		copy(wl.Account2.EncryptedSecretKey, acc.EncryptedSecretKey)
 	}
 
-	err = os.MkdirAll(wl.HomePath, 0755)
+	err = os.MkdirAll(wl.HomePath, 0700) // CW-H3: owner-only; matches StoreJSON's 0700 (MkdirAll won't chmod an existing dir)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("Failed to create wallet directory: %v", err), http.StatusInternalServerError)
 		return
@@ -263,10 +280,23 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 
 	MainWallet = &wl
 	TestAndSetEncryption()
+	startSession(w) // WH-C3: authenticate this browser session
 
+	// Be explicit that this wallet has NO recovery phrase. The phrase must never
+	// cross HTTP (design decision 3), so a wallet created here is generated with
+	// random keys and its encrypted file is the ONLY thing that can ever restore
+	// it. Saying nothing would leave the user with the impression the README
+	// gives for the CLI/GUI flows — that they hold a 24-word backup — which they
+	// do not.
 	jsonResponse(w, map[string]interface{}{
-		"success": true,
-		"address": wl.MainAddress.GetHex(),
+		"success":  true,
+		"address":  wl.MainAddress.GetHex(),
+		"mnemonic": false,
+		"warning": "This wallet has NO 24-word recovery phrase. The recovery phrase is never sent over HTTP, " +
+			"so wallets created in the Web UI cannot have one. Back up the encrypted wallet file " +
+			"(" + filepath.Join(wl.HomePath, "wallet"+strconv.Itoa(int(wl.WalletNumber))+".json") + ") " +
+			"together with its password — it is the only way to restore this wallet. " +
+			"For a wallet backed by a recovery phrase, create it with `go run cmd/generateNewWallet/main.go` or the Qt GUI.",
 	})
 }
 
@@ -303,29 +333,14 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"success": "Password changed"})
 }
 
+// GetMnemonic is permanently disabled. The recovery phrase derives every key of
+// the wallet, so it must never cross the network: even on localhost it would end
+// up in browser history, caches and any proxy in between. Use the CLI
+// (cmd/generateNewWallet) or the Qt GUI, which keep it on the machine.
+// The route stays registered so clients get this explanation instead of a 404.
 func GetMnemonic(w http.ResponseWriter, r *http.Request) {
-	if !walletReady() {
-		jsonError(w, "Load wallet first", http.StatusBadRequest)
-		return
-	}
-
-	mnemonic1, err1 := MainWallet.GetMnemonicWords(true)
-	mnemonic2, err2 := MainWallet.GetMnemonicWords(false)
-
-	resp := map[string]interface{}{
-		"primaryMnemonic":   mnemonic1,
-		"primaryError":      "",
-		"secondaryMnemonic": mnemonic2,
-		"secondaryError":    "",
-	}
-	if err1 != nil {
-		resp["primaryError"] = err1.Error()
-	}
-	if err2 != nil {
-		resp["secondaryError"] = err2.Error()
-	}
-
-	jsonResponse(w, resp)
+	jsonError(w, "The recovery phrase is available only locally, in the CLI wallet generator "+
+		"or the Qt GUI. It is never served over HTTP.", http.StatusForbidden)
 }
 
 func GetAccount(w http.ResponseWriter, r *http.Request) {
@@ -335,8 +350,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inb := append([]byte("ACCT"), MainWallet.MainAddress.GetBytes()...)
-	clientrpc.InRPC <- SignMessage(inb)
-	re := <-clientrpc.OutRPC
+	re := clientrpc.Call(SignMessage(inb))
 	if bytes.Equal(re, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -354,36 +368,42 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	locks := 0.0
 	stakingDetails := []StakingDetail{}
 
-	for i := 1; i < 5; i++ {
-		inb = append([]byte("STAK"), MainWallet.MainAddress.GetBytes()...)
-		inb = append(inb, byte(i))
-		clientrpc.InRPC <- SignMessage(inb)
-		re = <-clientrpc.OutRPC
-		if bytes.Equal(re, []byte("Timeout")) {
-			continue
-		}
+	// One ACCS call returns the stake across all delegated accounts at once.
+	inb = append([]byte("ACCS"), MainWallet.MainAddress.GetBytes()...)
+	re = clientrpc.Call(SignMessage(inb))
+	if !bytes.Equal(re, []byte("Timeout")) && len(re) >= 4 {
+		count := int(common.GetInt32FromByte(re[:4]))
+		b := re[4:]
+		for j := 0; j < count; j++ {
+			blob, rest, err := common.BytesWithLenToBytes(b)
+			if err != nil {
+				break
+			}
+			b = rest
+			if len(blob) < 8 {
+				continue
+			}
+			var stakeAcc account.StakingAccount
+			if err := stakeAcc.Unmarshal(blob[:len(blob)-8]); err != nil {
+				continue
+			}
+			stakedAmount := account.Int64toFloat64(stakeAcc.StakedBalance)
+			rewardsAmount := account.Int64toFloat64(stakeAcc.StakingRewards)
+			lockedAmount := account.Int64toFloat64(common.GetInt64FromByte(blob[len(blob)-8:]))
 
-		var stakeAcc account.StakingAccount
-		if err := stakeAcc.Unmarshal(re[:len(re)-8]); err != nil {
-			continue
-		}
+			stake += stakedAmount
+			rewards += rewardsAmount
+			locks += lockedAmount
 
-		stakedAmount := account.Int64toFloat64(stakeAcc.StakedBalance)
-		rewardsAmount := account.Int64toFloat64(stakeAcc.StakingRewards)
-		lockedAmount := account.Int64toFloat64(common.GetInt64FromByte(re[len(re)-8:]))
-
-		stake += stakedAmount
-		rewards += rewardsAmount
-		locks += lockedAmount
-
-		if stakeAcc.StakedBalance > 0 || stakeAcc.StakingRewards > 0 {
-			a := common.Address{}
-			a.Init(stakeAcc.DelegatedAccount[:])
-			stakingDetails = append(stakingDetails, StakingDetail{
-				DelegatedAddress: a.GetHex(),
-				Staked:           stakedAmount,
-				Rewards:          rewardsAmount,
-			})
+			if stakeAcc.StakedBalance > 0 || stakeAcc.StakingRewards > 0 {
+				a := common.Address{}
+				a.Init(stakeAcc.DelegatedAccount[:])
+				stakingDetails = append(stakingDetails, StakingDetail{
+					DelegatedAddress: a.GetHex(),
+					Staked:           stakedAmount,
+					Rewards:          rewardsAmount,
+				})
+			}
 		}
 	}
 
@@ -397,8 +417,8 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 		StakingDetails:  stakingDetails,
 		EscrowDelay:     acc.TransactionDelay,
 		MultiSignNumber: acc.MultiSignNumber,
-		SentCount:       len(acc.TransactionsSender),
-		ReceivedCount:   len(acc.TransactionsRecipient),
+		SentCount:       int(acc.SentCount),
+		ReceivedCount:   int(acc.ReceivedCount),
 	}
 	jsonResponse(w, resp)
 }
@@ -465,7 +485,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Amount cannot be negative", http.StatusBadRequest)
 		return
 	}
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	if req.LockedAmount < 0 {
 		jsonError(w, "Locked amount cannot be negative", http.StatusBadRequest)
@@ -475,7 +495,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Locked amount cannot be larger than amount", http.StatusBadRequest)
 		return
 	}
-	lam := int64(req.LockedAmount * 1e8)
+	lam := common.CoinToBaseUnits(req.LockedAmount)
 
 	if req.ReleasePerBlock < 0 {
 		jsonError(w, "Release per block cannot be negative", http.StatusBadRequest)
@@ -485,7 +505,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Release per block cannot be larger than locked amount", http.StatusBadRequest)
 		return
 	}
-	rlam := int64(req.ReleasePerBlock * 1e8)
+	rlam := common.CoinToBaseUnits(req.ReleasePerBlock)
 
 	// Parse delegated account for locking
 	lar := common.Address{}
@@ -562,7 +582,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 	if req.MultiSigTxHash != "" {
 		par.MultiSignTx = hashms
@@ -579,8 +599,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height from stats
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
 	st := sm.Stats
 	if err := common.Unmarshal(reply, common.StatDBPrefix, &st); err != nil {
@@ -608,8 +627,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -638,16 +656,61 @@ func CancelTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm, err := hex.DecodeString(req.TxHash)
-	if err != nil {
+	if err != nil || len(tmm) != common.HashLength {
 		jsonError(w, "Invalid transaction hash", http.StatusBadRequest)
 		return
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("CNCL"), tmm...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("CNCL"), tmm...)))
+	if string(reply) != "escrow cancellation transaction required" {
+		jsonResponse(w, map[string]string{"message": string(reply)})
+		return
+	}
+
+	var target common.Hash
+	target.Set(tmm)
+	tx := transactionsDefinition.Transaction{
+		TxData: transactionsDefinition.TxData{
+			Recipient: MainWallet.MainAddress,
+			Amount:    0,
+			OptData:   transactionsDefinition.CancellationOptData(target),
+		},
+		TxParam: transactionsDefinition.TxParam{
+			ChainID:     int16(23),
+			Sender:      MainWallet.MainAddress,
+			SendingTime: common.GetCurrentTimeStampInSecond(),
+			Nonce:       common.RandomNonce(),
+		},
+		GasPrice: int64(rand.Intn(0x0000000f)) + 1,
+	}
+	statsReply := clientrpc.Call(SignMessage([]byte("STAT")))
+	stats := statistics.GetStatsManager().Stats
+	if err := common.Unmarshal(statsReply, common.StatDBPrefix, &stats); err != nil {
+		jsonError(w, "Failed to get network stats", http.StatusInternalServerError)
+		return
+	}
+	tx.Height = stats.Height
+	tx.GasUsage = tx.GasUsageEstimate()
+	if err := tx.CalcHashAndSet(); err != nil {
+		jsonError(w, fmt.Sprintf("Failed to calculate cancellation hash: %v", err), http.StatusInternalServerError)
+		return
+	}
+	primary := !common.IsPaused()
+	if err := tx.Sign(MainWallet, primary); err != nil {
+		jsonError(w, fmt.Sprintf("Failed to sign cancellation: %v", err), http.StatusInternalServerError)
+		return
+	}
+	msg, err := transactionServices.GenerateTransactionMsg([]transactionsDefinition.Transaction{tx}, []byte("tx"), [2]byte{'T', 'T'})
+	if err != nil {
+		jsonError(w, fmt.Sprintf("Failed to generate cancellation message: %v", err), http.StatusInternalServerError)
+		return
+	}
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
 
 	jsonResponse(w, map[string]string{
-		"message": string(reply),
+		"success": "true",
+		"txHash":  tx.Hash.GetHex(),
+		"message": "Escrow cancellation transaction sent",
 	})
 }
 
@@ -720,7 +783,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	// Check minimum staking
 	if req.Action == "stake" && am < common.MinStakingUser {
@@ -791,7 +854,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -805,8 +868,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
 	st := sm.Stats
 	if err := common.Unmarshal(reply, common.StatDBPrefix, &st); err != nil {
@@ -834,8 +896,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -846,8 +907,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 
 func GetPendingTransactions(w http.ResponseWriter, r *http.Request) {
 	// Get pending transactions from pool
-	clientrpc.InRPC <- SignMessage([]byte("PEND"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("PEND")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -885,8 +945,7 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 
 	// Get account to fetch transaction hashes
 	inb := append([]byte("ACCT"), MainWallet.MainAddress.GetBytes()...)
-	clientrpc.InRPC <- SignMessage(inb)
-	re := <-clientrpc.OutRPC
+	re := clientrpc.Call(SignMessage(inb))
 	if bytes.Equal(re, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -907,8 +966,7 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := len(sentHashes) - 1; i >= 0; i-- {
 		h := sentHashes[i]
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 		if len(reply) > 3 && string(reply[:2]) == "TX" {
 			locLen := int(reply[2])
 			if len(reply) > 3+locLen {
@@ -935,8 +993,7 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := len(recvHashes) - 1; i >= 0; i-- {
 		h := recvHashes[i]
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 		if len(reply) > 3 && string(reply[:2]) == "TX" {
 			locLen := int(reply[2])
 			if len(reply) > 3+locLen {
@@ -986,8 +1043,7 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 	if len(reply) <= 2 {
 		jsonError(w, "Not found", http.StatusNotFound)
 		return
@@ -1034,8 +1090,7 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 		}
 		for i := len(sentHashes) - 1; i >= 0; i-- {
 			h := sentHashes[i]
-			clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-			txReply := <-clientrpc.OutRPC
+			txReply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 			if len(txReply) > 3 && string(txReply[:2]) == "TX" {
 				locLen := int(txReply[2])
 				if len(txReply) > 3+locLen {
@@ -1061,8 +1116,7 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 		}
 		for i := len(recvHashes) - 1; i >= 0; i-- {
 			h := recvHashes[i]
-			clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-			txReply := <-clientrpc.OutRPC
+			txReply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 			if len(txReply) > 3 && string(txReply[:2]) == "TX" {
 				locLen := int(txReply[2])
 				if len(txReply) > 3+locLen {
@@ -1091,8 +1145,8 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 			"balance":          acc.GetBalanceConfirmedFloat(),
 			"transactionDelay": acc.TransactionDelay,
 			"multiSignNumber":  acc.MultiSignNumber,
-			"sentCount":        len(acc.TransactionsSender),
-			"receivedCount":    len(acc.TransactionsRecipient),
+			"sentCount":        acc.SentCount,
+			"receivedCount":    acc.ReceivedCount,
 			"transactions":     transactions,
 		})
 	case "BL":
@@ -1115,8 +1169,7 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetTokens(w http.ResponseWriter, r *http.Request) {
-	clientrpc.InRPC <- SignMessage([]byte("LTKN"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("LTKN")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -1144,8 +1197,7 @@ func GetPubKeyInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...)))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -1245,8 +1297,7 @@ func Vote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("VOTE"), enb...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("VOTE"), enb...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -1337,7 +1388,7 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      MainWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1351,8 +1402,7 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
 	st := sm.Stats
 	if err := common.Unmarshal(reply, common.StatDBPrefix, &st); err != nil {
@@ -1380,8 +1430,7 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -1426,8 +1475,7 @@ func CallSmartContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
 	st := sm.Stats
 	if err := common.Unmarshal(reply, common.StatDBPrefix, &st); err != nil {
@@ -1442,13 +1490,27 @@ func CallSmartContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b, _ := json.Marshal(pf)
-	clientrpc.InRPC <- SignMessage(append([]byte("VIEW"), b...))
-	reply = <-clientrpc.OutRPC
+	reply = clientrpc.Call(SignMessage(append([]byte("VIEW"), b...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
 		"output":  hex.EncodeToString(reply),
 	})
+}
+
+// solImportRE matches a Solidity import statement (WH-C1).
+var solImportRE = regexp.MustCompile(`(?m)^\s*import\b`)
+
+// sanitizeSolcError strips the temp directory path from compiler output so
+// filesystem structure and any included file contents are not leaked (WH-H1).
+func sanitizeSolcError(s, tmpDir string) string {
+	s = strings.ReplaceAll(s, tmpDir+string(filepath.Separator), "")
+	s = strings.ReplaceAll(s, tmpDir, "")
+	const maxLen = 2000
+	if len(s) > maxLen {
+		s = s[:maxLen] + "…(truncated)"
+	}
+	return s
 }
 
 func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
@@ -1474,31 +1536,45 @@ func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Contract code too large (max 512 KB)", http.StatusBadRequest)
 		return
 	}
+	// WH-C1: reject imports. Solidity `import` is the only way user code can pull
+	// in external files (e.g. import "/etc/passwd"), so disallow it entirely. The
+	// --base-path/--allow-paths confinement below is the defense-in-depth backstop.
+	if solImportRE.MatchString(req.Code) {
+		jsonError(w, "import statements are not allowed", http.StatusBadRequest)
+		return
+	}
 
-	tmpFile, err := os.CreateTemp("", "contract-*.sol")
+	// Isolate the contract in its own directory so solc's base path can be
+	// confined to it (WH-C1).
+	tmpDir, err := os.MkdirTemp("", "qwid-solc-")
 	if err != nil {
-		jsonError(w, "Failed to create temp file: "+err.Error(), http.StatusInternalServerError)
+		jsonError(w, "Failed to create temp dir", http.StatusInternalServerError)
 		return
 	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer os.RemoveAll(tmpDir)
+	tmpPath := filepath.Join(tmpDir, "contract.sol")
+	if err = os.WriteFile(tmpPath, []byte(req.Code), 0600); err != nil {
+		jsonError(w, "Failed to write contract file", http.StatusInternalServerError)
+		return
+	}
 
-	if _, err = tmpFile.WriteString(req.Code); err != nil {
-		tmpFile.Close()
-		jsonError(w, "Failed to write contract file: "+err.Error(), http.StatusInternalServerError)
-		return
+	// solcArgs confines filesystem access to tmpDir: --base-path is the import
+	// root and --allow-paths is the only extra readable location.
+	solcArgs := func(flag string) []string {
+		return []string{"--evm-version", "paris", "--base-path", tmpDir, "--allow-paths", tmpDir, flag, tmpPath}
 	}
-	tmpFile.Close()
 
 	// Compile bytecode
-	cmd := exec.Command("solc", "--evm-version", "paris", "--bin", tmpPath)
+	cmd := exec.Command("solc", solcArgs("--bin")...)
 	var binOut bytes.Buffer
 	var binErr bytes.Buffer
 	cmd.Stdout = &binOut
 	cmd.Stderr = &binErr
 	err = cmd.Run()
 	if err != nil {
-		jsonError(w, "Solidity compiler error: "+binErr.String(), http.StatusBadRequest)
+		// WH-H1: sanitize compiler output so absolute paths / file contents are
+		// not leaked back to the client.
+		jsonError(w, "Solidity compiler error: "+sanitizeSolcError(binErr.String(), tmpDir), http.StatusBadRequest)
 		return
 	}
 
@@ -1513,7 +1589,7 @@ func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Compile ABI
-	cmd = exec.Command("solc", "--evm-version", "paris", "--abi", tmpPath)
+	cmd = exec.Command("solc", solcArgs("--abi")...)
 	var abiOut bytes.Buffer
 	var abiErr bytes.Buffer
 	cmd.Stdout = &abiOut
@@ -1523,7 +1599,7 @@ func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]string{
 			"bytecode": bytecode,
 			"abi":      "",
-			"warning":  "ABI generation failed: " + abiErr.String(),
+			"warning":  "ABI generation failed: " + sanitizeSolcError(abiErr.String(), tmpDir),
 		})
 		return
 	}
@@ -1582,8 +1658,7 @@ func GetDexInfo(w http.ResponseWriter, r *http.Request) {
 	// Get DEX account info
 	m := []byte("ADEX")
 	m = append(m, coinAddr.GetBytes()...)
-	clientrpc.InRPC <- SignMessage(m)
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(m))
 
 	poolInfo := map[string]interface{}{}
 	if len(reply) > 8 {
@@ -1600,8 +1675,7 @@ func GetDexInfo(w http.ResponseWriter, r *http.Request) {
 		m = []byte("GTBL")
 		m = append(m, MainWallet.MainAddress.GetBytes()...)
 		m = append(m, coinAddr.GetBytes()...)
-		clientrpc.InRPC <- SignMessage(m)
-		reply = <-clientrpc.OutRPC
+		reply = clientrpc.Call(SignMessage(m))
 		if len(reply) == 32 {
 			holdings["tokenBalance"] = account.Int64toFloat64(common.GetInt64FromSCByte(reply))
 		}
@@ -1658,8 +1732,8 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenAm := int64(req.TokenAmount * 1e8)
-	qwdAm := int64(req.QwdAmount * 1e8)
+	tokenAm := common.CoinToBaseUnits(req.TokenAmount)
+	qwdAm := common.CoinToBaseUnits(req.QwdAmount)
 
 	sender := common.Address{}
 	sender.Init(append([]byte{0}, MainWallet.MainAddress.GetBytes()...))
@@ -1679,7 +1753,7 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1694,8 +1768,7 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
 	st := sm.Stats
 	if err := common.Unmarshal(reply, common.StatDBPrefix, &st); err != nil {
@@ -1723,8 +1796,7 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -1773,7 +1845,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	sender := common.Address{}
 	sender.Init(append([]byte{0}, MainWallet.MainAddress.GetBytes()...))
@@ -1793,7 +1865,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      sender,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -1808,8 +1880,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current height
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
 	st := sm.Stats
 	if err := common.Unmarshal(reply, common.StatDBPrefix, &st); err != nil {
@@ -1837,8 +1908,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -1849,8 +1919,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 
 // GetPeers returns information about connected and banned peers
 func GetPeers(w http.ResponseWriter, r *http.Request) {
-	clientrpc.InRPC <- SignMessage([]byte("PEER"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("PEER")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return

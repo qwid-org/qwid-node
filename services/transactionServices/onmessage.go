@@ -5,6 +5,7 @@ import (
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
 	"github.com/wonabru/qwid-node/message"
+	"github.com/wonabru/qwid-node/pubkeys"
 	"github.com/wonabru/qwid-node/tcpip"
 	"github.com/wonabru/qwid-node/transactionsDefinition"
 	"github.com/wonabru/qwid-node/transactionsPool"
@@ -122,6 +123,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		rawTxn := msg.GetTransactionsBytes()
 
 		storedCount := 0
+		skippedExisting := 0
 		for _, v := range rawTxn {
 			for _, tb := range v {
 				tx := transactionsDefinition.Transaction{}
@@ -131,20 +133,43 @@ func OnMessage(addr [4]byte, m []byte) {
 					continue
 				}
 				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
+					skippedExisting++
 					continue
 				}
 				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
+					skippedExisting++
+					continue
+				}
+				// NP-C6: verify the signature whenever the sender's public key is
+				// available (embedded in the tx, or already registered). Only skip
+				// verification when the pubkey is genuinely not yet known during
+				// sync — the signed block merkle root still enforces integrity when
+				// the referencing block is later validated.
+				sigBytes := t.GetSignature().GetBytes()
+				if len(sigBytes) == 0 {
+					logger.GetLogger().Printf("bx: dropping tx %x with empty signature", t.Hash.GetBytes()[:8])
+					continue
+				}
+				canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
+				if !canVerify {
+					if _, perr := pubkeys.LoadPubKeyWithPrimary(t.GetSenderAddress(), sigBytes[0] == 0); perr == nil {
+						canVerify = true
+					}
+				}
+				if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+					logger.GetLogger().Printf("bx: signature verification failed, dropping tx %x", t.Hash.GetBytes()[:8])
 					continue
 				}
 				err = t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:])
 				if err != nil {
 					logger.GetLogger().Printf("bx: FAILED to store transaction %x: %v", t.Hash.GetBytes()[:8], err)
 				} else {
+					logger.GetLogger().Printf("bx: stored tx %x", t.Hash.GetBytes()[:8])
 					storedCount++
 				}
 			}
 		}
-		logger.GetLogger().Printf("bx: stored %d transactions", storedCount)
+		logger.GetLogger().Printf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
 	case "st":
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {

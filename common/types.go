@@ -367,19 +367,28 @@ type PrivKey struct {
 }
 
 func (pk *PrivKey) Init(b []byte, address Address, primary bool) error {
-
-	//if len(b) != PrivateKeyLength() && len(b) != PrivateKeyLength2() && encryptionConfigInstance.isPaused == 0 && encryptionConfigInstance.isPaused2 == 0 {
-	//	return fmt.Errorf("error Private key initialization with wrong length, should be %v", pk.GetLength())
-	//}
-	//if len(b) == PrivateKeyLength() {
-	//	pk.Primary = true
-	//} else {
-	//	pk.Primary = false
-	//}
+	// CW-H6: reject empty key bytes, which would otherwise silently create an
+	// unusable key. Strict length equality is intentionally NOT enforced here:
+	// callers legitimately pass variable-length material (mnemonic-restored keys,
+	// zero-padded buffers, or shorter keys while an encryption scheme is paused),
+	// all of which are truncated to the exact secret-key length by the caller.
+	if len(b) == 0 {
+		return fmt.Errorf("private key initialization with empty bytes")
+	}
 	pk.Primary = primary
 	pk.ByteValue = b[:]
 	pk.Address = address
 	return nil
+}
+
+// Cleanse zeroes the in-memory secret-key bytes and drops the reference. Call at
+// logout/wipe so a decrypted post-quantum secret key does not linger in memory
+// (CW-H2). Plain zero-loop, mirroring the CW-C4 password wipe.
+func (pk *PrivKey) Cleanse() {
+	for i := range pk.ByteValue {
+		pk.ByteValue[i] = 0
+	}
+	pk.ByteValue = nil
 }
 
 func (pk PrivKey) GetBytes() []byte {

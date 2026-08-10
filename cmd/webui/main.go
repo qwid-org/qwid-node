@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -74,38 +75,41 @@ func main() {
 	// Setup routes
 	mux := http.NewServeMux()
 
-	// API routes
+	// API routes. WH-C3: wallet/load and wallet/create are open (they establish
+	// the session); public read-only endpoints stay open; everything that spends
+	// funds, mutates state, or reveals wallet data is wrapped in RequireAuth.
+	auth := handlers.RequireAuth
 	mux.HandleFunc("/api/stats", corsMiddleware(handlers.GetStats))
 	mux.HandleFunc("/api/wallet/load", corsMiddleware(handlers.LoadWallet))
 	mux.HandleFunc("/api/wallet/create", corsMiddleware(handlers.CreateWallet))
-	mux.HandleFunc("/api/wallet/info", corsMiddleware(handlers.GetWalletInfo))
-	mux.HandleFunc("/api/wallet/change-password", corsMiddleware(handlers.ChangePassword))
-	mux.HandleFunc("/api/wallet/mnemonic", corsMiddleware(handlers.GetMnemonic))
-	mux.HandleFunc("/api/account", corsMiddleware(handlers.GetAccount))
-	mux.HandleFunc("/api/send", corsMiddleware(handlers.SendTransaction))
-	mux.HandleFunc("/api/cancel", corsMiddleware(handlers.CancelTransaction))
-	mux.HandleFunc("/api/staking/stake", corsMiddleware(handlers.Stake))
-	mux.HandleFunc("/api/staking/unstake", corsMiddleware(handlers.Unstake))
-	mux.HandleFunc("/api/staking/claim", corsMiddleware(handlers.ClaimRewards))
-	mux.HandleFunc("/api/staking/execute", corsMiddleware(handlers.ExecuteStaking))
-	mux.HandleFunc("/api/history", corsMiddleware(handlers.GetHistory))
-	mux.HandleFunc("/api/pending", corsMiddleware(handlers.GetPendingTransactions))
-	mux.HandleFunc("/api/details", corsMiddleware(handlers.GetDetails))
+	mux.HandleFunc("/api/wallet/info", corsMiddleware(auth(handlers.GetWalletInfo)))
+	mux.HandleFunc("/api/wallet/change-password", corsMiddleware(auth(handlers.ChangePassword)))
+	mux.HandleFunc("/api/wallet/mnemonic", corsMiddleware(auth(handlers.GetMnemonic)))
+	mux.HandleFunc("/api/account", corsMiddleware(auth(handlers.GetAccount)))
+	mux.HandleFunc("/api/send", corsMiddleware(auth(handlers.SendTransaction)))
+	mux.HandleFunc("/api/cancel", corsMiddleware(auth(handlers.CancelTransaction)))
+	mux.HandleFunc("/api/staking/stake", corsMiddleware(auth(handlers.Stake)))
+	mux.HandleFunc("/api/staking/unstake", corsMiddleware(auth(handlers.Unstake)))
+	mux.HandleFunc("/api/staking/claim", corsMiddleware(auth(handlers.ClaimRewards)))
+	mux.HandleFunc("/api/staking/execute", corsMiddleware(auth(handlers.ExecuteStaking)))
+	mux.HandleFunc("/api/history", corsMiddleware(auth(handlers.GetHistory)))
+	mux.HandleFunc("/api/pending", corsMiddleware(auth(handlers.GetPendingTransactions)))
+	mux.HandleFunc("/api/details", corsMiddleware(auth(handlers.GetDetails)))
 	mux.HandleFunc("/api/dex/tokens", corsMiddleware(handlers.GetTokens))
 	mux.HandleFunc("/api/dex/pools", corsMiddleware(handlers.GetPools))
-	mux.HandleFunc("/api/dex/trade", corsMiddleware(handlers.TradeDex))
+	mux.HandleFunc("/api/dex/trade", corsMiddleware(auth(handlers.TradeDex)))
 	mux.HandleFunc("/api/dex/info", corsMiddleware(handlers.GetDexInfo))
-	mux.HandleFunc("/api/dex/execute", corsMiddleware(handlers.ExecuteDex))
-	mux.HandleFunc("/api/vote", corsMiddleware(handlers.Vote))
+	mux.HandleFunc("/api/dex/execute", corsMiddleware(auth(handlers.ExecuteDex)))
+	mux.HandleFunc("/api/vote", corsMiddleware(auth(handlers.Vote)))
 	mux.HandleFunc("/api/encryption-status", corsMiddleware(handlers.GetEncryptionStatus))
-	mux.HandleFunc("/api/pubkey-info", corsMiddleware(handlers.GetPubKeyInfo))
-	mux.HandleFunc("/api/escrow/modify", corsMiddleware(handlers.ModifyEscrow))
-	mux.HandleFunc("/api/smartcontract/call", corsMiddleware(handlers.CallSmartContract))
-	mux.HandleFunc("/api/smartcontract/compile", corsMiddleware(handlers.CompileSmartContract))
+	mux.HandleFunc("/api/pubkey-info", corsMiddleware(auth(handlers.GetPubKeyInfo)))
+	mux.HandleFunc("/api/escrow/modify", corsMiddleware(auth(handlers.ModifyEscrow)))
+	mux.HandleFunc("/api/smartcontract/call", corsMiddleware(auth(handlers.CallSmartContract)))
+	mux.HandleFunc("/api/smartcontract/compile", corsMiddleware(auth(handlers.CompileSmartContract)))
 	mux.HandleFunc("/api/smartcontract/selector", corsMiddleware(handlers.GetFunctionSelector))
-	mux.HandleFunc("/api/logs", corsMiddleware(handlers.GetLogs))
-	mux.HandleFunc("/api/logs/files", corsMiddleware(handlers.GetLogFiles))
-	mux.HandleFunc("/api/peers", corsMiddleware(handlers.GetPeers))
+	mux.HandleFunc("/api/logs", corsMiddleware(auth(handlers.GetLogs)))
+	mux.HandleFunc("/api/logs/files", corsMiddleware(auth(handlers.GetLogFiles)))
+	mux.HandleFunc("/api/peers", corsMiddleware(auth(handlers.GetPeers)))
 
 	// Serve static files
 	staticFS, _ := fs.Sub(staticFiles, "static")
@@ -123,6 +127,11 @@ func main() {
 	server := &http.Server{
 		Addr:    "127.0.0.1:" + port,
 		Handler: mux,
+		// WH-M5: bound connection lifetimes to mitigate Slowloris-style attacks.
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
@@ -144,11 +153,37 @@ func main() {
 	fmt.Println("Server stopped")
 }
 
+// isAllowedOrigin permits only loopback origins (this is a local wallet UI).
+// WH-C2: replaces the wildcard Access-Control-Allow-Origin, which let any
+// website issue authenticated-by-cookie/localhost requests and drain the wallet.
+func isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+// maxRequestBodyBytes bounds request bodies (WH-H9). 2 MiB covers JSON and the
+// 512 KB contract-compile payload.
+const maxRequestBodyBytes = 2 << 20
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes) // WH-H9
+		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// WH-H5: basic hardening headers.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {

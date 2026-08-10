@@ -23,13 +23,14 @@ var (
 	BlockTimeInterval              float32 = 10 // 10 sec.
 	MaxBlockTimeInterval           int64   = 2000
 	MinNumberOfBlocksInStake       int64   = 36
-	MaxBlockForwardInTime          int64   = 60
+	MaxBlockForwardInTime          int64   = 15
 	DifficultyChange               float32 = 10
 	MaxGasUsage                    int64   = 13700000 // circa 6.5k transactions in block
 	MaxGasPrice                    int64   = 100000
 	MaxTransactionsPerBlock        int16   = 5000 // on average 500 TPS
 	MaxTransactionInPool                   = 50000
 	MaxPeersConnected              int     = 6
+	MaxPeersSharedInHi             int     = 3 // NP-M14: cap peer IPs shared per 'hi' message (topology-leak reduction)
 	NumberOfHashesInBucket         int64   = 20
 	NumberOfBlocksInBucket         int64   = 20
 	MaxNumberOfTxBans              int     = 50 // number of bans
@@ -42,13 +43,47 @@ var (
 	MaxTransactionInMultiSigPool   int64   = 60480        //one week
 	MaxNumberTransactionInChunk            = 100
 	ConnectionMaxTries                     = 10
-	BannedTimeSeconds              int64   = 2                   // 2 blocks
+	BannedTimeSeconds              int64   = 60                  // DoS hardening: was 2s; ~6 block intervals
 	MessageInitialization                  = [4]byte{2, 0, 2, 9} // will be overwrite in init() by MaxMessageSizeBytes
 	MaxMessageSizeBytes            int32   = 151126018           // should be adjusted to maximal message sent
 	DefaultWalletHomePath                  = "/.qwid/wallet/"
 	DefaultBlockchainHomePath              = "/.qwid/db/blockchain/"
-	ConnectionsWithoutVerification         = [][]byte{[]byte("TRAN"), []byte("STAT"), []byte("ENCR"), []byte("DETS"), []byte("STAK"), []byte("ADEX"), []byte("PUBA"), []byte("HELO"), []byte("VALS")}
+	ConnectionsWithoutVerification         = [][]byte{[]byte("TRAN"), []byte("STAT"), []byte("ENCR"), []byte("DETS"), []byte("STAK"), []byte("ACCS"), []byte("ADEX"), []byte("PUBA"), []byte("HELO"), []byte("VALS")}
 	CurrentHeightOfNetwork         int64   = 23
+
+	// SyncedTolerance is how many blocks behind the observed network height this
+	// node may be and still count as synced. The network keeps producing while we
+	// import, so requiring exact equality would keep IsSyncing latched forever and
+	// the node would never produce a block. Same magnitude as the "small height
+	// difference" threshold used by the sync consensus check.
+	SyncedTolerance int64 = 4
+	// MaxStartupRewind bounds how far the startup chain check may rewind the local
+	// chain when its tip does not verify. Anything deeper is left to the sync
+	// service, which resolves forks against live peers.
+	MaxStartupRewind int64 = 128
+
+	// Per-topic inbound message-size caps (bytes) — DoS hardening (sub-project A).
+	// Replace the single 151MB MaxMessageSizeBytes ENFORCEMENT (the wire marker
+	// MessageInitialization/MaxMessageSizeBytes are unchanged). Sized generously
+	// per topic so no legit traffic breaks. TransactionTopic intentionally keeps
+	// the full MaxMessageSizeBytes cap (see MaxMessageSizeForTopic in
+	// tcpip/helper.go): tx-gossip (up to MaxTransactionsPerBlock txs) and sync
+	// "bx" recovery (up to MaxNumberTransactionInChunk txs) are sent as
+	// un-chunked batches, so a tighter per-message cap would reject legitimate
+	// batches and get honest peers banned. Tightening it requires chunking
+	// those send paths (documented follow-up).
+	MaxMsgSizeSmall int32 = 65536    // 64KB  — Nonce/SelfNonce (tiny fixed messages)
+	MaxMsgSizeSync  int32 = 16777216 // 16MB  — Sync (block-header batches, ~3.2MB real max)
+	MaxMsgSizeRPC   int32 = 1048576  // 1MB   — RPC (localhost-bound)
+
+	// Per-IP rate limits — DoS hardening.
+	MessageRateLimit            int   = 100 // max messages per window per IP
+	MessageRateWindowSeconds    int64 = 10
+	ConnectionRateLimit         int   = 20 // max connection attempts per window per IP; 20 tolerates a legit multi-topic (tx/nonce/self-nonce/sync) restart+retry
+	ConnectionRateWindowSeconds int64 = 60
+
+	MaxInboundConnectionsPerTopic int = 64 // NP-H2: cap concurrent inbound conns per topic (~10x the ~6 legit peers) to bound fd exhaustion / slow-loris
+	MaxConcurrentRPCConnections   int = 64 // NP-H6: cap concurrent RPC conns (HTTP servers hold ~1 persistent conn each) to bound fd exhaustion
 )
 
 // db prefixes
@@ -77,10 +112,26 @@ var (
 	OutputLogsHashesDBPrefix         = [2]byte{'O', '0'}
 	OutputLogDBPrefix                = [2]byte{'Z', '0'}
 	OutputAddressesHashesDBPrefix    = [2]byte{'C', '0'}
+	EVMStateDBPrefix                 = [2]byte{'E', 'V'}
 	TokenDetailsDBPrefix             = [2]byte{'T', 'D'}
 	DexAccountsDBPrefix              = [2]byte{'D', 'A'}
 	BadTransactionDBPrefix           = [2]byte{'B', 'T'}
+	EscrowPoolDBPrefix               = [2]byte{'E', 'P'}
+	// Per-account transaction-history index (account/txHistory.go):
+	// prefix | address | sequence -> tx hash. Kept OUTSIDE the account state
+	// snapshot so the snapshot stops growing with transaction history.
+	TxHistorySentDBPrefix     = [2]byte{'H', 'S'}
+	TxHistoryReceivedDBPrefix = [2]byte{'H', 'R'}
 )
+
+// StakingDetailsRetentionBlocks is how many recent blocks of per-event staking
+// detail (stakes, unstakes, per-block rewards) a staking account keeps in the
+// state. Rewards append an entry EVERY block, so an unbounded map made the
+// staking snapshot marshal O(chain history) - entries older than this window
+// are folded into a single aggregate entry at key 0. Details are informational
+// (wallet display); consensus reads only the balances, so the fold changes no
+// validation. ~1 day of blocks.
+var StakingDetailsRetentionBlocks int64 = 8640
 
 var chainID = int16(23)
 var chainIDMutex = sync.Mutex{}

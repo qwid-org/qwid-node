@@ -3,11 +3,14 @@ package blocks
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
 	vm "github.com/wonabru/qwid-node/core/evm"
 	"github.com/wonabru/qwid-node/core/stateDB"
+	"github.com/wonabru/qwid-node/core/types"
 	loggerMain "github.com/wonabru/qwid-node/logger"
 	"github.com/wonabru/qwid-node/params"
 	"github.com/wonabru/qwid-node/transactionsDefinition"
@@ -26,10 +29,140 @@ type PasiveFunction struct {
 	Height  int64          `json:"height"`
 }
 
+// evmCanTransfer reports whether addr's native balance covers amount (DB-C2).
+func evmCanTransfer(db vm.StateDB, addr common.Address, amount *big.Int) bool {
+	return db.GetBalance(addr).Cmp(amount) >= 0
+}
+
+// evmTransfer moves amount between native balances via the Phase 2 bridge
+// (journaled, so a reverted EVM call restores both sides).
+func evmTransfer(db vm.StateDB, from, to common.Address, amount *big.Int) {
+	db.SubBalance(from, amount)
+	db.AddBalance(to, amount)
+}
+
+// isContractCallTx reports whether the EVM (via EvaluateSC) owns this tx's value
+// transfer, so the native ProcessTransaction path must NOT also move it. It must
+// match EXACTLY the condition under which EvaluateSCForBlock routes a tx to
+// EvaluateSC: OptData present, non-delegated recipient, and a sender that is
+// neither a multisign account nor escrow-delayed (both skip SC execution).
+func isContractCallTx(tx transactionsDefinition.Transaction, senderAcc account.Account, height int64) bool {
+	if _, ok := tx.CancellationTarget(); ok {
+		return false
+	}
+	if len(tx.TxData.OptData) == 0 {
+		return false
+	}
+	if _, err := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient); err == nil {
+		return false // delegated recipient (staking/reward/DEX) — not an SC call
+	}
+	if senderAcc.MultiSignNumber > 0 {
+		return false // multisign accounts skip SC execution
+	}
+	if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height {
+		return false // escrow-delayed — SC not executed
+	}
+	return true
+}
+
+// isEVMExecutionError reports whether err is an EVM execution failure — a
+// contract-caused failure the sender pays for and the block includes — as
+// opposed to a node/processing error, which must stay block-fatal. Anything
+// not positively matched here is treated as block-fatal (the safe default).
+func isEVMExecutionError(err error) bool {
+	switch {
+	case errors.Is(err, vm.ErrExecutionReverted),
+		errors.Is(err, vm.ErrOutOfGas),
+		errors.Is(err, vm.ErrCodeStoreOutOfGas),
+		errors.Is(err, vm.ErrDepth),
+		errors.Is(err, vm.ErrInsufficientBalance),
+		errors.Is(err, vm.ErrContractAddressCollision),
+		errors.Is(err, vm.ErrMaxCodeSizeExceeded),
+		errors.Is(err, vm.ErrInvalidJump),
+		errors.Is(err, vm.ErrWriteProtection),
+		errors.Is(err, vm.ErrReturnDataOutOfBounds),
+		errors.Is(err, vm.ErrGasUintOverflow),
+		errors.Is(err, vm.ErrInvalidCode),
+		errors.Is(err, vm.ErrNonceUintOverflow):
+		return true
+	}
+	var opErr *vm.ErrInvalidOpCode
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var suErr *vm.ErrStackUnderflow
+	if errors.As(err, &suErr) {
+		return true
+	}
+	var soErr *vm.ErrStackOverflow
+	if errors.As(err, &soErr) {
+		return true
+	}
+	return false
+}
+
 func InitStateDB() {
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
 	State = stateDB.CreateStateDB()
+	// Phase 1: restore persisted EVM state so contracts survive restarts.
+	if err := State.Load(-1); err != nil {
+		loggerMain.GetLogger().Println("could not load persisted EVM state (starting empty):", err)
+	}
+}
+
+// CommitEVMState persists the current EVM state for a block height
+// unconditionally. Genesis uses it to write the floor snapshot every later
+// closest-at-or-below lookup bottoms out on; block-apply paths should use
+// CommitEVMStateIfChanged instead.
+func CommitEVMState(height int64) error {
+	StateMutex.Lock()
+	defer StateMutex.Unlock()
+	return State.Store(height)
+}
+
+// CommitEVMStateIfChanged persists the EVM state for a block height only when
+// a transaction of that block actually touched it (EvaluateSCForBlock marks
+// the state changed on every SC/DEX/token execution). Storing the full state
+// under every height made snapshots grow with chain length; skipping unchanged
+// heights keeps them proportional to contract activity while preserving the
+// rewind invariant — every height at which the state changed has a snapshot,
+// so the closest snapshot at-or-below any rewind target is exact.
+func CommitEVMStateIfChanged(height int64) error {
+	StateMutex.Lock()
+	defer StateMutex.Unlock()
+	if !State.ChangedSinceStore() {
+		return nil
+	}
+	return State.Store(height)
+}
+
+// constantProductPrice returns the exact constant-product (x*y=k) average
+// execution price coinPool/(tokenPool - amountToken), rounded to roundDecimals,
+// or 0 when the pools/denominator are non-positive (e.g. a buy of the whole
+// token pool, which is not allowed). amountToken is SIGNED: >0 for a buy (tokens
+// leave the pool), <0 for a sell (tokens enter the pool). Using amountToken
+// (not the old 2*amountToken) makes swaps exact x*y=k (AC-H6): the price
+// diverges only as a trade approaches the full pool, never at half the pool.
+func constantProductPrice(coinPool, tokenPool, amountToken float64, roundDecimals int) float64 {
+	denom := tokenPool - amountToken
+	if coinPool > 0 && denom > 0 {
+		return common.RoundToken(coinPool/denom, roundDecimals)
+	}
+	return 0
+}
+
+// scaleToInt64 converts a whole-unit float amount to base units (amount * 10^decimals),
+// returning ok=false when the result would not fit in an int64. This avoids the
+// non-portable `int64(hugeFloat)` conversion (implementation-defined in Go when the
+// value overflows), which would otherwise make DEX pricing non-deterministic across
+// architectures near the full-pool boundary (AC-H6).
+func scaleToInt64(amount float64, decimals int) (int64, bool) {
+	scaled := amount * math.Pow10(decimals)
+	if math.IsNaN(scaled) || math.IsInf(scaled, 0) || math.Abs(scaled) >= float64(math.MaxInt64) {
+		return 0, false
+	}
+	return int64(scaled), true
 }
 
 func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {
@@ -90,23 +223,27 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 			amountCoinInt64 = int64(amountCoinFloat * math.Pow10(int(common.Decimals)))
 		}
 	case 3: //buy
-		if coinPoolAmount > 0 && tokenPoolAmount-2*amountTokenFloat > 0 {
-			price = common.RoundToken(coinPoolAmount/(tokenPoolAmount-2*amountTokenFloat), int(common.Decimals+ti.Decimals))
-		}
+		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
 		if price > 0 {
 			amount := common.RoundCoin(-price * amountTokenFloat)
-			amountCoinInt64 = int64(amount * math.Pow10(int(common.Decimals)))
-			amountTokenInt64 = int64(amountTokenFloat * math.Pow10(int(ti.Decimals)))
+			c, okC := scaleToInt64(amount, int(common.Decimals))
+			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
+			if okC && okT {
+				amountCoinInt64 = c
+				amountTokenInt64 = tkn
+			}
 		}
 	case 4: //sell
 		amountTokenFloat *= -1
-		if coinPoolAmount > 0 && tokenPoolAmount-2*amountTokenFloat > 0 {
-			price = common.RoundToken(coinPoolAmount/(tokenPoolAmount-2*amountTokenFloat), int(common.Decimals+ti.Decimals))
-		}
+		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
 		if price > 0 {
 			amount := common.RoundCoin(-price * amountTokenFloat)
-			amountCoinInt64 = int64(amount * math.Pow10(int(common.Decimals)))
-			amountTokenInt64 = int64(amountTokenFloat * math.Pow10(int(ti.Decimals)))
+			c, okC := scaleToInt64(amount, int(common.Decimals))
+			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
+			if okC && okT {
+				amountCoinInt64 = c
+				amountTokenInt64 = tkn
+			}
 		}
 	default:
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("wrong operation on dex")
@@ -211,6 +348,13 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 				loggerMain.GetLogger().Println(err)
 				return false, nil, nil, nil, nil
 			}
+			// The DEX execution below runs token transfers through the EVM and
+			// mutates State (token balances, prices). Mark before executing:
+			// conservative marking costs at most one redundant snapshot, while a
+			// missed mark would silently corrupt every later rewind.
+			StateMutex.Lock()
+			State.MarkChanged()
+			StateMutex.Unlock()
 			// transfering tokens
 			l, _, _, _, err := EvaluateSCDex(t.ContractAddress, fromAddress, dexOptData, t, bl)
 			if err != nil {
@@ -290,7 +434,17 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 		if len(t.TxData.OptData) == 0 {
 			continue
 		}
+		if _, ok := t.CancellationTarget(); ok {
+			continue
+		}
 
+		// EvaluateSC deploys or calls a contract on the shared State. Marked
+		// before the call for the same reason as the DEX branch above — even a
+		// reverted execution may leave persistable traces, and an extra snapshot
+		// is cheaper than a rewind on a stale one.
+		StateMutex.Lock()
+		State.MarkChanged()
+		StateMutex.Unlock()
 		l, ret, address, _, err := EvaluateSC(t, bl)
 		if t.TxData.Recipient == common.EmptyAddress() {
 			code := t.TxData.OptData
@@ -320,6 +474,20 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 		}
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
+			if isEVMExecutionError(err) {
+				// Phase 3b (CONSENSUS): per-tx contract failure. The EVM's internal
+				// snapshot (evm.go Call/create) already reverted this call's value
+				// transfer and storage writes. Include the tx (ProcessTransaction
+				// charges its size-based fee; value stays with the sender), record
+				// it as failed, register NO contract, and do NOT reject the block.
+				t.OutputLogs = []byte(l)
+				if serr := t.StoreToDBPoolTx(poolprefix); serr != nil {
+					loggerMain.GetLogger().Println(serr)
+					return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
+				}
+				continue
+			}
+			// Non-execution (node/processing) error: block-fatal, as before.
 			return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
 		}
 		//TODO we should refund left gas
@@ -355,8 +523,8 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	origin := tx.TxParam.Sender
 	code := tx.TxData.OptData
 	blockCtx := vm.BlockContext{
-		CanTransfer: nil,
-		Transfer:    nil,
+		CanTransfer: evmCanTransfer,
+		Transfer:    evmTransfer,
 		GetHash: func(height uint64) common.Hash {
 			hashBytes, _ := LoadHashOfBlock(int64(height))
 			return common.BytesToHash(hashBytes)
@@ -394,23 +562,56 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	VM.GasPrice = new(big.Int).SetInt64(0)
 	nonce := uint64(tx.TxParam.Nonce)
 
+	// Reset all per-transaction transient execution state (journal, snapshot
+	// counter, logs, suicides, EIP-2929 access list) so nothing captured
+	// during a previous tx (LOG-opcode events, SELFDESTRUCT marks, warm
+	// addresses/slots, or an unbounded journal) leaks into this one.
+	State.ResetTransient()
+
+	// EIP-2929: warm the tx sender, recipient, and precompiles at tx start.
+	var accessDest *common.Address
+	if tx.TxData.Recipient != common.EmptyAddress() {
+		r := tx.TxData.Recipient
+		accessDest = &r
+	}
+	rules := VM.ChainConfig().Rules(blockCtx.BlockNumber, blockCtx.Random != nil)
+	State.PrepareAccessList(tx.TxParam.Sender, accessDest, vm.ActivePrecompiles(rules), nil)
+
 	if tx.TxData.Recipient == common.EmptyAddress() {
-		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0), nonce)
+		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), big.NewInt(tx.TxData.Amount), nonce)
 
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
-			return logger.ToString(), ret, address, leftOverGas, err
+			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err
 		}
 	} else {
 		address = tx.TxData.Recipient
-		ret, leftOverGas, err = VM.Call(vm.AccountRef(origin), address, code, uint64(tx.GasUsage)*uint64(gasMult), new(big.Int).SetInt64(0))
+		ret, leftOverGas, err = VM.Call(vm.AccountRef(origin), address, code, uint64(tx.GasUsage)*uint64(gasMult), big.NewInt(tx.TxData.Amount))
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
-			return logger.ToString(), ret, address, leftOverGas, err
+			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err
 		}
 	}
 
-	return logger.ToString(), ret, address, uint64(float64(leftOverGas) / gasMult), nil
+	return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, uint64(float64(leftOverGas) / gasMult), nil
+}
+
+// formatEVMLogs renders the LOG-opcode events collected via StateDB.AddLog
+// during this execution as a JSON block appended to the tracer output. This
+// is additive: it does not replace the existing tracer-based OutputLogs
+// content, it feeds the same persistence path (t.OutputLogs) with the
+// consensus-relevant contract event logs that were previously discarded
+// because AddLog was a no-op.
+func formatEVMLogs(evmLogs []*types.Log) string {
+	if len(evmLogs) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(evmLogs)
+	if err != nil {
+		loggerMain.GetLogger().Println(err)
+		return ""
+	}
+	return "\nEVM Logs:\n" + string(b)
 }
 
 func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData []byte, tx transactionsDefinition.Transaction, bl Block) (logs string, ret []byte, address common.Address, leftOverGas uint64, err error) {
@@ -418,8 +619,8 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	gasMult := 10.0
 
 	blockCtx := vm.BlockContext{
-		CanTransfer: nil,
-		Transfer:    nil,
+		CanTransfer: evmCanTransfer,
+		Transfer:    evmTransfer,
 		GetHash: func(height uint64) common.Hash {
 			hashBytes, _ := LoadHashOfBlock(int64(height))
 			return common.BytesToHash(hashBytes)
@@ -458,6 +659,11 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	VM.Origin = sender
 	VM.GasPrice = new(big.Int).SetInt64(0)
 
+	// Reset all per-transaction transient execution state before invoking the
+	// VM so warm access-list entries / suicide marks / journal from a prior
+	// EvaluateSC or EvaluateSCDex call don't bleed into this DEX execution.
+	State.ResetTransient()
+
 	ret, leftOverGas, err = VM.Call(vm.AccountRef(sender), tokenAddress, optData, uint64(210000), new(big.Int).SetInt64(0))
 	if err != nil {
 		return logger.ToString(), ret, tokenAddress, leftOverGas, err
@@ -471,8 +677,8 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	origin := common.EmptyAddress()
 	input := OptData
 	blockCtx := vm.BlockContext{
-		CanTransfer: nil,
-		Transfer:    nil,
+		CanTransfer: evmCanTransfer,
+		Transfer:    evmTransfer,
 		GetHash: func(height uint64) common.Hash {
 			hashBytes, _ := LoadHashOfBlock(int64(height))
 			return common.BytesToHash(hashBytes)
@@ -507,6 +713,12 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 
 	VM.Origin = origin
 	VM.GasPrice = new(big.Int).SetInt64(0)
+
+	// Reset all per-transaction transient execution state before invoking the
+	// VM so warm access-list entries / suicide marks / journal from a prior
+	// EvaluateSC or EvaluateSCDex call don't bleed into this view execution.
+	State.ResetTransient()
+
 	ret, leftOverGas, err = VM.StaticCall(vm.AccountRef(origin), contractAddr, input, uint64(common.MaxGasUsage))
 	// Konwersja hex do bajtów
 	dataBytes, err := hex.DecodeString(logger.Output)

@@ -10,7 +10,7 @@ import (
 
 func RemoveBadTransactionByHash(hash []byte, height int64, tree *MerkleTree) error {
 	PoolsTx.RemoveTransactionByHash(hash)
-	PoolTxEscrow.RemoveTransactionByHash(hash)
+	RemoveEscrowTransaction(hash)
 	PoolTxMultiSign.RemoveTransactionByHash(hash)
 
 	// Try to load transaction from pool or confirmed DB before removing
@@ -33,10 +33,6 @@ func RemoveBadTransactionByHash(hash []byte, height int64, tree *MerkleTree) err
 	}
 	// NOTE: Do NOT delete from confirmed DB (TransactionDBPrefix) - other nodes need these
 	// transactions for sync. Only remove from pool DB.
-	err = transactionsDefinition.RemoveTransactionFromDBbyHash(common.TransactionDBPrefix[:], hash)
-	if err != nil {
-		logger.GetLogger().Println(err)
-	}
 	err = CheckTransactionInDBAndInMarkleTrie(hash, tree)
 	if err == nil {
 		logger.GetLogger().Println("transaction is in trie")
@@ -52,7 +48,7 @@ func RemoveBadTransactionByHash(hash []byte, height int64, tree *MerkleTree) err
 // The confirmed-DB record (TransactionDBPrefix) is preserved for sync.
 func RemoveDuplicateTransactionByHash(hash []byte) {
 	PoolsTx.RemoveTransactionByHash(hash)
-	PoolTxEscrow.RemoveTransactionByHash(hash)
+	RemoveEscrowTransaction(hash)
 	PoolTxMultiSign.RemoveTransactionByHash(hash)
 	if err := transactionsDefinition.RemoveTransactionFromDBbyHash(common.TransactionPoolHashesDBPrefix[:], hash); err != nil {
 		logger.GetLogger().Println("RemoveDuplicateTransactionByHash pool DB:", err)

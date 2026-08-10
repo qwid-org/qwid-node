@@ -65,7 +65,9 @@ func CopyDirectory(scrDir, dest string) error {
 }
 
 func Copy(srcFile, dstFile string) error {
-	out, err := os.Create(dstFile)
+	// CW-M8: create wallet copies owner-readable/writable only (0600), not the
+	// default world-readable 0666.
+	out, err := os.OpenFile(dstFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}

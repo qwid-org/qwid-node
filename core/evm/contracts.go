@@ -24,7 +24,6 @@ import (
 
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/common/math"
-	"github.com/wonabru/qwid-node/crypto"
 	"github.com/wonabru/qwid-node/crypto/blake2b"
 	"github.com/wonabru/qwid-node/crypto/bls12381"
 	"github.com/wonabru/qwid-node/crypto/bn256"
@@ -163,40 +162,11 @@ func (c *ecrecover) RequiredGas(input []byte) uint64 {
 }
 
 func (c *ecrecover) Run(input []byte) ([]byte, error) {
-	const ecRecoverInputLength = 128
-
-	input = common.RightPadBytes(input, ecRecoverInputLength)
-	// "input" is (hash, v, r, s), each 32 bytes
-	// but for ecrecover we want (r, s, v)
-
-	//r := new(big.Int).SetBytes(input[64:96])
-	//s := new(big.Int).SetBytes(input[96:128])
-	//v := input[63] - 27
-	//
-	//// tighter sig s values input homestead only apply to tx sigs
-	//if !allZero(input[32:63]) || !crypto.ValidateSignatureValues(v, r, s, false) {
-	//	return nil, nil
-	//}
-	//// We must make sure not to modify the 'input', so placing the 'v' along with
-	//// the signature needs to be done on a new allocation
-	//sig := make([]byte, 65)
-	//copy(sig, input[64:128])
-	//sig[64] = v
-	//// v needs to be at the end for libsecp256k1
-	//pubKey, err := crypto.Ecrecover(input[:32], sig)
-	//// make sure the public key is a valid one
-	//if err != nil {
-	//	return nil, nil
-	//}
-	addr := common.Address{}
-	//TODO set true unsure
-	err := addr.Init(input[:32])
-	if err != nil {
-		return nil, nil
-	}
-	pubKey := addr.GetBytes()
-	// the first byte of pubkey is bitcoin heritage
-	return common.LeftPadBytes(crypto.Keccak256(pubKey[:])[12:], 32), nil
+	// This chain uses post-quantum signatures (Falcon-512/MAYO-5), not
+	// secp256k1, so ECDSA public-key recovery is not meaningful. Return an
+	// empty result rather than a deterministic garbage address, so contracts
+	// cannot rely on it (DB-C3). Gas is still charged via RequiredGas.
+	return nil, nil
 }
 
 // SHA256 implemented as a native contract.
@@ -241,8 +211,19 @@ func (c *dataCopy) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.IdentityPerWordGas + params.IdentityBaseGas
 }
 func (c *dataCopy) Run(in []byte) ([]byte, error) {
-	return in, nil
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out, nil
 }
+
+// MaxModExpLen bounds each MODEXP operand length. On this chain gas is not
+// charged (DB-C4), so the EIP-2565 gas formula does not bound operand size;
+// this explicit ceiling prevents an OOM/DoS from attacker-controlled lengths.
+// 1024 bytes = 8192-bit operands, far above any realistic crypto (RSA-4096 is
+// 512 bytes), so no legitimate contract is affected. DB-M10.
+const MaxModExpLen = 1024
+
+var ErrModExpOperandTooLarge = errors.New("modexp operand length exceeds maximum")
 
 // bigModExp implements a native big integer exponential modular operation.
 type bigModExp struct {
@@ -373,6 +354,9 @@ func (c *bigModExp) Run(input []byte) ([]byte, error) {
 		expLen  = new(big.Int).SetBytes(getData(input, 32, 32)).Uint64()
 		modLen  = new(big.Int).SetBytes(getData(input, 64, 32)).Uint64()
 	)
+	if baseLen > MaxModExpLen || expLen > MaxModExpLen || modLen > MaxModExpLen {
+		return nil, ErrModExpOperandTooLarge // DB-M10: bound operand size (gas does not bind on this chain — DB-C4)
+	}
 	if len(input) > 96 {
 		input = input[96:]
 	} else {

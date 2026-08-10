@@ -14,16 +14,49 @@ import (
 
 var ZerosHash = make([]byte, common.HashLength)
 
+func validateEscrowCancellation(tx transactionsDefinition.Transaction, height int64) (transactionsDefinition.Transaction, error) {
+	targetHash, ok := tx.CancellationTarget()
+	if !ok {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("not a cancellation transaction")
+	}
+	senderAddress := tx.GetSenderAddress()
+	if tx.TxData.Amount != 0 || !bytes.Equal(tx.TxData.Recipient.GetBytes(), senderAddress.GetBytes()) ||
+		tx.TxData.LockedAmount != 0 || tx.TxData.MultiSignNumber != 0 ||
+		!bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("cancellation must have zero amount and target the sender account")
+	}
+	target, exists := transactionsPool.PoolTxEscrow.GetTransactionByHash(targetHash.GetBytes())
+	if !exists {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("escrow transaction is not pending")
+	}
+	targetSender := target.GetSenderAddress()
+	if !bytes.Equal(targetSender.GetBytes(), senderAddress.GetBytes()) {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("only the escrow transaction owner can cancel it")
+	}
+	sender, exists := account.GetAccountByAddressBytes(senderAddress.GetBytes())
+	if !exists || sender.TransactionDelay <= 0 {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("cancellation sender is not an escrow account")
+	}
+	if height >= target.GetHeight()+sender.TransactionDelay {
+		return transactionsDefinition.Transaction{}, fmt.Errorf("escrow transaction has already matured")
+	}
+	return target, nil
+}
+
 func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount int64, sumFee int64, block Block) bool {
-	fee := tx.GasPrice * tx.GasUsage
-	amount := tx.TxData.Amount
-	address := tx.GetSenderAddress()
-	opacc := block.BaseBlock.BaseHeader.OperatorAccount
-	operational := len(tx.TxData.OptData) > 0
-	if bytes.Equal(address.GetBytes(), opacc.GetBytes()) && operational {
-		logger.GetLogger().Println("operational account cannot set transactions with set to be operational account second time: CheckStakingTransaction")
+	fee, err := tx.CalcFee()
+	if err != nil {
+		logger.GetLogger().Println("invalid fee: CheckStakingTransaction:", err)
 		return false
 	}
+	amount := tx.TxData.Amount
+	address := tx.GetSenderAddress()
+	operational := len(tx.TxData.OptData) > 0
+	// An operator including its own operational staking transaction is safe:
+	// account.Stake sets OperationalAccount only when it is currently false, so a
+	// redundant "operational" flag is a no-op. Rejecting it outright (as before)
+	// blocked a validator from adding stake in its own block and prevented a new
+	// operator from bootstrapping into operational status.
 	acc, exist := account.GetAccountByAddressBytes(address.GetBytes())
 	if !exist || !bytes.Equal(acc.Address[:], address.GetBytes()) {
 		logger.GetLogger().Println("no account found in check staking transaction: CheckStakingTransaction")
@@ -38,7 +71,6 @@ func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount in
 		return false
 	}
 	addressRecipient := tx.TxData.Recipient
-	var err error
 	var n int
 	if tx.GetLockedAmount() > 0 {
 		n, err = account.IntDelegatedAccountFromAddress(tx.TxData.DelegatedAccountForLocking)
@@ -181,15 +213,28 @@ func ProcessMultiSignAndEscrow(tx transactionsDefinition.Transaction) error {
 	return nil
 }
 
-func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) error {
-	fee := tx.GasPrice * tx.GasUsage
+func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blockTime int64) error {
+	fee, err := tx.CalcFee()
+	if err != nil {
+		return err
+	}
 	amount := tx.TxData.Amount
 	operational := len(tx.TxData.OptData) > 0
 	address := tx.GetSenderAddress()
 	account.AddTransactionsSender(address.ByteValue, tx.GetHash())
 	addressRecipient := tx.TxData.Recipient
 	account.AddTransactionsRecipient(addressRecipient.ByteValue, tx.GetHash())
-	var err error
+	if targetHash, isCancellation := tx.CancellationTarget(); isCancellation {
+		if _, err := validateEscrowCancellation(tx, height); err != nil {
+			return err
+		}
+		if err := AddBalance(address.ByteValue, -fee); err != nil {
+			return err
+		}
+		transactionsPool.RemoveEscrowTransaction(targetHash.GetBytes())
+		transactionsPool.PoolTxEscrow.BanTransactionByHash(targetHash.GetBytes())
+		return nil
+	}
 	var n int
 	if tx.GetLockedAmount() > 0 {
 		n, err = account.IntDelegatedAccountFromAddress(tx.TxData.DelegatedAccountForLocking)
@@ -204,7 +249,7 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 
 			if tx.GetLockedAmount() > 0 {
 				if amount >= common.MinStakingUser {
-					err := account.Stake(addressRecipient.GetBytes(), amount, height, n, operational, tx.GetLockedAmount(), tx.GetReleasePerBlock())
+					err := account.Stake(addressRecipient.GetBytes(), amount, height, blockTime, n, operational, tx.GetLockedAmount(), tx.GetReleasePerBlock())
 					if err != nil {
 						return err
 					}
@@ -217,12 +262,12 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 				}
 			} else {
 				if amount >= common.MinStakingUser {
-					err := account.Stake(address.GetBytes(), amount, height, n, operational, 0, 0)
+					err := account.Stake(address.GetBytes(), amount, height, blockTime, n, operational, 0, 0)
 					if err != nil {
 						return err
 					}
 				} else if amount < 0 {
-					err := account.Unstake(address.GetBytes(), amount, height, n)
+					err := account.Unstake(address.GetBytes(), amount, height, blockTime, n)
 					if err != nil {
 						return err
 					}
@@ -279,7 +324,7 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 		}
 		if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 			tx.Height = height
-			transactionsPool.PoolTxEscrow.AddTransaction(tx, tx.Hash)
+			transactionsPool.AddEscrowTransaction(tx)
 
 		} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 			//TODO MultiSignNumber
@@ -289,14 +334,18 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 			if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 				transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.TxParam.MultiSignTx)
 			}
-			err = AddBalance(address.ByteValue, -amount)
-			if err != nil {
-				return err
-			}
-
-			err = AddBalance(addressRecipient.ByteValue, amount)
-			if err != nil {
-				return err
+			// DB-C2: for contract-call txs the EVM already moved Amount as
+			// msg.value; the native path must not move it again. Non-contract
+			// (plain) transfers move natively as before.
+			if !isContractCallTx(tx, senderAcc, height) {
+				err = AddBalance(address.ByteValue, -amount)
+				if err != nil {
+					return err
+				}
+				err = AddBalance(addressRecipient.ByteValue, amount)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		// escrow tx and multisigned should be paid fee upfront
@@ -314,6 +363,13 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64) err
 }
 
 func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height int64, tree *transactionsPool.MerkleTree) error {
+	// INVARIANT (EVM Phase 3a / DB-C2): matured txs settled here move value
+	// natively and UNCONDITIONALLY. This is correct only because these pooled
+	// txs are never re-added to a block's TransactionsHashes and therefore never
+	// re-dispatched through EvaluateSCForBlock — so the EVM never moves their
+	// value. If block assembly ever re-includes a pooled tx hash, this native
+	// settlement plus the EVM entry-value move (blocks/evaluate.go) would
+	// DOUBLE-MOVE the amount. Do not break that invariant.
 
 	if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 		return nil
@@ -416,6 +472,13 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 }
 
 func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) error {
+	// INVARIANT (EVM Phase 3a / DB-C2): matured txs settled here move value
+	// natively and UNCONDITIONALLY. This is correct only because these pooled
+	// txs are never re-added to a block's TransactionsHashes and therefore never
+	// re-dispatched through EvaluateSCForBlock — so the EVM never moves their
+	// value. If block assembly ever re-includes a pooled tx hash, this native
+	// settlement plus the EVM entry-value move (blocks/evaluate.go) would
+	// DOUBLE-MOVE the amount. Do not break that invariant.
 
 	txs := transactionsPool.PoolTxEscrow.PeekTransactions(common.MaxTransactionInPool, height)
 	logger.GetLogger().Printf("ProcessTransactionsEscrow: height=%d, escrow pool returned %d transactions", height, len(txs))
@@ -438,8 +501,11 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			n, err = account.IntDelegatedAccountFromAddress(addressRecipient)
 		}
 		if err == nil { // delegated account any transfer should be processed for staking unstaking and reward withdrawal
+			// AC-M7: skip this escrow tx but keep processing the rest of the
+			// batch. The previous `return nil` abandoned all remaining escrow
+			// transactions on the first delegated-account match.
 			logger.GetLogger().Printf("  escrow tx[%d]: delegated account (n=%d), skipping", i, n)
-			return nil
+			continue
 		} else { // this is not delegated account so standard transaction
 			senderAcc, exist := account.GetAccountByAddressBytes(address.GetBytes())
 			if !exist {
@@ -453,14 +519,13 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 				logger.GetLogger().Printf("  escrow tx[%d]: moving to multisign pool", i)
 				if transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.Hash) {
-					transactionsPool.PoolTxEscrow.RemoveTransactionByHash(tx.Hash.GetBytes())
+					transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				}
 			} else {
 				logger.GetLogger().Printf("  escrow tx[%d]: EXECUTING (delay passed or no delay)", i)
 				if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 					transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.TxParam.MultiSignTx)
 				}
-				transactionsPool.PoolTxEscrow.RemoveTransactionByHash(tx.Hash.GetBytes())
 				err = AddBalance(address.ByteValue, -amount)
 				if err != nil {
 					// this can happen very rare. Only when escrow is multisign account
@@ -473,6 +538,7 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 				if err != nil {
 					return err
 				}
+				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				logger.GetLogger().Printf("  escrow tx[%d]: balance transferred %d from %s to %s", i, amount, address.GetHex()[:16], addressRecipient.GetHex()[:16])
 			}
 		}

@@ -57,7 +57,7 @@ func StoreWalletNewGenerated(w *wallet.Wallet) error {
 		logger.GetLogger().Printf("Can not create wallet. Error %v", err)
 	}
 	folderPath := w.HomePath
-	err = os.MkdirAll(w.HomePath, 0755)
+	err = os.MkdirAll(w.HomePath, 0700) // CW-H3: owner-only; matches StoreJSON's 0700 (MkdirAll won't chmod an existing dir)
 	if err != nil {
 		logger.GetLogger().Fatal(err)
 	}

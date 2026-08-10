@@ -30,6 +30,15 @@ func minimalHashProof(difficulty int32) float64 {
 	return hashProof
 }
 
+// ValidDifficulty reports whether newDifficulty is exactly the value derived
+// from the parent difficulty and the two committed block timestamps. Producers
+// and validators derive difficulty the same way, so a block that declares any
+// other difficulty is rejected. Without this check a producer could declare an
+// arbitrarily low difficulty and weaken proof-of-synergy (consensus-security).
+func ValidDifficulty(newDifficulty, lastDifficulty int32, lastTimeStamp, newTimeStamp int64) bool {
+	return newDifficulty == AdjustDifficulty(lastDifficulty, newTimeStamp-lastTimeStamp)
+}
+
 func AdjustDifficulty(lastDifficulty int32, interval int64) int32 {
 	if float64(interval) > float64(common.BlockTimeInterval)*1.33 {
 		lastDifficulty -= int32(common.DifficultyChange)

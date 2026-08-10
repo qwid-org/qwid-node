@@ -2,9 +2,12 @@ package nonceServices
 
 import (
 	"bytes"
+	crand "crypto/rand"
+	"encoding/binary"
 	"sync"
 	"time"
 
+	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/blocks"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
@@ -15,8 +18,25 @@ import (
 	"github.com/wonabru/qwid-node/transactionsDefinition"
 	"github.com/wonabru/qwid-node/voting"
 	"github.com/wonabru/qwid-node/wallet"
-	"golang.org/x/exp/rand"
 )
+
+// NP-H11: oracle values influence consensus, so they must come from a
+// cryptographically secure RNG, not the predictable x/exp/rand.
+func cryptoRandInt63() int64 {
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		logger.GetLogger().Println("crypto/rand failed:", err)
+		return 0
+	}
+	return int64(binary.BigEndian.Uint64(b[:]) >> 1)
+}
+
+func cryptoRandIntn(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return cryptoRandInt63() % n
+}
 
 var lastReplyPerPeer = make(map[[4]byte]time.Time)
 var lastReplyMutex sync.Mutex
@@ -110,8 +130,8 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	optData = append(optData, lastBlockHash...)
 
 	//TODO Price oracle currently is random: 0.9 - 1.1 KURA/USD
-	priceOracle := int64(rand.Intn(10000000) - 5000000 + 100000000)
-	randOracle := rand.Int63()
+	priceOracle := cryptoRandIntn(10000000) - 5000000 + 100000000
+	randOracle := cryptoRandInt63()
 	optData = append(optData, common.GetByteInt64(priceOracle)...)
 	optData = append(optData, common.GetByteInt64(randOracle)...)
 
@@ -122,7 +142,11 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	}
 	voting.VotesEncryptionMutex.Unlock()
 
+	// NP-M12: read EncryptionOptData under encryptionMutex — the lock the writers
+	// (SetEncryptionData/ResetToDefaultEncryptionOptData) hold — not VotesEncryptionMutex.
+	encryptionMutex.Lock()
 	optData = append(optData, EncryptionOptData...)
+	encryptionMutex.Unlock()
 
 	pubkey := common.PubKey{}
 	if primary == false {
@@ -198,13 +222,44 @@ func sendNonceMsgInLoopSelf() {
 	}
 }
 
+// canProduce reports whether this node is currently an eligible block producer:
+// its operator pubkey is registered on-chain (so peers can verify the blocks it
+// signs) and it is a staked top-128 validator. A node that is not (yet) a
+// registered, staked validator must not emit nonces — peers cannot verify them
+// and would otherwise reject/ban us.
+// isEligibleProducer is the testable core of canProduce: given the operator
+// address, its delegated-account id, and whether its pubkey is registered
+// on-chain, report whether it may produce blocks.
+func isEligibleProducer(operator common.Address, delID int, pubkeyRegistered bool) bool {
+	if !pubkeyRegistered {
+		return false
+	}
+	return account.IsTop128StakingNode(delID, operator)
+}
+
+func canProduce() bool {
+	w := wallet.GetActiveWallet()
+	if w == nil {
+		return false
+	}
+	operator := w.MainAddress
+	_, pkErr := pubkeys.LoadPubKeyWithPrimary(operator, true)
+	delID, err := account.IntDelegatedAccountFromAddress(common.GetDelegatedAccount())
+	if err != nil {
+		return false
+	}
+	return isEligibleProducer(operator, delID, pkErr == nil)
+}
+
 func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
-	h := common.GetHeight()
-	if h < common.CurrentHeightOfNetwork {
+	if common.IsBehindNetwork() {
 		return false
 	}
 	isync := common.IsSyncing.Load()
 	if isync == true {
+		return false
+	}
+	if !canProduce() {
 		return false
 	}
 	n, err := generateNonceMsg(topic)
@@ -220,8 +275,16 @@ func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
 }
 
 func sendNonceMsgSelf(ip [4]byte, topic [2]byte) bool {
-	h := common.GetHeight()
-	if h < common.CurrentHeightOfNetwork {
+	if common.IsBehindNetwork() {
+		return false
+	}
+	// Mirror sendNonceMsg: a node importing blocks must not emit nonces on the
+	// self-nonce path either. Relying on the IsSyncing check in OnMessage alone
+	// would leave block production one refactor away from restarting mid-sync.
+	if common.IsSyncing.Load() {
+		return false
+	}
+	if !canProduce() {
 		return false
 	}
 	n, err := generateNonceMsg(topic)
@@ -316,9 +379,6 @@ func StartSubscribingNonceMsg(ip [4]byte) {
 			}
 		case <-tcpip.Quit:
 			services.QUIT.Store(true)
-		default:
-			// Optional: Add a small sleep to prevent busy-waiting
-			time.Sleep(time.Millisecond)
 		}
 	}
 }

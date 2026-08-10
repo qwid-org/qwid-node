@@ -81,7 +81,9 @@ go test -v ./wallet       # verbose output
 
 ### Database Prefix System
 
-RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height).
+RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height), `EV` (EVM state snapshots, store-on-change), `HS`/`HR` (per-account sent/received tx-history index).
+
+State-size invariants: account snapshots must stay O(number of accounts) — per-account transaction history lives in the `HS`/`HR` index (`account/txHistory.go`) with only `SentCount`/`ReceivedCount` counters in state (a rewind restores the counters; re-applied txs overwrite the index tail). Staking detail entries older than `common.StakingDetailsRetentionBlocks` fold into one aggregate at key 0. Accounts/staking snapshots are written once per sync batch (per block on the live path), so snapshot heights have gaps — the highest stored height comes from a `prefix+"LAST"` meta key (`account/heightMeta.go`), never from contiguity-assuming search.
 
 ### Dual Signature System
 
@@ -109,9 +111,42 @@ Runtime config in `~/.qwid/.env`:
 DELEGATED_ACCOUNT=1          # Staking account (1-254, use 1 for genesis node)
 REWARD_PERCENTAGE=200        # Operator reward (0-500, where 500=50%)
 NODE_IP=<your_external_ip>
-WHITELIST_IP=<optional_ip>   # IP to never ban
-HEIGHT_OF_NETWORK=<current_height>  # For faster initial sync
+WHITELIST_IP=<optional_ip>   # IP to EXEMPT from banning/rate-limiting (never banned)
+BLACKLIST_IP=<optional_ips>  # Comma-separated IPs to PERMANENTLY ban (no inbound/outbound/discovery connections; overrides whitelist)
+HEIGHT_OF_NETWORK=<current_height>  # Sync target while the local chain is BELOW it: this value
+                                    # overrides the height derived from peers. Once the local
+                                    # height reaches it, the live peer view takes over
+                                    # (common.GetSyncTarget / IsBehindNetwork), so a stale value
+                                    # cannot pin the target below the real network height. Set it
+                                    # at or above the true network height - a value that is too
+                                    # low lets the node declare itself synced early and fork.
+                                    # Peer height claims up to this value also count as
+                                    # operator-confirmed: they skip the multi-peer consensus
+                                    # throttle in shouldSyncToHeight, so a node with a single
+                                    # peer syncs toward it at full speed (blocks are still
+                                    # fully verified).
+RPC_BIND_ADDRESS=<host>      # Optional. wallet<->node RPC bind host; default 127.0.0.1 (loopback only, NP-C4). Override only if wallet/UI runs on a different host — exposes unauthenticated RPC (e.g. TRAN).
+NODE_IP_SELF_NONCE=<ip>      # Optional. IP for the self-nonce connection; unset = default local behaviour.
 ```
+
+Service/web env vars (read by `cmd/website` / `cmd/explorer` handlers, not from `.env`):
+```
+BIND_ADDRESS=127.0.0.1               # HTTP listener bind host; default all interfaces. Set loopback behind a TLS reverse proxy (WH-M6/M12).
+TRUST_PROXY=true                     # Trust X-Forwarded-For only when behind a trusted proxy (else clients spoof IPs past rate limits).
+CORS_ALLOWED_ORIGINS=<origins>       # Comma-separated allowlist; only these origins are reflected. Default: none.
+COOKIE_INSECURE=true                 # Local HTTP dev only; unset in prod so the session cookie is Secure.
+SMTP_USER / SMTP_PASS                # Optional, for website email features.
+```
+
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change and website-registration flows.
+
+Recovery phrases — exactly which flows produce one:
+- **CLI generator** (`go run cmd/generateNewWallet/main.go`): creates a wallet **from** a fresh 24-word BIP39 phrase (shown once, three words typed back to confirm), and restores a wallet from an existing phrase. The phrase is read without echo and stored encrypted in the wallet file.
+- **Qt GUI** (`cmd/gui`): restores from a phrase, and displays the stored phrase after the wallet password is re-entered (WH-C5).
+- **Web UI** (`cmd/webui` "Create New Wallet") and **public website** (`cmd/website` registration): create wallets with **random** keys and **no** recovery phrase — the phrase must never cross HTTP (design decision 3). The encrypted wallet file plus its password is the only backup, and both handlers say so in their creation response.
+- Wallets created before this feature have no phrase and never can, since a post-quantum secret key cannot be encoded as one (CW-M2) — back up their encrypted wallet file instead.
+- A phrase-less wallet meeting a chain-voted signature-scheme change **refuses** to generate a replacement key, on both the load path (`loadWalletFromStruct`) and the live path (`AddNewEncryptionToActiveWallet`), rather than silently replacing its staked identity with a random one. Block processing continues; the node just cannot sign under the new scheme until the operator restores the wallet.
+- The CLI generator refuses to overwrite an occupied wallet number in either mode unless the operator types a confirmation naming that wallet number.
 
 Genesis config: `~/.qwid/genesis/config/genesis.json` (copy from `genesis/config/genesis_internal_tests.json`)
 
@@ -120,7 +155,7 @@ Genesis config: `~/.qwid/genesis/config/genesis.json` (copy from `genesis/config
 - Chain ID: 23
 - Block interval: 10 seconds
 - Max transactions per block: 5000
-- Max transaction pool: 10,000
+- Max transaction pool: 50,000
 - Max gas per block: 13,700,000
 - Max peers: 6
 - Decimals: 8

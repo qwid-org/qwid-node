@@ -11,6 +11,9 @@ import (
 
 type StakingAccountsType struct {
 	AllStakingAccounts map[[20]byte]StakingAccount `json:"all_staking_accounts"`
+	// StakeChangedAt is the containing block timestamp of the change that most
+	// recently established this delegated account's current total stake.
+	StakeChangedAt int64 `json:"stake_changed_at,omitempty"`
 }
 
 var StakingAccounts [256]StakingAccountsType
@@ -29,6 +32,7 @@ func (at StakingAccountsType) Marshal() []byte {
 		accb := acc.Marshal()
 		buffer.Write(common.BytesToLenAndBytes(accb)) // Marshal and write account
 	}
+	buffer.Write(common.GetByteInt64(at.StakeChangedAt))
 
 	return buffer.Bytes()
 }
@@ -61,6 +65,9 @@ func (at *StakingAccountsType) Unmarshal(data []byte) error {
 
 		at.AllStakingAccounts[address] = acc
 	}
+	if buffer.Len() >= 8 {
+		at.StakeChangedAt = common.GetInt64FromByte(buffer.Next(8))
+	}
 
 	return nil
 }
@@ -78,6 +85,7 @@ func StoreStakingAccounts(height int64) error {
 			logger.GetLogger().Println("cannot store accounts", err)
 		}
 	}
+	raiseLastStoredHeightMeta(common.StakingAccountsDBPrefix, height)
 	return nil
 }
 
@@ -113,6 +121,11 @@ func LoadStakingAccounts(height int64) error {
 func GetStakingAccountByAddressBytes(address []byte, delegatedAccount int) StakingAccount {
 	StakingRWMutex.RLock()
 	defer StakingRWMutex.RUnlock()
+	// AC-M2: bounds-check the delegated account index (0..255) before indexing
+	// the fixed-size array, so an invalid index returns empty instead of panicking.
+	if delegatedAccount < 0 || delegatedAccount >= len(StakingAccounts) {
+		return StakingAccount{}
+	}
 	addrb := [common.AddressLength]byte{}
 	copy(addrb[:], address[:common.AddressLength])
 	return StakingAccounts[delegatedAccount].AllStakingAccounts[addrb]
@@ -120,8 +133,13 @@ func GetStakingAccountByAddressBytes(address []byte, delegatedAccount int) Staki
 
 func RemoveStakingAccountsFromDB(height int64) error {
 	hb := common.GetByteInt64(height)
-	prefix := append(common.StakingAccountsDBPrefix[:], hb...)
+	base := append(common.StakingAccountsDBPrefix[:], hb...)
 	for i := 0; i < 256; i++ {
+		// AC-M3: build a fresh prefix per iteration. The previous code appended
+		// byte(i) to the same accumulating slice, producing prefixes like
+		// base+{0}, base+{0,1}, base+{0,1,2}, ... instead of base+{i}.
+		prefix := make([]byte, len(base), len(base)+1)
+		copy(prefix, base)
 		prefix = append(prefix, byte(i))
 		err := database.MainDB.Delete(prefix)
 		if err != nil {
@@ -132,22 +150,29 @@ func RemoveStakingAccountsFromDB(height int64) error {
 	return nil
 }
 
-func LastHeightStoredInStakingAccounts() (int64, error) {
-	i := int64(0)
-	for {
-		ib := common.GetByteInt64(i)
-		prefix := append(common.StakingAccountsDBPrefix[:], ib...)
-		prefix = append(prefix, byte(1))
-		isKey, err := database.MainDB.IsKey(prefix)
-		if err != nil {
-			return i - 1, err
-		}
-		if !isKey {
-			break
-		}
-		i++
+// StakingAccountsStoredAtHeight reports whether a staking snapshot exists for
+// height. Counterpart of AccountsStoredAtHeight for the rewind path.
+func StakingAccountsStoredAtHeight(height int64) bool {
+	if height < 0 {
+		return false
 	}
-	return i - 1, nil
+	ib := common.GetByteInt64(height)
+	prefix := append(common.StakingAccountsDBPrefix[:], ib...)
+	prefix = append(prefix, byte(1))
+	ok, err := database.MainDB.IsKey(prefix)
+	return err == nil && ok
+}
+
+func LastHeightStoredInStakingAccounts() (int64, error) {
+	// Meta key first - snapshot heights have gaps since they are stored once
+	// per sync batch. The contiguity search is the pre-meta-database fallback.
+	if h, ok := lastStoredHeightMeta(common.StakingAccountsDBPrefix); ok {
+		return h, nil
+	}
+	return database.LastContiguousHeight(database.MainDB, func(h int64) []byte {
+		prefix := append(common.StakingAccountsDBPrefix[:], common.GetByteInt64(h)...)
+		return append(prefix, byte(1))
+	})
 }
 
 func GetStakedInAllDelegatedAccounts() int64 {
@@ -163,4 +188,66 @@ func GetStakedInAllDelegatedAccounts() int64 {
 	}
 
 	return totalStaked
+}
+
+const MaxActiveStakingNodes = 128
+
+// IsTop128StakingNode reports whether operator controls an eligible delegated
+// account in the current staking-state snapshot. Equal delegated totals are
+// ordered by the block time at which the current total was
+// established; equal seconds are finally ordered by delegated-account ID.
+func IsTop128StakingNode(delegatedAccount int, operator common.Address) bool {
+	StakingRWMutex.RLock()
+	defer StakingRWMutex.RUnlock()
+
+	if delegatedAccount <= 0 || delegatedAccount >= len(StakingAccounts) {
+		return false
+	}
+
+	var totals [256]int64
+	for id, delegated := range StakingAccounts {
+		for _, staking := range delegated.AllStakingAccounts {
+			totals[id] += staking.StakedBalance
+		}
+	}
+
+	targetStake := totals[delegatedAccount]
+	if targetStake < common.MinStakingForNode {
+		return false
+	}
+
+	var selectedOperator [common.AddressLength]byte
+	selectedStake := int64(-1)
+	selectedSince := int64(0)
+	for address, staking := range StakingAccounts[delegatedAccount].AllStakingAccounts {
+		if !staking.OperationalAccount {
+			continue
+		}
+		if staking.StakedBalance > selectedStake ||
+			(staking.StakedBalance == selectedStake &&
+				(staking.OperationalSince < selectedSince ||
+					(staking.OperationalSince == selectedSince && bytes.Compare(address[:], selectedOperator[:]) < 0))) {
+			selectedStake = staking.StakedBalance
+			selectedSince = staking.OperationalSince
+			selectedOperator = address
+		}
+	}
+	if selectedStake < 0 || !bytes.Equal(selectedOperator[:], operator.GetBytes()) {
+		return false
+	}
+
+	targetTime := StakingAccounts[delegatedAccount].StakeChangedAt
+	rank := 1
+	for id, stake := range totals {
+		if id == delegatedAccount {
+			continue
+		}
+		candidateTime := StakingAccounts[id].StakeChangedAt
+		if stake > targetStake ||
+			(stake == targetStake && (candidateTime < targetTime ||
+				(candidateTime == targetTime && id < delegatedAccount))) {
+			rank++
+		}
+	}
+	return rank <= MaxActiveStakingNodes
 }

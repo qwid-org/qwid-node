@@ -257,7 +257,7 @@ func ShowSendPage() *widgets.QTabWidget {
 			ChainID:     ChainID,
 			Sender:      MainWallet.MainAddress,
 			SendingTime: common.GetCurrentTimeStampInSecond(),
-			Nonce:       int16(rand.Intn(0xffff)),
+			Nonce:       int64(rand.Intn(0xffff)),
 		}
 		if len(hashms.GetHex()) > 0 {
 			par.MultiSignTx = hashms

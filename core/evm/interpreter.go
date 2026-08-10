@@ -90,15 +90,21 @@ func NewEVMInterpreter(evm *EVM, cfg Config) *EVMInterpreter {
 		default:
 			cfg.JumpTable = &frontierInstructionSet
 		}
-		for i, eip := range cfg.ExtraEips {
-			copy := *cfg.JumpTable
-			if err := EnableEIP(eip, &copy); err != nil {
-				// Disable it, so caller can check if it's activated or not
-				cfg.ExtraEips = append(cfg.ExtraEips[:i], cfg.ExtraEips[i+1:]...)
+		// DB-M1: build the set of successfully-enabled EIPs without mutating the
+		// slice being ranged over (the old append(...[:i], ...[i+1:]) corrupted
+		// subsequent iterations). Only a successfully-enabled EIP applies its
+		// jump-table change and stays in cfg.ExtraEips.
+		enabled := make([]int, 0, len(cfg.ExtraEips))
+		for _, eip := range cfg.ExtraEips {
+			jt := *cfg.JumpTable
+			if err := EnableEIP(eip, &jt); err != nil {
 				fmt.Printf("EIP activation failed eip %v error %v", eip, err)
+				continue
 			}
-			cfg.JumpTable = &copy
+			cfg.JumpTable = &jt
+			enabled = append(enabled, eip)
 		}
+		cfg.ExtraEips = enabled
 	}
 
 	return &EVMInterpreter{

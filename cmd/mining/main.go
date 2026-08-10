@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	_ "net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wonabru/qwid-node/blocks"
@@ -26,6 +28,32 @@ import (
 	"github.com/wonabru/qwid-node/services/transactionServices"
 	"github.com/wonabru/qwid-node/tcpip"
 )
+
+// shutdownLockWait bounds how long a shutdown store waits for the block lock.
+const shutdownLockWait = 3 * time.Second
+
+// lockBlocksForShutdown takes common.BlockMutex for a shutdown store, but only
+// if it becomes free quickly. The lock matters because Store*(-1) writes the
+// live state under common.GetHeight(): running it while a block is being applied
+// would persist a half-applied state as that height's snapshot, and the node
+// would then reject every following block on the supply invariant. Waiting for
+// it unconditionally is just as wrong - a sync batch holds the lock for its
+// whole run, so Ctrl-C would appear to hang. Skipping the store is safe: every
+// applied block already wrote its own snapshot.
+func lockBlocksForShutdown(what string) bool {
+	deadline := time.Now().Add(shutdownLockWait)
+	for {
+		if common.BlockMutex.TryLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			logger.GetLogger().Println("a block is still being applied - skipping the shutdown store of",
+				what, "; the snapshot of the last applied block stands")
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
 
 func main() {
 	var err error
@@ -121,6 +149,10 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing accounts...")
+		if !lockBlocksForShutdown("accounts") {
+			return
+		}
+		defer common.BlockMutex.Unlock()
 		account.StoreAccounts(-1)
 	}()
 
@@ -133,6 +165,10 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing DEX accounts...")
+		if !lockBlocksForShutdown("DEX accounts") {
+			return
+		}
+		defer common.BlockMutex.Unlock()
 		account.StoreDexAccounts(-1)
 	}()
 
@@ -145,6 +181,10 @@ func main() {
 	defer func() {
 		common.IsSyncing.Store(true)
 		logger.GetLogger().Println("Storing staking accounts...")
+		if !lockBlocksForShutdown("staking accounts") {
+			return
+		}
+		defer common.BlockMutex.Unlock()
 		account.StoreStakingAccounts(-1)
 	}()
 
@@ -159,6 +199,12 @@ func main() {
 
 	// Initialize statistics
 	statistics.InitStatsManager()
+
+	// Restore pending escrow transactions so a restart between an escrow's
+	// acceptance and its maturity still settles it (avoids consensus divergence).
+	if err := transactionsPool.LoadEscrowPoolFromDB(); err != nil {
+		logger.GetLogger().Println("could not load persisted escrow pool", err)
+	}
 
 	//Load Main Blockchain
 	services.SetBlockHeightAfterCheck()
@@ -189,37 +235,25 @@ func main() {
 
 	time.Sleep(time.Second)
 
-	// Find peer IP argument (skip flags like -log)
-	var peerIPArg string
-	for _, arg := range os.Args[1:] {
-		if !strings.HasPrefix(arg, "-") {
-			peerIPArg = arg
-			break
+	// Bootstrap peers from the command line (flags like -log are skipped).
+	bootstrapPeers, err := parsePeerIPs(os.Args[1:])
+	if err != nil {
+		logger.GetLogger().Println(err)
+		return
+	}
+	bootstrapDialer := newDialer()
+
+	if len(bootstrapPeers) > 0 {
+		logger.GetLogger().Println("Connecting to bootstrap peers:", bootstrapPeers)
+		for _, ip := range bootstrapPeers {
+			bootstrapDialer.connectToPeer(ip)
 		}
 	}
 
-	if peerIPArg != "" {
-		logger.GetLogger().Println("Processing command line arguments...")
-		ips := strings.Split(peerIPArg, ".")
-		if len(ips) != 4 {
-			logger.GetLogger().Println("Invalid IP address format")
-			return
-		}
-		var ip [4]byte
-		for i := 0; i < 4; i++ {
-			num, err := strconv.Atoi(ips[i])
-			if err != nil {
-				logger.GetLogger().Println("Invalid IP address segment:", ips[i])
-				return
-			}
-			ip[i] = byte(num)
-		}
-
-		logger.GetLogger().Println("Connecting to peer:", ip)
-		go nonceService.StartSubscribingNonceMsg(ip)
-		go syncServices.StartSubscribingSyncMsg(ip)
-		go transactionServices.StartSubscribingTransactionMsg(ip)
-	}
+	// Keep re-dialling them for as long as the node runs. Peer discovery travels
+	// inside 'hi' messages, which need a live connection to arrive, so once every
+	// connection drops nothing reconnects on its own.
+	go keepBootstrapPeersConnected(bootstrapPeers, bootstrapDialer)
 
 	time.Sleep(time.Second)
 
@@ -264,4 +298,139 @@ QF:
 		}
 	}
 
+}
+
+// bootstrapRetryInterval is how often the node checks whether it still has a way
+// into the network.
+const bootstrapRetryInterval = 15 * time.Second
+
+// parsePeerIPs extracts bootstrap peer addresses from the command line. Flags
+// (anything starting with "-") are skipped; every remaining argument may hold one
+// address or a comma-separated list, so both of these work:
+//
+//	mining 1.2.3.4
+//	mining 1.2.3.4,5.6.7.8 9.10.11.12
+//
+// An unparsable address is an error rather than a silent skip: a typo in the only
+// way back into the network should not look like success.
+func parsePeerIPs(args []string) ([][4]byte, error) {
+	var out [][4]byte
+	seen := map[[4]byte]bool{}
+
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		for _, field := range strings.Split(arg, ",") {
+			field = strings.TrimSpace(field)
+			if field == "" {
+				continue
+			}
+			ip, err := parseIPv4(field)
+			if err != nil {
+				return nil, err
+			}
+			if seen[ip] {
+				continue
+			}
+			seen[ip] = true
+			out = append(out, ip)
+		}
+	}
+	return out, nil
+}
+
+func parseIPv4(s string) ([4]byte, error) {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return [4]byte{}, fmt.Errorf("nieprawidłowy adres IP %q: oczekiwano czterech części", s)
+	}
+	var ip [4]byte
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || n > 255 {
+			return [4]byte{}, fmt.Errorf("nieprawidłowa część adresu IP %q w %q", p, s)
+		}
+		ip[i] = byte(n)
+	}
+	return ip, nil
+}
+
+// dialer serializes redial attempts so a peer that is slow or unreachable does
+// not accumulate one blocked goroutine per retry interval. Each
+// StartSubscribing* call runs until its connection ends, so without this a peer
+// that never answers would leak goroutines for as long as the node runs.
+type dialer struct {
+	mu       sync.Mutex
+	inFlight map[string]bool
+}
+
+func newDialer() *dialer {
+	return &dialer{inFlight: map[string]bool{}}
+}
+
+// run starts fn in the background unless a call with the same key is still
+// running. Reports whether it started one.
+func (d *dialer) run(key string, fn func()) bool {
+	d.mu.Lock()
+	if d.inFlight[key] {
+		d.mu.Unlock()
+		return false
+	}
+	d.inFlight[key] = true
+	d.mu.Unlock()
+
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			delete(d.inFlight, key)
+			d.mu.Unlock()
+		}()
+		fn()
+	}()
+	return true
+}
+
+// connectToPeer opens the nonce, sync and transaction subscriptions to one peer.
+func (d *dialer) connectToPeer(ip [4]byte) {
+	if tcpip.IsIPBanned(ip) {
+		logger.GetLogger().Printf("bootstrap peer %v is banned, skipping", ip)
+		return
+	}
+	d.run(fmt.Sprintf("N%v", ip), func() { nonceService.StartSubscribingNonceMsg(ip) })
+	d.run(fmt.Sprintf("B%v", ip), func() { syncServices.StartSubscribingSyncMsg(ip) })
+	d.run(fmt.Sprintf("T%v", ip), func() { transactionServices.StartSubscribingTransactionMsg(ip) })
+}
+
+// needsBootstrap reports whether the node has lost its way into the network.
+// Peer discovery travels inside 'hi' messages, which need a live connection to
+// arrive — so once every connection drops, nothing reconnects on its own and the
+// command-line peers are the only route back.
+//
+// The self-connection does not count. It is present on the sync topic even on a
+// node that is completely alone, and counting it made this check answer "we are
+// connected" while the only chain data reaching us was our own.
+func needsBootstrap() bool {
+	return tcpip.GetPeersCount() == 0 || tcpip.CountPeersOnTopic(tcpip.SyncTopic) == 0
+}
+
+// keepBootstrapPeersConnected re-dials the command-line peers whenever the node
+// has no usable connection left. It never gives up: a node that is down for an
+// hour must rejoin by itself when the link comes back.
+func keepBootstrapPeersConnected(peers [][4]byte, d *dialer) {
+	if len(peers) == 0 {
+		logger.GetLogger().Println("no bootstrap peers given on the command line - " +
+			"this node cannot rejoin the network on its own if every connection drops")
+		return
+	}
+	for {
+		time.Sleep(bootstrapRetryInterval)
+		if !needsBootstrap() {
+			continue
+		}
+		logger.GetLogger().Printf("no usable peer connection - re-dialling %d bootstrap peer(s) from the command line", len(peers))
+		for _, ip := range peers {
+			d.connectToPeer(ip)
+		}
+	}
 }

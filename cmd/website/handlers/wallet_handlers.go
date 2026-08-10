@@ -63,8 +63,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 
 	wl := sess.Wallet
 	inb := append([]byte("ACCT"), wl.MainAddress.GetBytes()...)
-	clientrpc.InRPC <- SignMessage(inb)
-	re := <-clientrpc.OutRPC
+	re := clientrpc.Call(SignMessage(inb))
 	if bytes.Equal(re, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -82,36 +81,42 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	locks := 0.0
 	stakingDetails := []StakingDetail{}
 
-	for i := 1; i < 5; i++ {
-		inb = append([]byte("STAK"), wl.MainAddress.GetBytes()...)
-		inb = append(inb, byte(i))
-		clientrpc.InRPC <- SignMessage(inb)
-		re = <-clientrpc.OutRPC
-		if bytes.Equal(re, []byte("Timeout")) {
-			continue
-		}
+	// One ACCS call returns the stake across all delegated accounts at once.
+	inb = append([]byte("ACCS"), wl.MainAddress.GetBytes()...)
+	re = clientrpc.Call(SignMessage(inb))
+	if !bytes.Equal(re, []byte("Timeout")) && len(re) >= 4 {
+		count := int(common.GetInt32FromByte(re[:4]))
+		b := re[4:]
+		for j := 0; j < count; j++ {
+			blob, rest, err := common.BytesWithLenToBytes(b)
+			if err != nil {
+				break
+			}
+			b = rest
+			if len(blob) < 8 {
+				continue
+			}
+			var stakeAcc account.StakingAccount
+			if err := stakeAcc.Unmarshal(blob[:len(blob)-8]); err != nil {
+				continue
+			}
+			stakedAmount := account.Int64toFloat64(stakeAcc.StakedBalance)
+			rewardsAmount := account.Int64toFloat64(stakeAcc.StakingRewards)
+			lockedAmount := account.Int64toFloat64(common.GetInt64FromByte(blob[len(blob)-8:]))
 
-		var stakeAcc account.StakingAccount
-		if err := stakeAcc.Unmarshal(re[:len(re)-8]); err != nil {
-			continue
-		}
+			stake += stakedAmount
+			rewards += rewardsAmount
+			locks += lockedAmount
 
-		stakedAmount := account.Int64toFloat64(stakeAcc.StakedBalance)
-		rewardsAmount := account.Int64toFloat64(stakeAcc.StakingRewards)
-		lockedAmount := account.Int64toFloat64(common.GetInt64FromByte(re[len(re)-8:]))
-
-		stake += stakedAmount
-		rewards += rewardsAmount
-		locks += lockedAmount
-
-		if stakeAcc.StakedBalance > 0 || stakeAcc.StakingRewards > 0 {
-			a := common.Address{}
-			a.Init(stakeAcc.DelegatedAccount[:])
-			stakingDetails = append(stakingDetails, StakingDetail{
-				DelegatedAddress: a.GetHex(),
-				Staked:           stakedAmount,
-				Rewards:          rewardsAmount,
-			})
+			if stakeAcc.StakedBalance > 0 || stakeAcc.StakingRewards > 0 {
+				a := common.Address{}
+				a.Init(stakeAcc.DelegatedAccount[:])
+				stakingDetails = append(stakingDetails, StakingDetail{
+					DelegatedAddress: a.GetHex(),
+					Staked:           stakedAmount,
+					Rewards:          rewardsAmount,
+				})
+			}
 		}
 	}
 
@@ -124,36 +129,18 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 		TotalHoldings:  conf + stake + rewards,
 		StakingDetails: stakingDetails,
 		EscrowDelay:    acc.TransactionDelay,
-		SentCount:      len(acc.TransactionsSender),
-		ReceivedCount:  len(acc.TransactionsRecipient),
+		SentCount:      int(acc.SentCount),
+		ReceivedCount:  int(acc.ReceivedCount),
 	}
 	JsonResponse(w, resp)
 }
 
+// GetMnemonic is permanently disabled — see the note on the webui handler. This
+// server is multi-user and remote, so serving recovery phrases would put every
+// user's keys on the wire.
 func GetMnemonic(w http.ResponseWriter, r *http.Request) {
-	sess := GetSession(r.Context())
-	if sess == nil || sess.Wallet == nil {
-		JsonError(w, "Wallet not loaded", http.StatusBadRequest)
-		return
-	}
-
-	wl := sess.Wallet
-	mnemonic1, err1 := wl.GetMnemonicWords(true)
-	mnemonic2, err2 := wl.GetMnemonicWords(false)
-
-	resp := map[string]interface{}{
-		"primaryMnemonic":   mnemonic1,
-		"primaryError":      "",
-		"secondaryMnemonic": mnemonic2,
-		"secondaryError":    "",
-	}
-	if err1 != nil {
-		resp["primaryError"] = err1.Error()
-	}
-	if err2 != nil {
-		resp["secondaryError"] = err2.Error()
-	}
-	JsonResponse(w, resp)
+	JsonError(w, "The recovery phrase is available only locally, in the CLI wallet generator "+
+		"or the Qt GUI. It is never served over HTTP.", http.StatusForbidden)
 }
 
 func ChangePassword(w http.ResponseWriter, r *http.Request) {

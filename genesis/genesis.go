@@ -113,7 +113,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	accDel1.Address = addressOp1.ByteValue
 	account.Accounts.AllAccounts[addressOp1.ByteValue] = accDel1
 
-	walletNonce := int16(0)
+	walletNonce := int64(0)
 	blockTransactionsHashesBytes := [][]byte{}
 	blockTransactionsHashes := []common.Hash{}
 	genesisTxs := []transactionsDefinition.Transaction{}
@@ -165,6 +165,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 			DelegatedAccount:   delAddrb,
 			Address:            addrb,
 			OperationalAccount: stkTx.OperationalAccount,
+			OperationalSince:   genesis.Timestamp,
 			LockedInitBlock:    []int64{0},
 			LockedAmount:       []int64{stkTx.LockedAmount},
 			ReleasePerBlock:    []int64{stkTx.ReleasedPerBlock},
@@ -182,6 +183,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 			logger.GetLogger().Fatal("cannot decode pubkey from string in genesis block")
 		}
 		account.StakingAccounts[stkTx.DelegatedAccount].AllStakingAccounts[addrb] = as
+		account.StakingAccounts[stkTx.DelegatedAccount].StakeChangedAt = genesis.Timestamp
 	}
 	err := account.StoreStakingAccounts(0)
 	if err != nil {
@@ -271,7 +273,7 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	return bl
 }
 
-func GenesisTransaction(sender common.Address, recipient common.Address, genTx GenesisTransactions, walletNonce int16, timestamp int64) transactionsDefinition.Transaction {
+func GenesisTransaction(sender common.Address, recipient common.Address, genTx GenesisTransactions, walletNonce int64, timestamp int64) transactionsDefinition.Transaction {
 	pkb, err := hex.DecodeString(genTx.PubKey)
 	if err != nil {
 		logger.GetLogger().Fatal(err)
@@ -412,6 +414,9 @@ func InitGenesis(processTransactions bool) {
 		err = account.StoreAccounts(0)
 		if err != nil {
 			logger.GetLogger().Fatal(err)
+		}
+		if err := blocks.CommitEVMState(genesisBlock.GetHeader().Height); err != nil {
+			logger.GetLogger().Println("cannot store genesis EVM state", err)
 		}
 		err = account.StoreStakingAccounts(0)
 		if err != nil {

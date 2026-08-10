@@ -3,6 +3,7 @@ package oqs // import "github.com/open-quantum-safe/liboqs-go/oqs"
 
 /*
 #cgo pkg-config: liboqs
+#include <stdlib.h>
 #include <oqs/oqs.h>
 */
 import "C"
@@ -10,11 +11,31 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"unsafe"
 )
 
-func init() {
-	fmt.Println(C.GoString(C.OQS_version()))
+// randMutex serializes every liboqs call that consumes randomness:
+// Signature.Sign, Signature.GenerateKeyPair (and the deterministic
+// GenerateKeyPairFromSeed), KeyEncapsulation.GenerateKeyPair, and
+// KeyEncapsulation.EncapSecret. It exists so GenerateKeyPairFromSeed can
+// install a deterministic RNG — which is global to the process — without any
+// concurrent randomness-consuming call observing it. A signature that reused
+// its salt would let anyone recover the private key from two signatures
+// published on-chain; an unguarded EncapSecret racing a seeded keygen can
+// corrupt the shared HKDF reader state, steal stream bytes so the same seed
+// derives a different key pair, or exhaust the stream outright. OQS_SIG_verify
+// and KeyEncapsulation.DecapSecret draw no randomness and are deliberately left
+// unguarded, so block verification and secret decapsulation keep their full
+// parallelism.
+var randMutex sync.Mutex
+
+// Note: the liboqs version is intentionally not printed at startup to avoid
+// leaking the library version to logs/stdout (CW-M5). Use OQSVersion() if needed.
+
+// OQSVersion returns the linked liboqs version string.
+func OQSVersion() string {
+	return C.GoString(C.OQS_version())
 }
 
 /**************** Misc functions ****************/
@@ -43,7 +64,9 @@ func MaxNumberKEMs() int {
 
 // IsKEMEnabled returns true if a KEM algorithm is enabled, and false otherwise.
 func IsKEMEnabled(algName string) bool {
-	result := C.OQS_KEM_alg_is_enabled(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	result := C.OQS_KEM_alg_is_enabled(cAlg)
 	return result != 0
 }
 
@@ -143,7 +166,9 @@ func (kem *KeyEncapsulation) Init(algName string, secretKey []byte) error {
 		}
 		return errors.New(`"` + algName + `" KEM is not supported by OQS`)
 	}
-	kem.kem = C.OQS_KEM_new(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	kem.kem = C.OQS_KEM_new(cAlg)
 	kem.secretKey = secretKey
 	kem.algDetails.Name = C.GoString(kem.kem.method_name)
 	kem.algDetails.Version = C.GoString(kem.kem.alg_version)
@@ -166,6 +191,9 @@ func (kem *KeyEncapsulation) Details() KeyEncapsulationDetails {
 // is not directly accessible, unless one exports it with
 // KeyEncapsulation.ExportSecretKey method.
 func (kem *KeyEncapsulation) GenerateKeyPair() ([]byte, error) {
+	randMutex.Lock()
+	defer randMutex.Unlock()
+
 	publicKey := make([]byte, kem.algDetails.LengthPublicKey)
 	kem.secretKey = make([]byte, kem.algDetails.LengthSecretKey)
 
@@ -188,6 +216,9 @@ func (kem *KeyEncapsulation) ExportSecretKey() []byte {
 // corresponding ciphertext and shared secret.
 func (kem *KeyEncapsulation) EncapSecret(publicKey []byte) (ciphertext,
 	sharedSecret []byte, err error) {
+	randMutex.Lock()
+	defer randMutex.Unlock()
+
 	if len(publicKey) != kem.algDetails.LengthPublicKey {
 		return nil, nil, errors.New("incorrect public key length")
 	}
@@ -261,7 +292,9 @@ func MaxNumberSigs() int {
 // IsSigEnabled returns true if a signature algorithm is enabled, and false
 // otherwise.
 func IsSigEnabled(algName string) bool {
-	result := C.OQS_SIG_alg_is_enabled(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	result := C.OQS_SIG_alg_is_enabled(cAlg)
 	return result != 0
 }
 
@@ -363,7 +396,9 @@ func (sig *Signature) Init(algName string, secretKey []byte) error {
 			`" signature mechanism is not supported by OQS`)
 
 	}
-	sig.sig = C.OQS_SIG_new(C.CString(algName))
+	cAlg := C.CString(algName)
+	defer C.free(unsafe.Pointer(cAlg))
+	sig.sig = C.OQS_SIG_new(cAlg)
 	sig.secretKey = secretKey
 	sig.algDetails.Name = C.GoString(sig.sig.method_name)
 	sig.algDetails.Version = C.GoString(sig.sig.alg_version)
@@ -385,6 +420,14 @@ func (sig *Signature) Details() SignatureDetails {
 // is not directly accessible, unless one exports it with
 // Signature.ExportSecretKey method.
 func (sig *Signature) GenerateKeyPair() ([]byte, error) {
+	randMutex.Lock()
+	defer randMutex.Unlock()
+	return sig.generateKeyPairUnlocked()
+}
+
+// generateKeyPairUnlocked is the body of GenerateKeyPair. The caller must hold
+// randMutex.
+func (sig *Signature) generateKeyPairUnlocked() ([]byte, error) {
 	publicKey := make([]byte, sig.algDetails.LengthPublicKey)
 	sig.secretKey = make([]byte, sig.algDetails.LengthSecretKey)
 
@@ -410,6 +453,9 @@ func (sig *Signature) Sign(message []byte) ([]byte, error) {
 			"specify one in Set() or run GenerateKeyPair()")
 	}
 
+	randMutex.Lock()
+	defer randMutex.Unlock()
+
 	signature := make([]byte, sig.algDetails.MaxLengthSignature)
 	var lenSig int64
 	rv := C.OQS_SIG_sign(sig.sig, (*C.uint8_t)(unsafe.Pointer(&signature[0])),
@@ -428,6 +474,9 @@ func (sig *Signature) Sign(message []byte) ([]byte, error) {
 // signature is valid, and false otherwise.
 func (sig *Signature) Verify(message []byte, signature []byte,
 	publicKey []byte) (bool, error) {
+	if len(message) == 0 || len(signature) == 0 {
+		return false, errors.New("empty message or signature") // CW-M1: avoid &x[0] panic
+	}
 	if len(publicKey) != sig.algDetails.LengthPublicKey {
 		return false, errors.New("incorrect public key length")
 	}

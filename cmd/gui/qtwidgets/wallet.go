@@ -2,11 +2,15 @@ package qtwidgets
 
 import (
 	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/therecipe/qt/core"
+	"github.com/therecipe/qt/widgets"
 	"github.com/wonabru/qwid-node/common"
 	clientrpc "github.com/wonabru/qwid-node/rpc/client"
 	"github.com/wonabru/qwid-node/wallet"
-	"github.com/therecipe/qt/widgets"
-	"strconv"
 )
 
 var err error
@@ -19,6 +23,70 @@ func isRegisteredPubKeyInBlockchain() {
 		info := string(reply)
 		widgets.QMessageBox_Information(nil, "Warning", info, widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	}
+}
+
+// walletFilePathOf is the file StoreJSON writes for w — named in every dialog
+// that is about to destroy it, so the user can see exactly which file is at
+// stake before confirming.
+func walletFilePathOf(w *wallet.Wallet) string {
+	return filepath.Join(w.HomePath, "wallet"+strconv.Itoa(int(w.WalletNumber))+".json")
+}
+
+// overwriteConfirmationPhrase is what must be typed to destroy a wallet file. It
+// names the wallet number, so a confirmation given for one wallet cannot be
+// clicked through for another.
+func overwriteConfirmationPhrase(walletNumber uint8) string {
+	return fmt.Sprintf("overwrite wallet %d", walletNumber)
+}
+
+// matchesOverwriteConfirmation reports whether answer is the confirmation phrase
+// for walletNumber. Surrounding and repeated whitespace and letter case are
+// ignored; nothing else is — in particular a bare "yes" never matches.
+func matchesOverwriteConfirmation(answer string, walletNumber uint8) bool {
+	return strings.Join(strings.Fields(strings.ToLower(answer)), " ") == overwriteConfirmationPhrase(walletNumber)
+}
+
+// confirmWalletFileOverwrite asks for the typed confirmation phrase before a
+// wallet file is replaced. Returns false on cancel, empty input, or anything
+// that is not the exact phrase.
+func confirmWalletFileOverwrite(walletNumber uint8, walletFile string) bool {
+	want := overwriteConfirmationPhrase(walletNumber)
+	ok := false
+	answer := widgets.QInputDialog_GetText(nil,
+		"Replace wallet file?",
+		fmt.Sprintf("This REPLACES wallet %d:\n%s\n\n"+
+			"The keys currently in that file will be destroyed permanently. If that wallet has no "+
+			"recovery phrase of its own, this file is the only copy of its keys and nothing can bring "+
+			"them back — any funds on it are lost.\n\n"+
+			"To continue, type exactly:  %s", walletNumber, walletFile, want),
+		widgets.QLineEdit__Normal, "", &ok, core.Qt__Widget, core.Qt__ImhNone)
+	if !ok {
+		return false
+	}
+	if !matchesOverwriteConfirmation(answer, walletNumber) {
+		widgets.QMessageBox_Information(nil, "Cancelled",
+			fmt.Sprintf("Confirmation did not match %q — nothing was changed.", want),
+			widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		return false
+	}
+	return true
+}
+
+// askForPasswordAndVerify re-authenticates the operator against the loaded
+// wallet (WH-C5). Returns true only on a correct password.
+func askForPasswordAndVerify(title, prompt string) bool {
+	ok := false
+	password := widgets.QInputDialog_GetText(nil, title, prompt,
+		widgets.QLineEdit__Password, "", &ok, core.Qt__Widget, core.Qt__ImhNone)
+	if !ok {
+		return false
+	}
+	if !MainWallet.VerifyPassword(password) {
+		widgets.QMessageBox_Information(nil, "Error", "Wrong password",
+			widgets.QMessageBox__Close, widgets.QMessageBox__Close)
+		return false
+	}
+	return true
 }
 
 func ShowWalletPage() *widgets.QTabWidget {
@@ -242,47 +310,84 @@ func ShowWalletPage() *widgets.QTabWidget {
 		widgets.QMessageBox_Information(nil, "OK", "Password changed", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	})
 	widget.Layout().AddWidget(buttonChangePassword)
-	buttonMnemonic := widgets.NewQPushButton2("Show mnemonic words", nil)
+	buttonMnemonic := widgets.NewQPushButton2("Show recovery phrase", nil)
 	buttonMnemonic.ConnectClicked(func(bool) {
-		var v string
+		if MainWallet == nil || MainWallet.GetSecretKey().GetLength() == 0 {
+			widgets.QMessageBox_Information(nil, "Error", "Load wallet first", widgets.QMessageBox__Close, widgets.QMessageBox__Close)
+			return
+		}
+		// WH-C5: re-authenticate before revealing the phrase. Being unlocked is
+		// not enough — the phrase IS the whole wallet, for every scheme and both
+		// roles and for any scheme the chain votes in later, so an unlocked GUI
+		// left unattended would otherwise hand it to whoever walks up. The
+		// deleted HTTP handlers required password re-entry for exactly this; the
+		// GUI must not be the weaker door.
+		if !askForPasswordAndVerify("Show recovery phrase",
+			"Re-enter the wallet password to display the recovery phrase.\nThe phrase alone gives full control of this wallet.") {
+			return
+		}
 		mnemonic, err := MainWallet.GetMnemonicWords(true)
 		if err != nil {
-			v = err.Error()
-		} else {
-			v = fmt.Sprintf("Mnemonic words for primary encryption:\n%v", mnemonic)
+			widgets.QMessageBox_Information(nil, "OK", err.Error(), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+			return
 		}
-		mnemonic2, err := MainWallet.GetMnemonicWords(false)
-		if err != nil {
-			v += err.Error()
-		} else {
-			v += fmt.Sprintf("\nMnemonic words for secondary encryption:\n%v", mnemonic2)
-		}
-		widgets.QMessageBox_Information(nil, "OK", v, widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		widgets.QMessageBox_Information(nil, "OK",
+			fmt.Sprintf("Recovery phrase (24 words) — write it down and keep it offline:\n\n%v", mnemonic),
+			widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	})
 	widget.Layout().AddWidget(buttonMnemonic)
 
 	inputRestoreMnemonic := widgets.NewQLineEdit(nil)
-	inputRestoreMnemonic.SetPlaceholderText("Mnemonic words seperated by space:")
+	inputRestoreMnemonic.SetPlaceholderText("24 recovery words separated by spaces")
 	widget.Layout().AddWidget(inputRestoreMnemonic)
-	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore private key from mnemonic words", nil)
+	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore keys from recovery phrase", nil)
 	buttonRestoreMnemonic.ConnectClicked(func(bool) {
-		err := MainWallet.RestoreSecretKeyFromMnemonic(inputRestoreMnemonic.Text(), true)
-		if err != nil {
-			widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Can not restore primary Private key from mnemonic words:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
-
-		} else {
-			sec := MainWallet.GetSecretKey()
-			widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Primary Private Key:\n%v", sec.GetHex()), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		if MainWallet == nil || MainWallet.GetSecretKey().GetLength() == 0 {
+			widgets.QMessageBox_Information(nil, "Error", "Load wallet first", widgets.QMessageBox__Close, widgets.QMessageBox__Close)
 			return
 		}
-		err = MainWallet.RestoreSecretKeyFromMnemonic(inputRestoreMnemonic.Text(), false)
-		if err != nil {
-			widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Can not restore secondary Private key from mnemonic words:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+		phrase := inputRestoreMnemonic.Text()
+
+		// The restore is persisted below, so it destroys the wallet file it is
+		// applied to. Confirm first, naming the wallet number and the exact file
+		// (same rule as the CLI generator), and require the confirmation to be
+		// typed: a restore is run by someone who has just lost a wallet, and a
+		// one-click "Yes" is precisely what gets clicked in that state.
+		if !confirmWalletFileOverwrite(MainWallet.WalletNumber, walletFilePathOf(MainWallet)) {
 			return
 		}
-		sec := MainWallet.GetSecretKey2()
-		widgets.QMessageBox_Information(nil, "OK", fmt.Sprintf("Secondary Private Key:\n%v", sec.GetHex()), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 
+		// The `primary` argument is ignored: one phrase rebuilds the whole wallet
+		// (both accounts and MainAddress) atomically in a single call. Do not add
+		// a second call here — it would just re-run both PQ key derivations from
+		// scratch, and a transient failure on that redundant second call would
+		// wrongly report the restore as failed even though it already succeeded.
+		if err := MainWallet.RestoreSecretKeyFromMnemonic(phrase, true); err != nil {
+			widgets.QMessageBox_Information(nil, "OK",
+				fmt.Sprintf("Cannot restore keys from recovery phrase:\n%v", err), widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+			return
+		}
+		// Do not leave the phrase sitting in a widget for the lifetime of the
+		// process: it is the entire wallet, and the field is plain text.
+		inputRestoreMnemonic.SetText("")
+
+		// Persist it. Without this the dialog below would be a lie: the file
+		// still holds the OLD identity, the next launch loads it, and meanwhile
+		// any later "Change password" (which calls StoreJSON) would write the
+		// restored accounts out anyway — unannounced, and at a moment the user
+		// has no reason to connect with the restore.
+		if err := MainWallet.StoreJSON(); err != nil {
+			widgets.QMessageBox_Information(nil, "Error",
+				fmt.Sprintf("Keys were restored in memory but the wallet file was NOT written:\n%v\n\n"+
+					"The file still holds the previous identity. Do not close this window before "+
+					"resolving this, or the restore is lost.", err),
+				widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
+			return
+		}
+		widgets.QMessageBox_Information(nil, "OK",
+			fmt.Sprintf("Keys restored and saved to %v.\nWallet address:\n%v",
+				walletFilePathOf(MainWallet), MainWallet.MainAddress.GetHex()),
+			widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	})
 	widget.Layout().AddWidget(buttonRestoreMnemonic)
 	return widget

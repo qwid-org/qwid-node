@@ -1,7 +1,6 @@
 package nonceServices
 
 import (
-	"bytes"
 	"runtime/debug"
 
 	"github.com/wonabru/qwid-node/logger"
@@ -11,6 +10,7 @@ import (
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/message"
 	"github.com/wonabru/qwid-node/oracles"
+	"github.com/wonabru/qwid-node/pubkeys"
 	"github.com/wonabru/qwid-node/services"
 	"github.com/wonabru/qwid-node/services/transactionServices"
 	"github.com/wonabru/qwid-node/statistics"
@@ -73,6 +73,17 @@ func OnMessage(addr [4]byte, m []byte) {
 		//KU TEMP TODO
 		isValid = transaction.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
 		if isValid == false {
+			// Distinguish an unregistered/unknown sender (we may simply be behind,
+			// or the sender has not registered its pubkey on-chain yet) from a
+			// genuinely bad signature. Only the latter is malicious and warrants a
+			// ban; banning on a missing pubkey would ban our own sync source.
+			sender := transaction.GetSenderAddress()
+			sigb := transaction.GetSignature().GetBytes()
+			primary := len(sigb) > 0 && sigb[0] == 0
+			if _, perr := pubkeys.LoadPubKeyWithPrimary(sender, primary); perr != nil {
+				logger.GetLogger().Println("nonce from sender with unregistered pubkey, ignoring (not banning)")
+				return
+			}
 			logger.GetLogger().Println("nonce signature is invalid")
 			tcpip.ReduceAndCheckIfBanIP(addr)
 			return
@@ -84,11 +95,27 @@ func OnMessage(addr [4]byte, m []byte) {
 		if err != nil {
 			return
 		}
+		// Authorize the sender before mutating any oracle or voting state.  The
+		// recipient is supplied by the sender, so a valid signature alone does not
+		// prove that the sender controls the delegated account named there.
+		mainAddress := transaction.GetSenderAddress()
+		if !account.IsTop128StakingNode(n, mainAddress) {
+			logger.GetLogger().Println("sender is not an eligible top-128 staking node", n, mainAddress.GetBytes()[:5])
+			tcpip.ReduceAndCheckIfBanIP(addr)
+			return
+		}
 		//delMy := common.GetDelegatedAccount()
 		//if addr != tcpip.MyIP && bytes.Equal(txDelAcc.GetBytes(), delMy.GetBytes()) && addr != [4]byte{0, 0, 0, 0} {
 		//	MyIP2 = addr
 		//}
 		// get oracles from nonce transaction
+		// NP-C7: validate length before slicing so a crafted short OptData
+		// cannot panic the node. Need the 8-byte + hash header, plus 8 bytes for
+		// price, 8 for rand.
+		if len(transaction.TxData.OptData) < 8+common.HashLength+16 {
+			logger.GetLogger().Println("nonce tx OptData too short for oracle/voting data")
+			return
+		}
 		optData := transaction.TxData.OptData[8+common.HashLength:]
 		_, stakedInDelAcc, _ := account.GetStakedInDelegatedAccount(n)
 		stakedInDelAccInt := int64(stakedInDelAcc)
@@ -100,6 +127,12 @@ func OnMessage(addr [4]byte, m []byte) {
 		err = oracles.SaveRandOracle(common.GetInt64FromByte(optData[8:16]), nonceHeight, txDelAcc, stakedInDelAccInt)
 		if err != nil {
 			logger.GetLogger().Println("could not save rand oracle", err)
+		}
+		// Retain the signed nonce transaction so it can be embedded in the block
+		// as a provenance proof for the oracle values above.
+		err = oracles.SaveOracleProof(txDelAcc, nonceHeight, transaction.GetBytes())
+		if err != nil {
+			logger.GetLogger().Println("could not save oracle proof", err)
 		}
 
 		vb, b2, err := common.BytesWithLenToBytes(optData[16:])
@@ -117,15 +150,6 @@ func OnMessage(addr [4]byte, m []byte) {
 		err = voting.SaveVotesEncryption2(vb[:], nonceHeight, txDelAcc, stakedInDelAccInt)
 		if err != nil {
 			logger.GetLogger().Println("could not save voting, 2", err)
-		}
-
-		mainAddress := transaction.TxParam.Sender
-
-		// checking if enough coins staked
-		if _, sumStaked, operationalAcc := account.GetStakedInDelegatedAccount(n); int64(sumStaked) < common.MinStakingForNode || !bytes.Equal(operationalAcc.Address[:], mainAddress.GetBytes()) {
-			logger.GetLogger().Println("not enough staked coins to be a node or not valid operational account", sumStaked, common.MinStakingForNode, operationalAcc.Address[:5], mainAddress.GetBytes()[:5])
-			tcpip.ReduceAndCheckIfBanIP(addr)
-			return
 		}
 
 		lastBlock, err := blocks.LoadBlock(h)
@@ -235,7 +259,8 @@ func OnMessage(addr [4]byte, m []byte) {
 
 				err = blocks.CheckBlockAndTransferFunds(&newBlock, lastBlock, merkleTrie, true)
 				if err != nil {
-					services.ResetAccountsAndBlocksSync(lastBlock.GetHeader().Height)
+					// Locked variant: common.BlockMutex is held for this whole case.
+					services.ResetAccountsAndBlocksSyncLocked(lastBlock.GetHeader().Height)
 					logger.GetLogger().Println("check transfer transactions in block fails", err)
 					return
 				}
@@ -243,7 +268,7 @@ func OnMessage(addr [4]byte, m []byte) {
 				if err != nil {
 					logger.GetLogger().Println(err)
 					logger.GetLogger().Println("cannot store block")
-					services.ResetAccountsAndBlocksSync(lastBlock.GetHeader().Height)
+					services.ResetAccountsAndBlocksSyncLocked(lastBlock.GetHeader().Height)
 					return
 				}
 
@@ -251,6 +276,12 @@ func OnMessage(addr [4]byte, m []byte) {
 				err = account.StoreAccounts(newBlock.GetHeader().Height)
 				if err != nil {
 					logger.GetLogger().Println(err)
+				}
+				// Store-on-change: a snapshot is written only when this block executed
+				// a contract/DEX/token transaction, so the EV keyspace grows with
+				// contract activity, not chain length.
+				if err := blocks.CommitEVMStateIfChanged(newBlock.GetHeader().Height); err != nil {
+					logger.GetLogger().Println("cannot store EVM state", err)
 				}
 
 				err = account.StoreStakingAccounts(newBlock.GetHeader().Height)
@@ -261,6 +292,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				sm := statistics.GetStatsManager()
 				sm.UpdateStatistics(newBlock, lastBlock)
 				logger.GetLogger().Println("TPS: ", sm.Stats.Tps)
+				// NP-M11: release this iteration's merkle tree promptly instead of
+				// letting deferred Destroy calls accumulate until the function
+				// returns. Destroy is idempotent, so the defer above is harmless.
+				merkleTrie.Destroy()
 			}
 		}
 	default:

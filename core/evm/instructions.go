@@ -607,7 +607,9 @@ func opCreate(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]b
 		bigVal = value.ToBig()
 	}
 
-	res, addr, returnGas, suberr := interpreter.evm.Create(scope.Contract, input, gas, bigVal, 23)
+	callerAddr := scope.Contract.Address()
+	nonce := interpreter.evm.StateDB.GetNonce(callerAddr)
+	res, addr, returnGas, suberr := interpreter.evm.Create(scope.Contract, input, gas, bigVal, nonce)
 	// Push item on the stack based on the returned error. If the ruleset is
 	// homestead we must check for CodeStoreOutOfGasError (homestead only
 	// rule) and treat as an error, if the ruleset is frontier we must
@@ -837,6 +839,7 @@ func opSelfdestruct(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext
 	beneficiary := scope.Stack.pop()
 	balance := interpreter.evm.StateDB.GetBalance(scope.Contract.Address())
 	interpreter.evm.StateDB.AddBalance(common.SetByteAddress(beneficiary.Bytes20()), balance)
+	interpreter.evm.StateDB.SubBalance(scope.Contract.Address(), interpreter.evm.StateDB.GetBalance(scope.Contract.Address())) // supply-neutral (DB-C1)
 	interpreter.evm.StateDB.Suicide(scope.Contract.Address())
 	if interpreter.cfg.Debug {
 		interpreter.cfg.Tracer.CaptureEnter(SELFDESTRUCT, scope.Contract.Address(), common.SetByteAddress(beneficiary.Bytes20()), []byte{}, 0, balance)

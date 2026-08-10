@@ -17,14 +17,62 @@ type StakingAccount struct {
 	DelegatedAccount   [common.AddressLength]byte `json:"delegated_account"`
 	Address            [common.AddressLength]byte `json:"address"`
 	OperationalAccount bool                       `json:"operational_account"`
-	LastStakeHeight    int64                      `json:last_stake_height,omitempty`
-	StakingDetails     map[int64][]StakingDetail  `json:"staking_details,omitempty"` // block number as key of map
+	// OperationalSince is the containing block's timestamp (Unix seconds) of
+	// the first operator signal. It is consensus data used to resolve equal
+	// operator stakes according to the whitepaper's "fastest signal" rule.
+	OperationalSince int64                     `json:"operational_since,omitempty"`
+	LastStakeHeight  int64                     `json:last_stake_height,omitempty`
+	StakingDetails   map[int64][]StakingDetail `json:"staking_details,omitempty"` // block number as key of map
 }
 
 type StakingDetail struct {
 	Amount      int64 `json:"amount"`
 	Reward      int64 `json:"reward"`
 	LastUpdated int64 `json:"last_updated"`
+}
+
+// pruneStakingDetails folds detail entries older than
+// common.StakingDetailsRetentionBlocks below height into a single aggregate
+// entry at key 0. Rewards append an entry EVERY block, so without this the
+// map grows one entry per block forever and the staking snapshot marshals
+// O(chain history). Details are informational (wallet display) - consensus
+// reads only StakedBalance/StakingRewards/locks - so folding them changes no
+// validation, and the totals a wallet shows stay exact because amounts and
+// rewards are summed, never dropped. Callers hold StakingRWMutex.
+func pruneStakingDetails(acc *StakingAccount, height int64) {
+	cutoff := height - common.StakingDetailsRetentionBlocks
+	if cutoff <= 0 || acc.StakingDetails == nil {
+		return
+	}
+	agg := StakingDetail{}
+	if existing, ok := acc.StakingDetails[0]; ok && len(existing) > 0 {
+		// Previous aggregate (or genesis-height details) - keep folding into it.
+		for _, d := range existing {
+			agg.Amount += d.Amount
+			agg.Reward += d.Reward
+			if d.LastUpdated > agg.LastUpdated {
+				agg.LastUpdated = d.LastUpdated
+			}
+		}
+	}
+	folded := false
+	for h, details := range acc.StakingDetails {
+		if h == 0 || h >= cutoff {
+			continue
+		}
+		for _, d := range details {
+			agg.Amount += d.Amount
+			agg.Reward += d.Reward
+			if d.LastUpdated > agg.LastUpdated {
+				agg.LastUpdated = d.LastUpdated
+			}
+		}
+		delete(acc.StakingDetails, h)
+		folded = true
+	}
+	if folded {
+		acc.StakingDetails[0] = []StakingDetail{agg}
+	}
 }
 
 func GetLockedAmount(accb []byte, height int64, delegatedAccount int) (int64, error) {
@@ -53,7 +101,7 @@ func lastStakeBlock(accb StakingAccount) (hmax int64) {
 	return accb.LastStakeHeight
 }
 
-func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operational bool, lockedAmount int64, releasePerBlock int64) error {
+func Stake(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int, operational bool, lockedAmount int64, releasePerBlock int64) error {
 	if len(accb) != common.AddressLength {
 		return fmt.Errorf("wrong address length, must be %v", common.AddressLength)
 	}
@@ -85,6 +133,9 @@ func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operat
 	// in order for someone else not to spoil to be operator
 	if lockedAmount == 0 && acc.OperationalAccount == false {
 		acc.OperationalAccount = operational
+		if operational {
+			acc.OperationalSince = stakingTime
+		}
 	}
 	acc.StakedBalance += amount
 	acc.LastStakeHeight = height
@@ -96,21 +147,27 @@ func Stake(accb []byte, amount int64, height int64, delegatedAccount int, operat
 	sd := StakingDetail{
 		Amount:      amount,
 		Reward:      0,
-		LastUpdated: time.Now().Unix(),
+		LastUpdated: stakingTime,
+	}
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
+		acc.StakingDetails = map[int64][]StakingDetail{}
 	}
 	if _, ok := acc.StakingDetails[height]; !ok {
-		acc.StakingDetails = map[int64][]StakingDetail{}
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 	da := common.GetDelegatedAccountAddress(int16(delegatedAccount))
 	copy(acc.DelegatedAccount[:], da.GetBytes())
 	copy(acc.Address[:], accb[:])
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
+	StakingAccounts[delegatedAccount].StakeChangedAt = stakingTime
 	return nil
 }
 
-func Unstake(accb []byte, amount int64, height int64, delegatedAccount int) error {
+func Unstake(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int) error {
 	if len(accb) != common.AddressLength {
 		return fmt.Errorf("wrong address length, must be %v", common.AddressLength)
 	}
@@ -144,27 +201,53 @@ func Unstake(accb []byte, amount int64, height int64, delegatedAccount int) erro
 	if acc.StakedBalance-locked+amount < 0 {
 		return fmt.Errorf("insufficient staked balance after locking")
 	}
-	for _, ind := range toRemoveLockedInd {
-		acc.LockedAmount = append(acc.LockedAmount[:ind], acc.LockedAmount[ind+1:]...)
-		acc.ReleasePerBlock = append(acc.ReleasePerBlock[:ind], acc.ReleasePerBlock[ind+1:]...)
-		acc.LockedInitBlock = append(acc.LockedInitBlock[:ind], acc.LockedInitBlock[ind+1:]...)
+	// AC-H1: rebuild the three parallel slices excluding the marked indices.
+	// The previous code removed by original index in a loop, but each removal
+	// shifts later elements, so subsequent indices were wrong (dropping the
+	// wrong entry or panicking).
+	if len(toRemoveLockedInd) > 0 {
+		remove := make(map[int]bool, len(toRemoveLockedInd))
+		for _, ind := range toRemoveLockedInd {
+			remove[ind] = true
+		}
+		newAmount := make([]int64, 0, numLocked)
+		newRelease := make([]int64, 0, numLocked)
+		newInit := make([]int64, 0, numLocked)
+		for i := 0; i < numLocked; i++ {
+			if remove[i] {
+				continue
+			}
+			newAmount = append(newAmount, acc.LockedAmount[i])
+			newRelease = append(newRelease, acc.ReleasePerBlock[i])
+			newInit = append(newInit, acc.LockedInitBlock[i])
+		}
+		acc.LockedAmount = newAmount
+		acc.ReleasePerBlock = newRelease
+		acc.LockedInitBlock = newInit
 	}
 	acc.StakedBalance += amount
 	acc.LastStakeHeight = height
 	if acc.StakedBalance == 0 {
 		acc.OperationalAccount = false
+		acc.OperationalSince = 0
 	}
 	sd := StakingDetail{
 		Amount:      amount,
-		LastUpdated: time.Now().Unix(),
+		LastUpdated: stakingTime,
+	}
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
+		acc.StakingDetails = map[int64][]StakingDetail{}
 	}
 	if _, ok := acc.StakingDetails[height]; !ok {
-		acc.StakingDetails = map[int64][]StakingDetail{}
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
+	StakingAccounts[delegatedAccount].StakeChangedAt = stakingTime
 	return nil
 }
 
@@ -188,11 +271,16 @@ func Reward(accb []byte, reward int64, height int64, delegatedAccount int) error
 		Reward:      reward,
 		LastUpdated: time.Now().Unix(),
 	}
-	if _, ok := acc.StakingDetails[height]; !ok {
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
 		acc.StakingDetails = map[int64][]StakingDetail{}
+	}
+	if _, ok := acc.StakingDetails[height]; !ok {
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
 	return nil
 }
@@ -220,11 +308,16 @@ func WithdrawReward(accb []byte, amount int64, height int64, delegatedAccount in
 		Reward:      amount,
 		LastUpdated: time.Now().Unix(),
 	}
-	if _, ok := acc.StakingDetails[height]; !ok {
+	// AC-C3: only lazily initialize the map when nil; never replace it, which
+	// would erase the staking history recorded at all other heights.
+	if acc.StakingDetails == nil {
 		acc.StakingDetails = map[int64][]StakingDetail{}
+	}
+	if _, ok := acc.StakingDetails[height]; !ok {
 		acc.StakingDetails[height] = []StakingDetail{}
 	}
 	acc.StakingDetails[height] = append(acc.StakingDetails[height], sd)
+	pruneStakingDetails(&acc, height)
 
 	StakingAccounts[delegatedAccount].AllStakingAccounts[acc.Address] = acc
 	return nil
@@ -264,6 +357,8 @@ func (sa StakingAccount) Marshal() []byte {
 			buffer.Write(common.GetByteInt64(detail.LastUpdated))
 		}
 	}
+	// Appended for backward-compatible decoding of existing snapshots.
+	buffer.Write(common.GetByteInt64(sa.OperationalSince))
 
 	return buffer.Bytes()
 }
@@ -327,10 +422,16 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 
 		sa.StakingDetails[key] = details
 	}
+	if buffer.Len() >= 8 {
+		sa.OperationalSince = common.GetInt64FromByte(buffer.Next(8))
+	}
 	return nil
 }
 
-func GetStakedInDelegatedAccount(n int) ([]Account, float64, Account) {
+// GetStakedInDelegatedAccount returns the staking accounts, the total staked
+// balance (exact int64, previously float64 which lost precision above 2^53 in
+// reward math — AC-H5/AC-M9), and the operational account.
+func GetStakedInDelegatedAccount(n int) ([]Account, int64, Account) {
 	StakingRWMutex.RLock()
 	defer StakingRWMutex.RUnlock()
 	sum := int64(0)
@@ -344,6 +445,7 @@ func GetStakedInDelegatedAccount(n int) ([]Account, float64, Account) {
 		TransactionsRecipient: make([]common.Hash, 0),
 	}
 	accs := []Account{}
+	operatorSince := int64(0)
 	for _, sa := range StakingAccounts[n].AllStakingAccounts {
 		acc := Account{
 			Balance:               sa.StakedBalance,
@@ -355,12 +457,16 @@ func GetStakedInDelegatedAccount(n int) ([]Account, float64, Account) {
 			TransactionsRecipient: make([]common.Hash, 0),
 		}
 		copy(acc.Address[:], sa.Address[:])
-		if intAcc.Balance < sa.StakedBalance && sa.OperationalAccount {
+		if sa.OperationalAccount && (intAcc.Balance < sa.StakedBalance ||
+			(intAcc.Balance == sa.StakedBalance &&
+				(sa.OperationalSince < operatorSince ||
+					(sa.OperationalSince == operatorSince && bytes.Compare(sa.Address[:], intAcc.Address[:]) < 0)))) {
 			intAcc.Balance = sa.StakedBalance
+			operatorSince = sa.OperationalSince
 			copy(intAcc.Address[:], sa.Address[:])
 		}
 		sum += sa.StakedBalance
 		accs = append(accs, acc)
 	}
-	return accs, float64(sum), intAcc
+	return accs, sum, intAcc
 }

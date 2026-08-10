@@ -31,8 +31,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch account via DETS
-	clientrpc.InRPC <- SignMessage(append([]byte("DETS"), addrBytes...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("DETS"), addrBytes...)))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -58,8 +57,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	for i := 1; i < 5; i++ {
 		inb := append([]byte("STAK"), addrBytes...)
 		inb = append(inb, byte(i))
-		clientrpc.InRPC <- SignMessage(inb)
-		re := <-clientrpc.OutRPC
+		re := clientrpc.Call(SignMessage(inb))
 		if bytes.Equal(re, []byte("Timeout")) {
 			continue
 		}
@@ -97,8 +95,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := len(sentHashes) - 1; i >= 0; i-- {
 		h := sentHashes[i]
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-		txReply := <-clientrpc.OutRPC
+		txReply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 		if len(txReply) > 3 && string(txReply[:2]) == "TX" {
 			locLen := int(txReply[2])
 			if len(txReply) > 3+locLen {
@@ -124,8 +121,7 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := len(recvHashes) - 1; i >= 0; i-- {
 		h := recvHashes[i]
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-		txReply := <-clientrpc.OutRPC
+		txReply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 		if len(txReply) > 3 && string(txReply[:2]) == "TX" {
 			locLen := int(txReply[2])
 			if len(txReply) > 3+locLen {
@@ -158,8 +154,8 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 		"stakingDetails":  stakingDetails,
 		"escrowDelay":     acc.TransactionDelay,
 		"multiSignNumber": acc.MultiSignNumber,
-		"sentCount":       len(acc.TransactionsSender),
-		"receivedCount":   len(acc.TransactionsRecipient),
+		"sentCount":       acc.SentCount,
+		"receivedCount":   acc.ReceivedCount,
 		"transactions":    transactions,
 	})
 }

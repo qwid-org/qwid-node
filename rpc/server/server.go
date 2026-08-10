@@ -8,7 +8,9 @@ import (
 	"math"
 	"net"
 	"net/rpc"
+	"os"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/blocks"
@@ -26,7 +28,6 @@ import (
 	"github.com/wonabru/qwid-node/wallet"
 )
 
-
 type Listener struct {
 	remoteIP string
 }
@@ -39,8 +40,30 @@ func extractRemoteIP(addr string) string {
 	return host
 }
 
+var rpcConnCount int64 // NP-H6: current in-flight RPC connections
+
+// tryAcquireRPCSlot atomically reserves a connection slot if under the cap,
+// returning true on success (a rejected acquire rolls the counter back). NP-H6.
+func tryAcquireRPCSlot() bool {
+	if atomic.AddInt64(&rpcConnCount, 1) > int64(common.MaxConcurrentRPCConnections) {
+		atomic.AddInt64(&rpcConnCount, -1)
+		return false
+	}
+	return true
+}
+
+func releaseRPCSlot() { atomic.AddInt64(&rpcConnCount, -1) }
+
 func ListenRPC() {
-	var address = "0.0.0.0:" + strconv.Itoa(tcpip.Ports[tcpip.RPCTopic])
+	// NP-C4: bind the wallet-node RPC to loopback by default so unauthenticated
+	// operations (e.g. TRAN) are not exposed to the network. Operators who
+	// deliberately run the wallet on a separate host can override the bind host
+	// via RPC_BIND_ADDRESS (understanding the exposure).
+	bindHost := os.Getenv("RPC_BIND_ADDRESS")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+	var address = bindHost + ":" + strconv.Itoa(tcpip.Ports[tcpip.RPCTopic])
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		logger.GetLogger().Fatalf("Error resolving TCP address: %v", err)
@@ -53,8 +76,15 @@ func ListenRPC() {
 			logger.GetLogger().Printf("RPC accept error: %v", err)
 			continue
 		}
+		// NP-H6: bound concurrent RPC connections.
+		if !tryAcquireRPCSlot() {
+			logger.GetLogger().Printf("RPC connection cap (%d) reached; rejecting %s", common.MaxConcurrentRPCConnections, conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
 		remoteIP := extractRemoteIP(conn.RemoteAddr().String())
 		go func(c net.Conn, ip string) {
+			defer releaseRPCSlot()
 			srv := rpc.NewServer()
 			srv.Register(&Listener{remoteIP: ip})
 			srv.ServeConn(c)
@@ -140,6 +170,8 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 		handleDETS(byt, reply)
 	case "STAK":
 		handleSTAK(byt, reply)
+	case "ACCS":
+		handleACCS(byt, reply)
 	case "ADEX":
 		handleADEX(byt, reply)
 	case "LTKN":
@@ -169,9 +201,11 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 func handleWALL(line []byte, reply *[]byte) {
 	logger.GetLogger().Println(string(line))
 	w := wallet.GetActiveWallet()
-	r, err := json.Marshal(w)
+	// NP-C5: return a redacted public projection — never the KdfSalt, the
+	// EncryptedSecretKey, the Iv, or HomePath (the offline-attack material).
+	r, err := json.Marshal(w.PublicView())
 	if err != nil {
-		logger.GetLogger().Println("Cannot marshal stat's struct")
+		logger.GetLogger().Println("Cannot marshal wallet public view")
 		return
 	}
 	*reply = r
@@ -335,7 +369,11 @@ func handleLTKN(line []byte, reply *[]byte) {
 }
 
 func handleADEX(byt []byte, reply *[]byte) {
-
+	// NP-H8: validate length before slicing (unauthenticated, network-reachable).
+	if len(byt) < common.AddressLength {
+		*reply = []byte("invalid ADEX request length")
+		return
+	}
 	dexAcc := account.GetDexAccountByAddressBytes(byt[:common.AddressLength])
 	marshal := dexAcc.Marshal()
 	*reply = marshal
@@ -434,50 +472,92 @@ func handleDETS(line []byte, reply *[]byte) {
 }
 
 func handleACCT(line []byte, reply *[]byte) {
-
+	// NP-M8: validate length before slicing (network-reachable).
+	if len(line) < common.AddressLength {
+		*reply = []byte("invalid ACCT request length")
+		return
+	}
 	byt := [common.AddressLength]byte{}
 	copy(byt[:], line[:common.AddressLength])
 	account.AccountsRWMutex.RLock()
 	acc := account.Accounts.AllAccounts[byt] // value copy
 	account.AccountsRWMutex.RUnlock()
-	// Limit to last 50 transaction hashes
-	if len(acc.TransactionsSender) > 50 {
-		acc.TransactionsSender = acc.TransactionsSender[len(acc.TransactionsSender)-50:]
-	}
-	if len(acc.TransactionsRecipient) > 50 {
-		acc.TransactionsRecipient = acc.TransactionsRecipient[len(acc.TransactionsRecipient)-50:]
-	}
+	// The state no longer carries the history lists - fill the transport
+	// slices with the last 50 hashes from the DB index. SentCount and
+	// ReceivedCount travel alongside, so clients see the true totals even
+	// though the lists are capped.
+	acc.TransactionsSender = account.GetTxHistorySent(byt, 50)
+	acc.TransactionsRecipient = account.GetTxHistoryReceived(byt, 50)
 	am := acc.Marshal()
 
 	*reply = am
 }
 
 func handleSTAK(line []byte, reply *[]byte) {
-
+	// NP-H7: need the address plus the 1-byte delegated-account index
+	// (unauthenticated, network-reachable). n is a byte, so it always indexes
+	// StakingAccounts (len 256) safely.
+	if len(line) < common.AddressLength+1 {
+		*reply = []byte("invalid STAK request length")
+		return
+	}
 	byt := [common.AddressLength]byte{}
 	copy(byt[:], line[:common.AddressLength])
 	n := int(line[common.AddressLength])
+	// StakingAccount is copied by value, but StakingDetails is a map. A value
+	// copy therefore still points at the live map and it must be marshalled while
+	// holding the read lock. Unlocking before Marshal allowed block processing to
+	// update StakingDetails concurrently, causing the runtime fatal error
+	// "concurrent map iteration and map write".
 	account.StakingRWMutex.RLock()
-	acc := account.StakingAccounts[n].AllStakingAccounts[byt] // value copy
+	acc := account.StakingAccounts[n].AllStakingAccounts[byt]
+	am := acc.Marshal()
 	account.StakingRWMutex.RUnlock()
 	// GetLockedAmount acquires StakingRWMutex internally — must be called outside our lock
 	locked, _ := account.GetLockedAmount(byt[:], common.GetHeight(), n)
-	am := acc.Marshal()
 	*reply = append(am, common.GetByteInt64(locked)...)
 }
 
-//func handleACCS(line []byte, reply *[]byte) {
-//
-//	byt := [common.AddressLength]byte{}
-//	copy(byt[:], line[:common.AddressLength])
-//	for i:=0;i<256;i++ {
-//		if common.ContainsKeyInMap(account.StakingAccounts[i].AllStakingAccounts, byt) {
-//			acc := account.StakingAccounts[i].AllStakingAccounts[byt]
-//			am := acc.Marshal()
-//		}
-//	}
-//	*reply = am
-//}
+// handleACCS returns an address's staking accounts across ALL delegated accounts
+// in a single response, so clients need one RPC instead of 255 STAK calls.
+// Response: a 4-byte little-endian entry count, then per entry a length-prefixed
+// blob = marshaled StakingAccount followed by its 8-byte locked amount.
+func handleACCS(line []byte, reply *[]byte) {
+	if len(line) < common.AddressLength {
+		*reply = []byte("invalid ACCS request length")
+		return
+	}
+	byt := [common.AddressLength]byte{}
+	copy(byt[:], line[:common.AddressLength])
+
+	// StakingDetails is a map, so Marshal must run under the read lock (see
+	// handleSTAK). GetLockedAmount takes the lock itself, so collect the marshaled
+	// accounts first and query locked amounts after releasing the lock.
+	type stakeEntry struct {
+		id        int
+		marshaled []byte
+	}
+	entries := []stakeEntry{}
+	account.StakingRWMutex.RLock()
+	for i := 1; i < 256; i++ {
+		acc := account.StakingAccounts[i].AllStakingAccounts[byt]
+		if acc.StakedBalance > 0 || acc.StakingRewards > 0 {
+			entries = append(entries, stakeEntry{id: i, marshaled: acc.Marshal()})
+		}
+	}
+	account.StakingRWMutex.RUnlock()
+
+	h := common.GetHeight()
+	out := common.GetByteInt32(int32(len(entries)))
+	for _, e := range entries {
+		locked, _ := account.GetLockedAmount(byt[:], h, e.id)
+		blob := make([]byte, 0, len(e.marshaled)+8)
+		blob = append(blob, e.marshaled...)
+		blob = append(blob, common.GetByteInt64(locked)...)
+		out = append(out, common.BytesToLenAndBytes(blob)...)
+	}
+	*reply = out
+}
 
 func handleTRAN(byt []byte, reply *[]byte) {
 
@@ -492,7 +572,6 @@ func handleCNCL(byt []byte, reply *[]byte) {
 
 	if len(byt) == common.HashLength {
 		w := wallet.GetActiveWallet()
-		//TODO nice to have cancelling for any user not only owner of node
 		if transactionsPool.PoolsTx.TransactionExists(byt) {
 			tx := transactionsPool.PoolsTx.PopTransactionByHash(byt)
 			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
@@ -501,15 +580,19 @@ func handleCNCL(byt []byte, reply *[]byte) {
 				return
 			}
 			transactionsPool.PoolsTx.BanTransactionByHash(byt)
+			*reply = []byte("transaction cancelled locally")
+			return
 		}
 		if transactionsPool.PoolTxEscrow.TransactionExists(byt) {
-			tx := transactionsPool.PoolTxEscrow.PopTransactionByHash(byt)
+			tx, _ := transactionsPool.PoolTxEscrow.GetTransactionByHash(byt)
 			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
-				transactionsPool.PoolTxEscrow.AddTransaction(tx, tx.Hash)
 				*reply = []byte("you are not the owner of transaction")
 				return
 			}
-			transactionsPool.PoolTxEscrow.BanTransactionByHash(byt)
+			// Escrow has already been accepted by consensus. Do not remove only
+			// this node's copy; the WebUI must submit a signed cancellation tx.
+			*reply = []byte("escrow cancellation transaction required")
+			return
 		}
 		if transactionsPool.PoolTxMultiSign.TransactionExists(byt) {
 			tx := transactionsPool.PoolTxMultiSign.PopTransactionByHash(byt)
@@ -519,9 +602,10 @@ func handleCNCL(byt []byte, reply *[]byte) {
 				return
 			}
 			transactionsPool.PoolTxMultiSign.BanTransactionByHash(byt)
+			*reply = []byte("transaction cancelled locally")
+			return
 		}
-		//TODO to prune DB from bad transactions from time to time
-		*reply = []byte("transaction cancelled")
+		*reply = []byte("transaction not found in a cancellable pool")
 		return
 	}
 

@@ -32,18 +32,29 @@ func InitDB() {
 	MainDB = pdb
 }
 
-func CloseDB() error {
-	var err error
+// InitDBReadOnly opens the blockchain database without the primary write lock.
+// Intended for offline diagnostics; it never writes to the data directory.
+func InitDBReadOnly(secondaryPath string) error {
+	homePath, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	db := &BlockchainDB{}
+	blockchainPath := filepath.Join(homePath, common.DefaultBlockchainHomePath)
+	pdb, err := db.InitReadOnly(blockchainPath, secondaryPath)
+	if err != nil {
+		return err
+	}
+	MainDB = pdb
+	return nil
+}
 
-	// Close the blockchain database
+func CloseDB() error {
 	if MainDB != nil {
-		MainDB.mutex.Lock()
-		(*MainDB).Close()
-		MainDB.mutex.Unlock()
+		MainDB.Close() // acquires the mutex itself
 		MainDB = nil
 	}
-
-	return err
+	return nil
 }
 
 type InMemoryDBReader struct {

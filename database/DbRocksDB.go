@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"github.com/wonabru/qwid-node/logger"
 	"os"
-	"path/filepath"
 	"sync"
-	"time"
 
 	gorocksdb "github.com/linxGnu/grocksdb"
 	commoneth "github.com/wonabru/qwid-node/common"
@@ -38,20 +36,6 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	// Check if the database directory exists
-	if _, err := os.Stat(dbPath); err == nil {
-		// If it exists, try to remove any stale lock files
-		lockFile := filepath.Join(dbPath, "LOCK")
-		if _, err := os.Stat(lockFile); err == nil {
-			// Try to remove the lock file
-			if err := os.Remove(lockFile); err != nil {
-				logger.GetLogger().Printf("Warning: Could not remove stale lock file: %v", err)
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to check database directory: %w", err)
-	}
-
 	opts := gorocksdb.NewDefaultOptions()
 	opts.SetCreateIfMissing(true)
 	opts.SetErrorIfExists(false) // Don't error if database exists
@@ -65,9 +49,43 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 
 	db.db, err = gorocksdb.OpenDb(opts, dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to open database at %s (another node instance may be running on this data dir, or it is corrupt): %w", dbPath, err)
 	}
 
+	return db, nil
+}
+
+// InitReadOnly opens the database without taking the primary write lock, so a
+// diagnostic tool can inspect it while a node is running. It prefers a RocksDB
+// secondary instance (supported alongside a live primary) and falls back to a
+// plain read-only open when the secondary directory cannot be used.
+func (db *BlockchainDB) InitReadOnly(dbPath string, secondaryPath string) (*BlockchainDB, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	opts := gorocksdb.NewDefaultOptions()
+	opts.SetCreateIfMissing(false)
+	opts.SetMaxOpenFiles(1000)
+
+	if secondaryPath != "" {
+		if err := os.MkdirAll(secondaryPath, 0755); err == nil {
+			sdb, serr := gorocksdb.OpenDbAsSecondary(opts, dbPath, secondaryPath)
+			if serr == nil {
+				db.db = sdb
+				return db, nil
+			}
+			logger.GetLogger().Println("cannot open db as secondary, falling back to read-only:", serr)
+		}
+	}
+
+	rdb, err := gorocksdb.OpenDbForReadOnly(opts, dbPath, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database read-only at %s: %w", dbPath, err)
+	}
+	db.db = rdb
 	return db, nil
 }
 
@@ -83,7 +101,7 @@ func (db *BlockchainDB) InitInMemory() (*BlockchainDB, error) {
 	opts.SetEnv(gorocksdb.NewMemEnv())
 	db.db, err = gorocksdb.OpenDb(opts, "qwid_node")
 	if err != nil {
-		logger.GetLogger().Fatal(err)
+		return nil, err
 	}
 	return db, nil
 }
@@ -95,72 +113,23 @@ func (db *BlockchainDB) GetNode(hash commoneth.Hash) ([]byte, error) {
 	return db.Get(hash[:])
 }
 
+// Close flushes and closes the database atomically under the mutex. It blocks
+// until any in-flight operation releases its (R)lock, then closes — so no op can
+// ever race a nil-ing d.db (DB-H4). Idempotent.
 func (d *BlockchainDB) Close() {
-	logger.GetLogger().Println("Starting database closure...")
-
-	// Create a channel to signal completion
-	done := make(chan struct{})
-
-	// Start the close operation in a goroutine
-	go func() {
-		// Try to acquire lock with timeout
-		lockAcquired := make(chan bool, 1)
-		go func() {
-			d.mutex.Lock()
-			lockAcquired <- true
-		}()
-
-		select {
-		case <-lockAcquired:
-			logger.GetLogger().Println("Acquired database mutex lock")
-			defer d.mutex.Unlock()
-
-			if d.db == nil {
-				logger.GetLogger().Println("Database already closed")
-				done <- struct{}{}
-				return
-			}
-
-			logger.GetLogger().Println("Flushing pending writes...")
-			fo := gorocksdb.NewDefaultFlushOptions()
-			defer fo.Destroy()
-			if err := d.db.Flush(fo); err != nil {
-				logger.GetLogger().Printf("Error flushing database: %v", err)
-			} else {
-				logger.GetLogger().Println("Successfully flushed pending writes")
-			}
-
-			logger.GetLogger().Println("Closing database...")
-			d.db.Close()
-			logger.GetLogger().Println("Successfully closed database")
-
-			d.db = nil
-			logger.GetLogger().Println("Database closure completed successfully")
-			done <- struct{}{}
-
-		case <-time.After(1 * time.Second):
-			logger.GetLogger().Println("Failed to acquire mutex lock, forcing cleanup")
-			// Force cleanup without mutex
-			if d.db != nil {
-				d.db.Close()
-				d.db = nil
-			}
-			done <- struct{}{}
-		}
-	}()
-
-	// Wait for completion with timeout
-	select {
-	case <-done:
-		logger.GetLogger().Println("Database closed normally")
-	case <-time.After(5 * time.Second):
-		logger.GetLogger().Println("Database closure timed out, forcing cleanup")
-		// Last resort cleanup
-		if d.db != nil {
-			d.db.Close()
-			d.db = nil
-		}
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.db == nil {
+		return
 	}
+	fo := gorocksdb.NewDefaultFlushOptions()
+	defer fo.Destroy()
+	if err := d.db.Flush(fo); err != nil {
+		logger.GetLogger().Printf("Error flushing database on close: %v", err)
+	}
+	d.db.Close()
+	d.db = nil
+	logger.GetLogger().Println("Database closed")
 }
 
 func (db *BlockchainDB) Put(k []byte, v []byte) error {
@@ -173,6 +142,10 @@ func (db *BlockchainDB) Put(k []byte, v []byte) error {
 
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
+
+	if db.db == nil {
+		return fmt.Errorf("database is closed")
+	}
 
 	wo := gorocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
@@ -197,6 +170,10 @@ func (db *BlockchainDB) LoadAllKeys(prefix []byte) ([][]byte, error) {
 	}
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+
+	if db.db == nil {
+		return nil, fmt.Errorf("database is closed")
+	}
 
 	ro := gorocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
@@ -226,6 +203,10 @@ func (db *BlockchainDB) LoadAll(prefix []byte) ([][]byte, error) {
 	}
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+
+	if db.db == nil {
+		return nil, fmt.Errorf("database is closed")
+	}
 
 	ro := gorocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
@@ -286,13 +267,19 @@ func (db *BlockchainDB) IsKey(key []byte) (bool, error) {
 	}
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+	if db.db == nil {
+		return false, fmt.Errorf("database is closed")
+	}
 	ro := gorocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
-	value, err := db.db.Get(ro, key)
+	// GetPinned, not Get: an existence check must not copy the value into Go
+	// memory. Snapshot values here run to megabytes, and this is called in a loop
+	// over heights.
+	value, err := db.db.GetPinned(ro, key)
 	if err != nil {
 		return false, err
 	}
-	defer value.Free()
+	defer value.Destroy()
 	return value.Exists(), nil
 }
 
@@ -303,8 +290,11 @@ func (db *BlockchainDB) Delete(key []byte) error {
 	if len(key) == 0 {
 		return errors.New("key cannot be empty")
 	}
-	db.mutex.RLock()
-	defer db.mutex.RUnlock()
+	db.mutex.Lock() // DB-H5: write lock (was RLock)
+	defer db.mutex.Unlock()
+	if db.db == nil { // DB-H5: guard closed DB (was missing)
+		return fmt.Errorf("database is closed")
+	}
 	wo := gorocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
 	return db.db.Delete(wo, key)

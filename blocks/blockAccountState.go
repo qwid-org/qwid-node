@@ -7,32 +7,31 @@ import (
 )
 
 func AddBalance(address [common.AddressLength]byte, addedAmount int64) error {
-	balance := int64(0)
+	// AC-C1: hold the write lock across the entire read-check-write so two
+	// concurrent AddBalance calls cannot both pass the funds check against the
+	// same starting balance and overspend. The final write is done inline rather
+	// than via SetBalance (which re-acquires the same non-reentrant lock).
 	account.AccountsRWMutex.Lock()
+	defer account.AccountsRWMutex.Unlock()
 
-	if _, ok := account.Accounts.AllAccounts[address]; ok {
-		balance = account.Accounts.AllAccounts[address].Balance
-	} else {
-		acc := account.Account{
+	acc, ok := account.Accounts.AllAccounts[address]
+	if !ok {
+		acc = account.Account{
 			Balance:               0,
-			Address:               [20]byte{},
+			Address:               address,
 			TransactionDelay:      0,
 			MultiSignNumber:       0,
 			MultiSignAddresses:    make([][20]byte, 0),
 			TransactionsSender:    make([]common.Hash, 0),
 			TransactionsRecipient: make([]common.Hash, 0),
 		}
-		acc.Balance = balance
-		acc.Address = address
 		account.Accounts.AllAccounts[address] = acc
 	}
-	if balance+addedAmount < 0 {
-		account.AccountsRWMutex.Unlock()
+	if acc.Balance+addedAmount < 0 {
 		return fmt.Errorf("Not enough funds on account")
 	}
-	balance += addedAmount
-	account.AccountsRWMutex.Unlock()
-	account.SetBalance(address, balance)
+	acc.Balance += addedAmount
+	account.Accounts.AllAccounts[address] = acc
 	return nil
 }
 

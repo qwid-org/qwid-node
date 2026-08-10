@@ -13,6 +13,27 @@ import (
 	"github.com/wonabru/qwid-node/wallet"
 )
 
+var cancelTransactionPrefix = []byte("QWID_CANCEL_V1")
+
+// CancellationOptData returns the consensus payload for cancelling a delayed
+// escrow transaction. The payload is covered by the transaction hash/signature.
+func CancellationOptData(target common.Hash) []byte {
+	payload := make([]byte, 0, len(cancelTransactionPrefix)+common.HashLength)
+	payload = append(payload, cancelTransactionPrefix...)
+	payload = append(payload, target.GetBytes()...)
+	return payload
+}
+
+// CancellationTarget identifies a protocol cancellation transaction.
+func (tx Transaction) CancellationTarget() (common.Hash, bool) {
+	data := tx.TxData.OptData
+	if len(data) != len(cancelTransactionPrefix)+common.HashLength ||
+		!bytes.Equal(data[:len(cancelTransactionPrefix)], cancelTransactionPrefix) {
+		return common.Hash{}, false
+	}
+	return common.GetHashFromBytes(data[len(cancelTransactionPrefix):]), true
+}
+
 type Transaction struct {
 	TxData          TxData           `json:"tx_data"`
 	TxParam         TxParam          `json:"tx_param"`
@@ -41,6 +62,22 @@ func (mt *Transaction) GasUsageEstimate() int64 {
 
 func (mt *Transaction) GetGasUsage() int64 {
 	return 2100
+}
+
+// CalcFee returns GasPrice*GasUsage with overflow and sign checking (AC-C2).
+// The prior `GasPrice * GasUsage` could overflow int64 and wrap to a negative
+// value, bypassing fee checks. Callers must treat a non-nil error as an invalid
+// transaction.
+func (mt *Transaction) CalcFee() (int64, error) {
+	if mt.GasPrice < 0 || mt.GasUsage < 0 {
+		return 0, fmt.Errorf("negative gas price (%d) or usage (%d)", mt.GasPrice, mt.GasUsage)
+	}
+	fee := mt.GasPrice * mt.GasUsage
+	// Detect overflow: if either operand is non-zero, dividing back must recover it.
+	if mt.GasPrice != 0 && fee/mt.GasPrice != mt.GasUsage {
+		return 0, fmt.Errorf("fee overflow: GasPrice=%d GasUsage=%d", mt.GasPrice, mt.GasUsage)
+	}
+	return fee, nil
 }
 
 func (mt *Transaction) GetSignature() common.Signature {
@@ -235,6 +272,13 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 	// Nonce transactions (delegated account recipient with zero amount) and genesis transactions are exempt from gas fees
 	isNonceTx := err == nil && n > 0 && n < 256 && tx.GetData().Amount == 0
 	isGenesisTx := tx.Height == 0
+	// AC-H3: reject transactions carrying a foreign chain ID to prevent
+	// cross-chain replay (e.g. testnet txs replayed on mainnet). Genesis txs are
+	// exempt, matching the fee-exemption handling below.
+	if !isGenesisTx && tx.TxParam.ChainID != common.GetChainID() {
+		logger.GetLogger().Println("transaction chain ID mismatch: expected", common.GetChainID(), "got", tx.TxParam.ChainID)
+		return false
+	}
 	if !isNonceTx && !isGenesisTx {
 		if tx.GasPrice <= 0 {
 			logger.GetLogger().Println("transaction gas price must be greater than 0")
@@ -430,4 +474,3 @@ func EmptyTransaction() Transaction {
 	tx.Signature = common.EmptySignature()
 	return tx
 }
-

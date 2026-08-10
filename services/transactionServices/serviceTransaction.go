@@ -55,8 +55,37 @@ func GenerateTransactionMsgGT(txsHashes [][]byte, mesgHead []byte, topic [2]byte
 	return n, nil
 }
 
-func broadcastTransactionsMsgInLoop() {
+// selectNewTransactions returns the subset of txs whose hash is not already in
+// seen (i.e. not yet re-broadcast by the periodic loop). Pure; does not mutate seen. NP-H10.
+func selectNewTransactions(txs []transactionsDefinition.Transaction, seen map[common.Hash]struct{}) []transactionsDefinition.Transaction {
+	out := make([]transactionsDefinition.Transaction, 0, len(txs))
+	for _, tx := range txs {
+		if _, ok := seen[tx.GetHash()]; !ok {
+			out = append(out, tx)
+		}
+	}
+	return out
+}
 
+// pruneSeen removes from seen every hash not present in txs, so entries for
+// mined/dropped transactions do not accumulate. Mutates seen. NP-H10.
+func pruneSeen(seen map[common.Hash]struct{}, txs []transactionsDefinition.Transaction) {
+	if len(seen) == 0 {
+		return
+	}
+	present := make(map[common.Hash]struct{}, len(txs))
+	for _, tx := range txs {
+		present[tx.GetHash()] = struct{}{}
+	}
+	for h := range seen {
+		if _, ok := present[h]; !ok {
+			delete(seen, h)
+		}
+	}
+}
+
+func broadcastTransactionsMsgInLoop() {
+	seen := make(map[common.Hash]struct{}) // NP-H10: hashes already re-broadcast by this loop (single-goroutine, no mutex)
 	for {
 		select {
 		case <-tcpip.Quit:
@@ -65,11 +94,12 @@ func broadcastTransactionsMsgInLoop() {
 		default:
 		}
 
-		// Broadcast pending transactions to all connected peers
 		txs := transactionsPool.PoolsTx.PeekTransactions(int(common.MaxTransactionsPerBlock), 0)
-		if len(txs) > 0 {
+		pruneSeen(seen, txs)                       // NP-H10: drop mined/expired entries
+		newTxs := selectNewTransactions(txs, seen) // NP-H10: send only the delta
+		if len(newTxs) > 0 {
 			topic := [2]byte{'T', 'T'}
-			n, err := GenerateTransactionMsg(txs, []byte("tx"), topic)
+			n, err := GenerateTransactionMsg(newTxs, []byte("tx"), topic)
 			if err == nil {
 				peers := tcpip.GetPeersConnected(tcpip.TransactionTopic)
 				for topicip := range peers {
@@ -78,6 +108,9 @@ func broadcastTransactionsMsgInLoop() {
 					if !bytes.Equal(ip[:], tcpip.MyIP[:]) {
 						Send(ip, n.GetBytes())
 					}
+				}
+				for _, tx := range newTxs {
+					seen[tx.GetHash()] = struct{}{}
 				}
 			}
 		}
@@ -124,6 +157,11 @@ func Send(addr [4]byte, nb []byte) bool {
 		case services.SendChanTx <- nb:
 			return true
 		default:
+			// NP-M10: best-effort gossip — the send channel is full, so drop this
+			// message but log it (propagation is still covered by on-arrival
+			// BroadcastTxn and the periodic delta loop). Blocking here would push
+			// backpressure into the caller.
+			logger.GetLogger().Println("NP-M10: tx send channel full, dropping outbound message")
 			return false
 		}
 	}
@@ -174,8 +212,6 @@ func StartSubscribingTransactionMsg(ip [4]byte) {
 		case <-tcpip.Quit:
 			logger.GetLogger().Printf("Received quit signal for peer %v", ip)
 			services.QUIT.Store(true)
-		default:
-			time.Sleep(time.Millisecond * 100) // Reduced sleep time
 		}
 	}
 }

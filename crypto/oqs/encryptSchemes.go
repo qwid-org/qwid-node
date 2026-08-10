@@ -189,6 +189,11 @@ func GenerateParamsEncryptionSchemesFromBytes(bb []byte) (sigName string, pubKey
 func GenerateBytesFromParams(sigName string, pubKeyLength, privateKeyLength, signatureLength int, isPaused bool) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
+	// CW-M4: reject names that would be silently truncated (which could select
+	// the wrong algorithm) rather than copying into a fixed buffer.
+	if len(sigName) > sigNameLength {
+		return nil, fmt.Errorf("SigName %q exceeds maximum length %d", sigName, sigNameLength)
+	}
 	// Ensure SigName fits fixed length
 	paddedSigName := make([]byte, sigNameLength)
 	copy(paddedSigName, sigName)

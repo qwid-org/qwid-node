@@ -3,6 +3,7 @@ package blocks
 import (
 	"bytes"
 	"fmt"
+	"math/big"
 
 	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
@@ -34,12 +35,49 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 		return fmt.Errorf("timestamp too far in future")
 	}
 
-	// 3. Reasonable progression
+	// 3. Reasonable progression. A large gap to the parent is only suspicious when
+	// the block also claims a time the wall clock has not reached yet. After a chain
+	// halt (node restart, network outage) longer than MaxBlockTimeInterval every
+	// honest candidate is necessarily stamped more than that far after its parent —
+	// producers stamp the current time — so bounding the gap on its own bricks the
+	// chain permanently: no successor block could ever be valid again. Comparing
+	// against currTime here also gives the sync path a future-timestamp bound, which
+	// rule 2 skips. No block already in the chain can trip this, since they all
+	// passed the old gap-only rule.
 	maxTime := lastTime + common.MaxBlockTimeInterval
-	if blockTime > maxTime {
+	if blockTime > maxTime && blockTime > currTime+common.MaxBlockForwardInTime {
 		return fmt.Errorf("timestamp progression too large")
 	}
 
+	return nil
+}
+
+// VerifyStakeDependent runs the block checks that depend on the staking snapshot
+// — the top-128 producer eligibility and the oracle 2/3-stake thresholds. It must
+// be called at block-application time, when the in-memory staking state reflects
+// height-1 (the block's parent). Running these inside CheckBaseBlock was wrong for
+// batched sync, where every batched block was verified against the same start-of-
+// batch snapshot instead of its own parent's.
+func VerifyStakeDependent(newBlock Block) error {
+	blockHeight := newBlock.GetHeader().Height
+	if blockHeight > 0 && !account.IsTop128StakingNode(
+		mustDelegatedAccountID(newBlock.GetHeader().DelegatedAccount),
+		newBlock.GetHeader().OperatorAccount,
+	) {
+		return fmt.Errorf("block producer is not an eligible top-128 staking node")
+	}
+	if blockHeight >= OracleProofsActivationHeight {
+		if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
+			return fmt.Errorf("oracle proof authorization fails: %w", err)
+		}
+	}
+	totalStaked := account.GetStakedInAllDelegatedAccounts()
+	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
+		return fmt.Errorf("price oracle check fails")
+	}
+	if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
+		return fmt.Errorf("rand oracle check fails")
+	}
 	return nil
 }
 
@@ -78,14 +116,16 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	if newBlock.GetHeader().Height > 0 && !bytes.Equal(merkleTrie.GetRootHash(), rootMerkleTrie.GetBytes()) {
 		return nil, fmt.Errorf("root merkleTrie hash check fails")
 	}
-	totalStaked := account.GetStakedInAllDelegatedAccounts()
-	if !common.IsSyncing.Load() {
-
-		if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
-			return nil, fmt.Errorf("price oracle check fails")
-		}
-		if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
-			return nil, fmt.Errorf("rand oracle check fails")
+	// NOTE: the oracle 2/3-stake thresholds and the top-128 producer check depend
+	// on the staking snapshot and are enforced in VerifyStakeDependent at block-
+	// application time (see its doc comment). Only the stake-independent proof
+	// authentication below stays here, so it still runs during batched sync.
+	// Bind the embedded oracle values to signed nonce transactions: every price
+	// and rand entry must be backed by a signature-verified, fresh proof so a
+	// producer cannot fabricate values attributed to other validators.
+	if blockHeight >= OracleProofsActivationHeight {
+		if err := AuthenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData); err != nil {
+			return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
 		}
 	}
 	if len(newBlock.BaseBlock.BaseHeader.Encryption1[:]) == 0 || len(newBlock.BaseBlock.BaseHeader.Encryption2[:]) == 0 {
@@ -94,13 +134,26 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	blockTime := newBlock.GetBlockTimeStamp()
 	currTime := common.GetCurrentTimeStampInSecond()
 	shouldCheck := !((currTime - blockTime) > int64(common.BlockTimeInterval)*common.VotingHeightDistance)
-	logger.GetLogger().Println("should check pausing:", shouldCheck)
 	if forceShouldCheck == false {
 		shouldCheck = false
 	}
+	// totalStaked is used by the encryption pause/replace voting checks below,
+	// which only run when shouldCheck is true (the live path, correct snapshot).
+	totalStaked := account.GetStakedInAllDelegatedAccounts()
 	err = validateBlockTimestamp(newBlock, lastBlock, forceShouldCheck)
 	if err != nil {
 		return nil, err
+	}
+	// Recompute the expected difficulty from the parent block and the committed
+	// timestamps and reject any block that declares a different value. Without
+	// this a producer could declare an arbitrarily low difficulty (consensus).
+	if blockHeight >= TimestampDifficultyActivationHeight && !ValidDifficulty(
+		newBlock.GetHeader().Difficulty,
+		lastBlock.GetHeader().Difficulty,
+		lastBlock.GetBlockTimeStamp(),
+		newBlock.GetBlockTimeStamp(),
+	) {
+		return nil, fmt.Errorf("declared difficulty does not match expected difficulty derived from parent block")
 	}
 	if !common.IsSyncing.Load() && !bytes.Equal(newBlock.BaseBlock.BaseHeader.Encryption1[:], lastBlock.BaseBlock.BaseHeader.Encryption1[:]) {
 		enc1, err := FromBytesToEncryptionConfig(newBlock.BaseBlock.BaseHeader.Encryption1[:], true)
@@ -172,6 +225,14 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	return merkleTrie, nil
 }
 
+func mustDelegatedAccountID(address common.Address) int {
+	id, err := account.IntDelegatedAccountFromAddress(address)
+	if err != nil {
+		return -1
+	}
+	return id
+}
+
 func IsAllTransactions(block Block) [][]byte {
 	txs := block.TransactionsHashes
 	hashes := [][]byte{}
@@ -239,12 +300,20 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			return 0, 0, err
 		}
 
-		fee := poolTx.GasPrice * poolTx.GasUsage
+		fee, feeErr := poolTx.CalcFee()
+		if feeErr != nil {
+			return 0, 0, feeErr
+		}
 		totalFee += fee
 		amount := poolTx.TxData.Amount
 		total_amount := fee + amount
 		address := poolTx.GetSenderAddress()
 		recipientAddress := poolTx.TxData.Recipient
+		if _, isCancellation := poolTx.CancellationTarget(); isCancellation {
+			if _, err := validateEscrowCancellation(poolTx, block.GetHeader().Height); err != nil {
+				return 0, 0, fmt.Errorf("invalid escrow cancellation: %w", err)
+			}
+		}
 		var n int
 		if poolTx.GetLockedAmount() > 0 {
 			n, err = account.IntDelegatedAccountFromAddress(poolTx.TxData.DelegatedAccountForLocking)
@@ -335,7 +404,7 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 		// 	return fmt.Errorf("transaction height is wrong: ProcessBlockTransfers")
 		// }
 
-		err = ProcessTransaction(poolTx, block.GetHeader().Height)
+		err = ProcessTransaction(poolTx, block.GetHeader().Height, block.GetBlockTimeStamp())
 		if err != nil {
 			// remove bad transaction from pool
 			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
@@ -362,7 +431,10 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 	if rewardPerc > 500 {
 		return fmt.Errorf("reward has to be smaller than 50")
 	}
-	rewardOper := int64(float64(reward) * float64(rewardPerc) / 1000.0)
+	// AC-H5/AC-M9: distribute rewards with exact integer arithmetic. Floating
+	// point lost precision above 2^53 and was non-deterministic risk; big.Int
+	// also prevents reward*balance from overflowing int64 before the divide.
+	rewardOper := reward * int64(rewardPerc) / 1000
 
 	err = account.Reward(addr[:], rewardOper, block.GetHeader().Height, n)
 	if err != nil {
@@ -371,9 +443,15 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 
 	reward -= rewardOper
 	rest := reward
+	bigReward := big.NewInt(reward)
+	bigSum := big.NewInt(sum)
 	for _, acc := range staked {
 		if acc.Balance > 0 {
-			userReward := int64(float64(reward) * float64(acc.Balance) / sum)
+			// userReward = reward * acc.Balance / sum, computed without overflow.
+			userReward := new(big.Int).Div(
+				new(big.Int).Mul(bigReward, big.NewInt(acc.Balance)),
+				bigSum,
+			).Int64()
 			rest -= userReward // in the case when rounding lose some fraction of coins
 			err := account.Reward(acc.Address[:], userReward, block.GetHeader().Height, n)
 			if err != nil {
@@ -440,6 +518,11 @@ func EvaluateSmartContracts(bl *Block) bool {
 func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *transactionsPool.MerkleTree, checkFinal bool) error {
 
 	defer RemoveAllTransactionsRelatedToBlock(*newBlock)
+	// Stake-snapshot-dependent checks, run against the parent (height-1) state
+	// that is in memory before this block's transactions are applied.
+	if err := VerifyStakeDependent(*newBlock); err != nil {
+		return err
+	}
 	n, err := account.IntDelegatedAccountFromAddress(newBlock.GetHeader().DelegatedAccount)
 	if err != nil || n < 1 || n > 255 {
 		return fmt.Errorf("wrong delegated account: CheckBlockAndTransactions")
@@ -461,6 +544,12 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 
 	staked, rewarded := GetSupplyInStakedAccounts()
 	//coinsInDex := account.GetCoinLiquidityInDex()
+	// AC-H7 invariant (check-only path): this function does NOT call
+	// ProcessBlockTransfers, so it runs against state in which this block's
+	// reward is already reflected in account/staking balances. The reward term
+	// is therefore intentionally omitted here. Do NOT add `reward` to match
+	// CheckBlockAndTransferFunds below — that path checks the invariant BEFORE
+	// distributing the reward, which is why it includes it.
 	if checkFinal && GetSupplyInAccounts()+staked+rewarded+lastBlock.BlockFee != newBlock.GetBlockSupply() {
 		logger.GetLogger().Println("GetSupplyInAccounts()", GetSupplyInAccounts())
 		logger.GetLogger().Println("staked:", staked)
@@ -473,7 +562,9 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	head := newBlock.GetHeader()
 	sigName, sigName2, isPaused, isPaused2, err := newBlock.GetSigNames()
 	if err != nil {
-		fmt.Errorf("%v: CheckBlockAndTransactions", err)
+		// AC-M6: previously the fmt.Errorf result was discarded, swallowing the
+		// GetSigNames failure and proceeding with zero-value sig names.
+		return fmt.Errorf("%v: CheckBlockAndTransactions", err)
 	}
 	if head.Verify(sigName, sigName2, isPaused, isPaused2) == false {
 		return fmt.Errorf("header fails to verify: CheckBlockAndTransactions")
@@ -484,6 +575,11 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *transactionsPool.MerkleTree, checkWhenNotSync bool) error {
 
 	defer RemoveAllTransactionsRelatedToBlock(*newBlock)
+	// Stake-snapshot-dependent checks, run against the parent (height-1) state
+	// that is in memory before this block's transactions are applied.
+	if err := VerifyStakeDependent(*newBlock); err != nil {
+		return err
+	}
 	n, err := account.IntDelegatedAccountFromAddress(newBlock.GetHeader().DelegatedAccount)
 	if err != nil || n < 1 || n > 255 {
 		return fmt.Errorf("wrong delegated account: CheckBlockAndTransferFunds")
@@ -506,6 +602,10 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	staked, rewarded := GetSupplyInStakedAccounts()
 	//coinsInDex := account.GetCoinLiquidityInDex()
 	supplyInAccounts := GetSupplyInAccounts()
+	// AC-H7 invariant (pre-distribution path): ProcessBlockTransfers is called
+	// later in this function, so the block reward has NOT yet been added to any
+	// balance. It is added here explicitly. This is why the formula differs from
+	// CheckBlockAndTransactions, which checks post-distribution state.
 	calculatedSupply := supplyInAccounts + staked + rewarded + reward + lastBlock.BlockFee
 	expectedSupply := newBlock.GetBlockSupply()
 	if calculatedSupply != expectedSupply {
@@ -565,7 +665,15 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	}
 	err = ProcessBlockEncryption(*newBlock, lastBlock)
 	if err != nil {
-		logger.GetLogger().Println("process block encryption fails", err)
+		// Deliberately logged and not returned: the block itself is valid and has
+		// already been applied, so the node must keep following the chain. What
+		// failed is this node's own adoption of the new signature scheme — most
+		// often because the wallet has no recovery phrase to derive the new key
+		// from (see AddNewEncryptionToActiveWallet). Consequence: the node stays
+		// in sync but cannot sign under the new scheme until the operator
+		// restores the wallet.
+		logger.GetLogger().Println("WALLET DID NOT ADOPT THE CHAIN'S NEW ENCRYPTION SCHEME — node keeps syncing "+
+			"but cannot produce blocks or sign transactions under it; operator action required:", err)
 	}
 	return nil
 }

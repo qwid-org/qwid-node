@@ -39,7 +39,8 @@ func (m *Memory) Set(offset, size uint64, value []byte) {
 		// length of store may never be less than offset + size.
 		// The store should be resized PRIOR to setting the memory
 		if offset+size > uint64(len(m.store)) {
-			panic("invalid memory: store empty")
+			// Store must be resized before Set; if not, skip rather than crash.
+			return
 		}
 		copy(m.store[offset:offset+size], value)
 	}
@@ -51,7 +52,7 @@ func (m *Memory) Set32(offset uint64, val *uint256.Int) {
 	// length of store may never be less than offset + size.
 	// The store should be resized PRIOR to setting the memory
 	if offset+32 > uint64(len(m.store)) {
-		panic("invalid memory: store empty")
+		return
 	}
 	// Fill in relevant bits
 	b32 := val.Bytes32()
@@ -71,13 +72,11 @@ func (m *Memory) GetCopy(offset, size int64) (cpy []byte) {
 		return nil
 	}
 
-	if len(m.store) > int(offset) {
-		cpy = make([]byte, size)
-		copy(cpy, m.store[offset:offset+size])
-
-		return
+	if offset < 0 || size < 0 || offset > int64(len(m.store))-size {
+		return nil
 	}
-
+	cpy = make([]byte, size)
+	copy(cpy, m.store[offset:offset+size])
 	return
 }
 
@@ -87,11 +86,10 @@ func (m *Memory) GetPtr(offset, size int64) []byte {
 		return nil
 	}
 
-	if len(m.store) > int(offset) {
-		return m.store[offset : offset+size]
+	if offset < 0 || size < 0 || offset > int64(len(m.store))-size {
+		return nil
 	}
-
-	return nil
+	return m.store[offset : offset+size]
 }
 
 // Len returns the length of the backing slice

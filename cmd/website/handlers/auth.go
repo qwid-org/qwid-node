@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,7 +30,95 @@ type rateLimiter struct {
 var (
 	registerLimiter = &rateLimiter{entries: make(map[string][]time.Time)}
 	loginLimiter    = &rateLimiter{entries: make(map[string][]time.Time)}
+	// WH-M11: per-account failed-login lockout (independent of the IP limiter,
+	// which WH-M10 also hardens).
+	loginLockout = &rateLimiter{entries: make(map[string][]time.Time)}
+	// WH-M3: rate limiter for financial endpoints (send/stake/trade).
+	financialLimiter = &rateLimiter{entries: make(map[string][]time.Time)}
+	// WH-H2: global cap on welcome-transaction issuance, so an attacker with many
+	// IPs cannot farm unlimited welcome funds via registration.
+	welcomeLimiter = &rateLimiter{entries: make(map[string][]time.Time)}
 )
+
+const maxWelcomePerHour = 50
+
+// FinancialRateLimit limits state-changing money operations per client IP.
+func FinancialRateLimit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !financialLimiter.allow(getClientIP(r), 20, time.Minute) {
+			JsonError(w, "Too many requests. Please slow down.", http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
+}
+
+const (
+	maxFailedLogins = 5
+	lockoutWindow   = 15 * time.Minute
+)
+
+// recordFailure logs a failed login for username. clearFailures resets them on
+// a successful login. isLockedOut reports whether the account is currently locked.
+func (rl *rateLimiter) recordFailure(username string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.entries[username] = append(rl.entries[username], time.Now())
+}
+
+func (rl *rateLimiter) clearFailures(username string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	delete(rl.entries, username)
+}
+
+func (rl *rateLimiter) isLockedOut(username string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-lockoutWindow)
+	var valid []time.Time
+	for _, t := range rl.entries[username] {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	rl.entries[username] = valid
+	return len(valid) >= maxFailedLogins
+}
+
+// cleanup drops keys whose timestamps are all older than maxAge, so the map does
+// not grow unboundedly with one entry per IP/username ever seen (WH-M8).
+func (rl *rateLimiter) cleanup(maxAge time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for k, times := range rl.entries {
+		var valid []time.Time
+		for _, t := range times {
+			if t.After(cutoff) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.entries, k)
+		} else {
+			rl.entries[k] = valid
+		}
+	}
+}
+
+func init() {
+	// WH-M8: periodically purge stale rate-limiter/lockout entries.
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			for _, rl := range []*rateLimiter{registerLimiter, loginLimiter, loginLockout, financialLimiter, welcomeLimiter} {
+				rl.cleanup(time.Hour)
+			}
+		}
+	}()
+}
 
 func (rl *rateLimiter) allow(ip string, maxCount int, window time.Duration) bool {
 	rl.mu.Lock()
@@ -53,11 +143,21 @@ func (rl *rateLimiter) allow(ip string, maxCount int, window time.Duration) bool
 	return true
 }
 
+// getClientIP returns the client IP for rate limiting. WH-M10: X-Forwarded-For
+// is attacker-controlled and is only trusted when TRUST_PROXY=true (i.e. the app
+// really is behind a proxy that sets it). Otherwise the real transport peer
+// address is used, so an attacker cannot rotate the header to bypass limits.
 func getClientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return fwd
+	if os.Getenv("TRUST_PROXY") == "true" {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			return strings.TrimSpace(strings.Split(fwd, ",")[0])
+		}
 	}
-	return r.RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func Register(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +185,9 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		JsonError(w, "Username must be 3-32 characters", http.StatusBadRequest)
 		return
 	}
-	if len(req.Password) < 6 {
-		JsonError(w, "Password must be at least 6 characters", http.StatusBadRequest)
+	// WH-M1: enforce the shared minimum password strength (8+ chars).
+	if err := wallet.ValidatePasswordStrength(req.Password); err != nil {
+		JsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -99,13 +200,19 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if Users.Exists(req.Username) {
-		JsonError(w, "Username already taken", http.StatusConflict)
+		// WH-H3: do not disclose that the username exists. Return the same generic
+		// 400 as other registration failures (not a distinct "already taken"/409),
+		// so the response is not a trivially-scriptable enumeration oracle. Bulk
+		// enumeration is further throttled by registerLimiter (5/10min/IP). The
+		// existence check is retained because the wallet directory is derived from
+		// the username and must not be overwritten.
+		JsonError(w, "Registration could not be completed. Please try different details.", http.StatusBadRequest)
 		return
 	}
 
 	// Create user wallet directory
 	walletDir := UserWalletDir(WebsiteBasePath, req.Username)
-	if err := os.MkdirAll(walletDir, 0755); err != nil {
+	if err := os.MkdirAll(walletDir, 0700); err != nil {
 		JsonError(w, "Failed to create wallet directory", http.StatusInternalServerError)
 		return
 	}
@@ -157,17 +264,34 @@ func Register(w http.ResponseWriter, r *http.Request) {
 
 	// Register user
 	if err := Users.Create(req.Username, req.Password, walletDir, address); err != nil {
-		JsonError(w, fmt.Sprintf("Failed to register user: %v", err), http.StatusInternalServerError)
+		// WH-H3: Create also guards duplicates; on a TOCTOU race with the Exists
+		// check above it returns "user already exists". Do not surface that — log
+		// server-side and return the same generic message so this path is not a
+		// fallback enumeration oracle.
+		logger.GetLogger().Println("register: Users.Create failed:", err)
+		JsonError(w, "Registration could not be completed. Please try different details.", http.StatusBadRequest)
 		return
 	}
 
-	// Send welcome transaction (5000 QWD) from node wallet
-	go sendWelcomeTransaction(wl.MainAddress)
+	// Send welcome transaction (5000 QWD) from node wallet, subject to a global
+	// hourly cap (WH-H2). Registration still succeeds if the cap is reached.
+	if welcomeLimiter.allow("global", maxWelcomePerHour, time.Hour) {
+		go sendWelcomeTransaction(wl.MainAddress)
+	} else {
+		logger.GetLogger().Println("welcome tx global cap reached; skipping for", req.Username)
+	}
 
+	// No recovery phrase here either: the phrase must never cross HTTP (design
+	// decision 3), so website wallets are generated with random keys. Say so,
+	// rather than letting the README's "new wallets are created from a 24-word
+	// recovery phrase" be read as covering this flow.
 	JsonResponse(w, map[string]interface{}{
-		"success": true,
-		"address": address,
-		"message": "Account created successfully. Please login.",
+		"success":  true,
+		"address":  address,
+		"mnemonic": false,
+		"message": "Account created successfully. Please login. NOTE: this wallet has NO 24-word recovery phrase — " +
+			"recovery phrases are never sent over the network. Your password and this site's encrypted wallet file " +
+			"are the only way to reach these funds.",
 	})
 }
 
@@ -192,11 +316,19 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// WH-M11: reject logins for an account that has hit the failed-attempt limit.
+	if loginLockout.isLockedOut(req.Username) {
+		JsonError(w, "Account temporarily locked due to failed login attempts. Try again later.", http.StatusTooManyRequests)
+		return
+	}
+
 	entry, err := Users.Authenticate(req.Username, req.Password)
 	if err != nil {
+		loginLockout.recordFailure(req.Username)
 		JsonError(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
+	loginLockout.clearFailures(req.Username)
 
 	// Load user's wallet
 	userWallet, err := loadUserWallet(entry.WalletDir, req.Password)
@@ -204,6 +336,9 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		JsonError(w, fmt.Sprintf("Failed to load wallet: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// WH-H8: invalidate any prior sessions for this user before issuing a new one.
+	Sessions.DeleteByUsername(req.Username)
 
 	token, err := Sessions.Create(req.Username, userWallet)
 	if err != nil {
@@ -282,7 +417,7 @@ func sendWelcomeTransaction(recipient common.Address) {
 		ChainID:     int16(23),
 		Sender:      NodeWallet.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -295,8 +430,7 @@ func sendWelcomeTransaction(recipient common.Address) {
 		GasUsage:  0,
 	}
 
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		logger.GetLogger().Println("sendWelcomeTransaction: timeout getting stats")
 		return
@@ -329,8 +463,7 @@ func sendWelcomeTransaction(recipient common.Address) {
 		return
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), msg.GetBytes()...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
 
 	logger.GetLogger().Println("sendWelcomeTransaction: sent", welcomeAmountQWD, "QWD to", recipient.GetHex())
 }

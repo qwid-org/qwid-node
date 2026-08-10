@@ -61,8 +61,7 @@ func GetTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return

@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+
+# The WordPress tree is gone. These paths only exist as 301s now; keeping
+# crawlers out of them stops the old URLs being re-fetched and re-surfaced.
+Disallow: /wp-admin
+Disallow: /wp-includes
+Disallow: /wp-json
+Disallow: /wp-content/
+Disallow: /feed
+Disallow: /category/
+Disallow: /tag/
+
+Sitemap: https://qwid.org/sitemap.xml

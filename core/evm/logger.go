@@ -45,6 +45,21 @@ type EVMLogger interface {
 	CaptureFault(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error)
 }
 
+const maxTraceFieldLen = 256 * 1024 // DB-M4: per-field trace cap to bound OutputLogs memory/DB growth
+
+// appendCapped appends s to *dst unless *dst has reached maxTraceFieldLen, in
+// which case it appends a one-time truncation marker and drops further output.
+func appendCapped(dst *string, s string) {
+	if len(*dst) >= maxTraceFieldLen {
+		return
+	}
+	if len(*dst)+len(s) > maxTraceFieldLen {
+		*dst += s[:maxTraceFieldLen-len(*dst)] + "\n…[trace truncated]\n"
+		return
+	}
+	*dst += s
+}
+
 type GVMLogger struct {
 	ResultTxCall        string `json:"resultTxCall"`
 	ResultSCCall        string `json:"resultCall"`
@@ -65,57 +80,57 @@ func CreateGVMLogger() GVMLogger {
 
 // Transaction level
 func (log *GVMLogger) CaptureTxStart(gasLimit uint64) {
-	(*log).ResultTxCall += fmt.Sprintf("Gas usage limit: %v\n", gasLimit)
+	appendCapped(&log.ResultTxCall, fmt.Sprintf("Gas usage limit: %v\n", gasLimit))
 }
 func (log *GVMLogger) CaptureTxEnd(restGas uint64) {
-	(*log).ResultTxCall += fmt.Sprintf("Gas usage left: %v\n", restGas)
+	appendCapped(&log.ResultTxCall, fmt.Sprintf("Gas usage left: %v\n", restGas))
 }
 
 // Top call frame
 func (log *GVMLogger) CaptureStart(env *EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
-	(*log).ResultTopFrameCall += fmt.Sprintf("From: %v\n", from.GetHex())
-	(*log).ResultTopFrameCall += fmt.Sprintf("To: %v\n", to.GetHex())
-	(*log).ResultTopFrameCall += fmt.Sprintf("Is creation: %v\n", create)
-	(*log).ResultTopFrameCall += fmt.Sprintf("Input: %v\n", hex.EncodeToString(input))
-	(*log).ResultTopFrameCall += fmt.Sprintf("Gas: %v\n", gas)
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("From: %v\n", from.GetHex()))
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("To: %v\n", to.GetHex()))
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("Is creation: %v\n", create))
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("Input: %v\n", hex.EncodeToString(input)))
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("Gas: %v\n", gas))
 }
 func (log *GVMLogger) CaptureEnd(output []byte, gasUsed uint64, t time.Duration, err error) {
-	(*log).ResultTopFrameCall += fmt.Sprintf("Output: %v\n", hex.EncodeToString(output))
-	(*log).ResultTopFrameCall += fmt.Sprintf("Gas Used: %v\n", gasUsed)
-	(*log).ResultTopFrameCall += fmt.Sprintf("Duration [sec.]: %v\n", t.Seconds())
-	(*log).ResultTopFrameCall += fmt.Sprintf("Error: %v\n", err)
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("Output: %v\n", hex.EncodeToString(output)))
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("Gas Used: %v\n", gasUsed))
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("Duration [sec.]: %v\n", t.Seconds()))
+	appendCapped(&log.ResultTopFrameCall, fmt.Sprintf("Error: %v\n", err))
 }
 
 // Rest of call frames
 func (log *GVMLogger) CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
-	(*log).ResultRestFrameCall += fmt.Sprintf("From: %v\n", from.GetHex())
-	(*log).ResultRestFrameCall += fmt.Sprintf("To: %v\n", to.GetHex())
-	(*log).ResultRestFrameCall += fmt.Sprintf("Input: %v\n", hex.EncodeToString(input))
-	(*log).ResultRestFrameCall += fmt.Sprintf("Gas: %v\n", gas)
+	appendCapped(&log.ResultRestFrameCall, fmt.Sprintf("From: %v\n", from.GetHex()))
+	appendCapped(&log.ResultRestFrameCall, fmt.Sprintf("To: %v\n", to.GetHex()))
+	appendCapped(&log.ResultRestFrameCall, fmt.Sprintf("Input: %v\n", hex.EncodeToString(input)))
+	appendCapped(&log.ResultRestFrameCall, fmt.Sprintf("Gas: %v\n", gas))
 }
 func (log *GVMLogger) CaptureExit(output []byte, gasUsed uint64, err error) {
-	(*log).ResultRestFrameCall += fmt.Sprintf("Output: %v\n", hex.EncodeToString(output))
-	(*log).ResultRestFrameCall += fmt.Sprintf("Gas Used: %v\n", gasUsed)
-	(*log).ResultRestFrameCall += fmt.Sprintf("Error: %v\n", err)
+	appendCapped(&log.ResultRestFrameCall, fmt.Sprintf("Output: %v\n", hex.EncodeToString(output)))
+	appendCapped(&log.ResultRestFrameCall, fmt.Sprintf("Gas Used: %v\n", gasUsed))
+	appendCapped(&log.ResultRestFrameCall, fmt.Sprintf("Error: %v\n", err))
 	(*log).Output = hex.EncodeToString(output)
 }
 
 // Opcode level
 func (log *GVMLogger) CaptureState(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error) {
-	(*log).ResultSCCall += fmt.Sprintf("Height: %v\n", pc)
-	(*log).ResultSCCall += fmt.Sprintf("Gas: %v\n", gas)
-	(*log).ResultSCCall += fmt.Sprintf("Gas used: %v\n", cost)
-	(*log).ResultSCCall += fmt.Sprintf("Scope: %+v\n", scope)
-	(*log).ResultSCCall += fmt.Sprintf("Return Data: %v\n", hex.EncodeToString(rData))
-	(*log).ResultSCCall += fmt.Sprintf("Depth: %v\n", depth)
-	(*log).ResultSCCall += fmt.Sprintf("Error: %v\n", err)
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Height: %v\n", pc))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Gas: %v\n", gas))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Gas used: %v\n", cost))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Scope: %+v\n", scope))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Return Data: %v\n", hex.EncodeToString(rData)))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Depth: %v\n", depth))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Error: %v\n", err))
 }
 func (log *GVMLogger) CaptureFault(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error) {
-	(*log).ResultSCCall += fmt.Sprintf("Fault Height: %v\n", pc)
-	(*log).ResultSCCall += fmt.Sprintf("Fault Gas: %v\n", gas)
-	(*log).ResultSCCall += fmt.Sprintf("Fault Gas used: %v\n", cost)
-	(*log).ResultSCCall += fmt.Sprintf("Fault Depth: %v\n", depth)
-	(*log).ResultSCCall += fmt.Sprintf("Fault Error: %v\n", err)
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Fault Height: %v\n", pc))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Fault Gas: %v\n", gas))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Fault Gas used: %v\n", cost))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Fault Depth: %v\n", depth))
+	appendCapped(&log.ResultSCCall, fmt.Sprintf("Fault Error: %v\n", err))
 }
 
 func (log *GVMLogger) ToString() string {
@@ -123,6 +138,6 @@ func (log *GVMLogger) ToString() string {
 	restxt += "CaptureTx: \n\n" + log.ResultTxCall
 	restxt += "Capture Start To End: \n\n" + log.ResultTopFrameCall
 	restxt += "Capture Enter and Exit: \n\n" + log.ResultRestFrameCall
-	restxt += "Capture SC State and Fault: \n\n" + log.ResultTxCall
+	restxt += "Capture SC State and Fault: \n\n" + log.ResultSCCall
 	return restxt
 }

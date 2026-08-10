@@ -1,6 +1,8 @@
 package blocks
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/wonabru/qwid-node/account"
@@ -95,6 +97,40 @@ func TestAddBalance(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, int64(777), account.GetBalance(addr))
 	})
+}
+
+// TestAddBalanceConcurrentNoOverspend verifies AC-C1: many concurrent
+// deductions against one account never drive the balance negative and never let
+// more than the available balance be withdrawn.
+func TestAddBalanceConcurrentNoOverspend(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+
+	initTestAccounts()
+	addr := [common.AddressLength]byte{9, 9, 9}
+	const start = 100
+	account.AccountsRWMutex.Lock()
+	account.Accounts.AllAccounts[addr] = account.Account{Address: addr, Balance: start}
+	account.AccountsRWMutex.Unlock()
+
+	// 1000 goroutines each try to withdraw 1 unit; only `start` can succeed.
+	const workers = 1000
+	var wg sync.WaitGroup
+	var success int64
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := AddBalance(addr, -1); err == nil {
+				atomic.AddInt64(&success, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(start), atomic.LoadInt64(&success), "exactly start withdrawals should succeed")
+	assert.GreaterOrEqual(t, account.GetBalance(addr), int64(0), "balance must never go negative")
+	assert.Equal(t, int64(0), account.GetBalance(addr))
 }
 
 func TestGetSupplyInAccounts(t *testing.T) {

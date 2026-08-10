@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 
 	"github.com/wonabru/qwid-node/wallet"
 )
@@ -116,15 +119,76 @@ var WebsiteBasePath string
 // 	}
 // }
 
+// isAllowedOrigin reflects only origins listed in the CORS_ALLOWED_ORIGINS
+// environment variable (comma-separated). WH-C2: replaces the wildcard
+// Access-Control-Allow-Origin so arbitrary sites cannot script the wallet API.
+// With no env set, no cross-origin is allowed (same-origin still works).
+func isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	for _, a := range strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",") {
+		if strings.TrimSpace(a) == origin && a != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isSameOriginRequest implements the WH-C4 CSRF defense: for state-changing
+// requests, the Origin (or Referer) must match the request Host or a configured
+// allowed origin. Browsers always send Origin on cross-origin-capable methods, so
+// this blocks cross-site POSTs without requiring a token round-trip in the SPA.
+func isSameOriginRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		// Cannot verify provenance of a state-changing request -> reject.
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Host == r.Host {
+		return true
+	}
+	return isAllowedOrigin(u.Scheme + "://" + u.Host)
+}
+
+func isSafeMethod(m string) bool {
+	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
+}
+
+// maxRequestBodyBytes bounds request bodies (WH-H9) to prevent unbounded memory
+// use. 2 MiB comfortably covers JSON payloads and contract source.
+const maxRequestBodyBytes = 2 << 20
+
 func CorsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes) // WH-H9
+		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// WH-H5: security headers.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// WH-C4: CSRF protection for state-changing methods.
+		if !isSafeMethod(r.Method) && !isSameOriginRequest(r) {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "cross-origin request rejected"})
 			return
 		}
 		next(w, r)

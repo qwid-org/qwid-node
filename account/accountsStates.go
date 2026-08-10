@@ -18,6 +18,11 @@ type AccountsType struct {
 var Accounts AccountsType
 var AccountsRWMutex sync.RWMutex
 
+// AddTransactionsSender records hashTxn as the sender's next history entry.
+// The hash goes to the DB index at the account's current sequence number; the
+// state keeps only the counter, so snapshots stay O(number of accounts). The
+// counter moves only after the index write succeeded - on failure the entry is
+// re-written when the transaction is re-applied.
 func AddTransactionsSender(address [common.AddressLength]byte, hashTxn common.Hash) {
 	AccountsRWMutex.Lock()
 	defer AccountsRWMutex.Unlock()
@@ -25,19 +30,20 @@ func AddTransactionsSender(address [common.AddressLength]byte, hashTxn common.Ha
 	if !isOK {
 		// Create new account
 		acc = Account{
-			Balance:               0,
-			Address:               address,
-			TransactionDelay:      0,
-			MultiSignNumber:       0,
-			TransactionsSender:    make([]common.Hash, 0),
-			TransactionsRecipient: make([]common.Hash, 0),
+			Balance: 0,
+			Address: address,
 		}
 		logger.GetLogger().Println("AddTransactionsSender: created new account for", common.Bytes2Hex(address[:]))
 	}
-	acc.TransactionsSender = append(acc.TransactionsSender, hashTxn)
+	if err := appendTxHistory(common.TxHistorySentDBPrefix, address, acc.SentCount, hashTxn); err != nil {
+		logger.GetLogger().Println("cannot store sender tx history entry:", err)
+	} else {
+		acc.SentCount++
+	}
 	Accounts.AllAccounts[address] = acc
 }
 
+// AddTransactionsRecipient is AddTransactionsSender for the receiving side.
 func AddTransactionsRecipient(address [common.AddressLength]byte, hashTxn common.Hash) {
 	AccountsRWMutex.Lock()
 	defer AccountsRWMutex.Unlock()
@@ -45,16 +51,16 @@ func AddTransactionsRecipient(address [common.AddressLength]byte, hashTxn common
 	if !isOK {
 		// Create new account for recipient
 		acc = Account{
-			Balance:               0,
-			Address:               address,
-			TransactionDelay:      0,
-			MultiSignNumber:       0,
-			TransactionsSender:    make([]common.Hash, 0),
-			TransactionsRecipient: make([]common.Hash, 0),
+			Balance: 0,
+			Address: address,
 		}
 		logger.GetLogger().Println("AddTransactionsRecipient: created new account for", common.Bytes2Hex(address[:]))
 	}
-	acc.TransactionsRecipient = append(acc.TransactionsRecipient, hashTxn)
+	if err := appendTxHistory(common.TxHistoryReceivedDBPrefix, address, acc.ReceivedCount, hashTxn); err != nil {
+		logger.GetLogger().Println("cannot store recipient tx history entry:", err)
+	} else {
+		acc.ReceivedCount++
+	}
 	Accounts.AllAccounts[address] = acc
 }
 
@@ -64,6 +70,7 @@ func SetBalance(address [common.AddressLength]byte, balance int64) {
 	defer AccountsRWMutex.Unlock()
 	acc := Accounts.AllAccounts[address]
 	acc.Balance = balance
+	acc.Address = address
 	Accounts.AllAccounts[address] = acc
 }
 
@@ -140,6 +147,7 @@ func StoreAccounts(height int64) error {
 		logger.GetLogger().Println("cannot store accounts", err)
 		return err
 	}
+	raiseLastStoredHeightMeta(common.AccountsDBPrefix, height)
 	return nil
 }
 
@@ -177,22 +185,37 @@ func LoadAccounts(height int64) error {
 		logger.GetLogger().Println("cannot unmarshal accounts")
 		return err
 	}
+	// A pre-index snapshot carries the full per-account transaction history in
+	// its lists; move it to the DB index so the next store is slim. No-op for
+	// snapshots written after the index existed (their lists are empty).
+	migrateTxHistoryLocked()
 	return nil
 }
 
-func LastHeightStoredInAccounts() (int64, error) {
-	i := int64(0)
-	for {
-		ib := common.GetByteInt64(i)
-		prefix := append(common.AccountsDBPrefix[:], ib...)
-		isKey, err := database.MainDB.IsKey(prefix)
-		if err != nil {
-			return i - 1, err
-		}
-		if !isKey {
-			break
-		}
-		i++
+// AccountsStoredAtHeight reports whether an accounts snapshot exists for height.
+// Used by the rewind path to find a height it can actually restore state from,
+// instead of aborting on the first missing snapshot.
+func AccountsStoredAtHeight(height int64) bool {
+	if height < 0 {
+		return false
 	}
-	return i - 1, nil
+	ib := common.GetByteInt64(height)
+	prefix := append(common.AccountsDBPrefix[:], ib...)
+	ok, err := database.MainDB.IsKey(prefix)
+	return err == nil && ok
+}
+
+func LastHeightStoredInAccounts() (int64, error) {
+	// Snapshots are stored once per sync batch, so heights have gaps and the
+	// authoritative answer lives in the meta key. The contiguity-assuming
+	// search below remains only as the fallback for databases from before the
+	// meta key existed - those really are contiguous.
+	if h, ok := lastStoredHeightMeta(common.AccountsDBPrefix); ok {
+		return h, nil
+	}
+	// AC-M8: find the highest stored height in O(log n) instead of an O(n) linear
+	// scan from 0.
+	return database.LastContiguousHeight(database.MainDB, func(h int64) []byte {
+		return append(common.AccountsDBPrefix[:], common.GetByteInt64(h)...)
+	})
 }

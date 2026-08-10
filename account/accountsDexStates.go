@@ -125,6 +125,9 @@ func SetDexAccountByAddressBytes(address []byte, acc DexAccount) {
 }
 
 func GetCoinLiquidityInDex() int64 {
+	// AC-M1: guard the map iteration with the DEX lock, like other accessors.
+	DexRWMutex.RLock()
+	defer DexRWMutex.RUnlock()
 	sum := int64(0)
 	for _, acc := range DexAccounts.AllDexAccounts {
 		sum += acc.CoinPool
@@ -144,18 +147,7 @@ func RemoveDexAccountsFromDB(height int64) error {
 }
 
 func LastHeightStoredInDexAccounts() (int64, error) {
-	i := int64(0)
-	for {
-		ib := common.GetByteInt64(i)
-		prefix := append(common.DexAccountsDBPrefix[:], ib...)
-		isKey, err := database.MainDB.IsKey(prefix)
-		if err != nil {
-			return i - 1, err
-		}
-		if isKey == false {
-			break
-		}
-		i++
-	}
-	return i - 1, nil
+	return database.LastContiguousHeight(database.MainDB, func(h int64) []byte {
+		return append(common.DexAccountsDBPrefix[:], common.GetByteInt64(h)...)
+	})
 }

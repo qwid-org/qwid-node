@@ -78,26 +78,43 @@ func UpdateAccountStats() {
 	uncRewards := 0.0
 	locks := 0.0
 	var stakeAccs [256]account.StakingAccount
-	for i := 1; i < 5; i++ { // should be 256
-		if MainWallet.Check() == false {
-			return
+	if MainWallet.Check() == false {
+		return
+	}
+	// One ACCS call returns the stake across all delegated accounts at once.
+	inb = append([]byte("ACCS"), MainWallet.MainAddress.GetBytes()...)
+	clientrpc.InRPC <- SignMessage(inb)
+	re = <-clientrpc.OutRPC
+	if string(re) == "Timeout" {
+		return
+	}
+	if len(re) >= 4 {
+		count := int(common.GetInt32FromByte(re[:4]))
+		b := re[4:]
+		for j := 0; j < count; j++ {
+			blob, rest, uerr := common.BytesWithLenToBytes(b)
+			if uerr != nil {
+				break
+			}
+			b = rest
+			if len(blob) < 8 {
+				continue
+			}
+			var sa account.StakingAccount
+			if uerr := sa.Unmarshal(blob[:len(blob)-8]); uerr != nil {
+				continue
+			}
+			da := common.Address{}
+			da.Init(sa.DelegatedAccount[:])
+			id, uerr := account.IntDelegatedAccountFromAddress(da)
+			if uerr != nil || id <= 0 || id >= 256 {
+				continue
+			}
+			stakeAccs[id] = sa
+			stake += account.Int64toFloat64(sa.StakedBalance)
+			rewards += account.Int64toFloat64(sa.StakingRewards)
+			locks += account.Int64toFloat64(common.GetInt64FromByte(blob[len(blob)-8:]))
 		}
-		inb = append([]byte("STAK"), MainWallet.MainAddress.GetBytes()...)
-		inb = append(inb, byte(i))
-		clientrpc.InRPC <- SignMessage(inb)
-		re = <-clientrpc.OutRPC
-		if string(reply) == "Timeout" {
-			return
-		}
-		err = stakeAccs[i].Unmarshal(re[:len(re)-8])
-		if err != nil {
-			logger.GetLogger().Println("cannot unmarshal stake account")
-			common.SetIsPaused(!common.IsPaused(), true)
-			return
-		}
-		stake += account.Int64toFloat64(stakeAccs[i].StakedBalance)
-		rewards += account.Int64toFloat64(stakeAccs[i].StakingRewards)
-		locks += account.Int64toFloat64(common.GetInt64FromByte(re[len(re)-8:]))
 	}
 
 	txt += fmt.Sprintln("\n\nYour Address:", MainWallet.MainAddress.GetHex())

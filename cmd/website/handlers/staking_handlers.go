@@ -75,7 +75,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	if req.Action == "stake" && am < common.MinStakingUser {
 		JsonError(w, fmt.Sprintf("Minimum staking amount is %f", float64(common.MinStakingUser)/1e8), http.StatusBadRequest)
@@ -139,7 +139,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      wl.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -152,8 +152,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		GasUsage:  0,
 	}
 
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -185,8 +184,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	JsonResponse(w, map[string]string{
 		"success": "true",

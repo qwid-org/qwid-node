@@ -33,8 +33,7 @@ type StatsResponse struct {
 }
 
 func GetStats(w http.ResponseWriter, r *http.Request) {
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -88,8 +87,7 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	clientrpc.InRPC <- SignMessage(append([]byte("DETS"), b...))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage(append([]byte("DETS"), b...)))
 	if len(reply) <= 2 {
 		JsonError(w, "Not found", http.StatusNotFound)
 		return
@@ -131,8 +129,7 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 		}
 		for i := len(sentHashes) - 1; i >= 0; i-- {
 			h := sentHashes[i]
-			clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-			txReply := <-clientrpc.OutRPC
+			txReply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 			if len(txReply) > 3 && string(txReply[:2]) == "TX" {
 				locLen := int(txReply[2])
 				if len(txReply) > 3+locLen {
@@ -156,8 +153,7 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 		}
 		for i := len(recvHashes) - 1; i >= 0; i-- {
 			h := recvHashes[i]
-			clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-			txReply := <-clientrpc.OutRPC
+			txReply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 			if len(txReply) > 3 && string(txReply[:2]) == "TX" {
 				locLen := int(txReply[2])
 				if len(txReply) > 3+locLen {
@@ -183,8 +179,8 @@ func GetDetails(w http.ResponseWriter, r *http.Request) {
 			"balance":          acc.GetBalanceConfirmedFloat(),
 			"transactionDelay": acc.TransactionDelay,
 			"multiSignNumber":  acc.MultiSignNumber,
-			"sentCount":        len(acc.TransactionsSender),
-			"receivedCount":    len(acc.TransactionsRecipient),
+			"sentCount":        acc.SentCount,
+			"receivedCount":    acc.ReceivedCount,
 			"transactions":     transactions,
 		})
 	case "BL":
@@ -262,7 +258,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	am := int64(req.Amount * 1e8)
+	am := common.CoinToBaseUnits(req.Amount)
 
 	pk := common.PubKey{}
 	primary := req.UsePrimaryEncryption
@@ -288,7 +284,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		ChainID:     int16(23),
 		Sender:      wl.MainAddress,
 		SendingTime: common.GetCurrentTimeStampInSecond(),
-		Nonce:       int16(rand.Intn(0xffff)),
+		Nonce:       common.RandomNonce(),
 	}
 
 	tx := transactionsDefinition.Transaction{
@@ -301,8 +297,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		GasUsage:  0,
 	}
 
-	clientrpc.InRPC <- SignMessage([]byte("STAT"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
 	st := sm.Stats
 	if err := common.Unmarshal(reply, common.StatDBPrefix, &st); err != nil {
@@ -330,8 +325,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.InRPC <- SignMessage(append([]byte("TRAN"), tmm...))
-	<-clientrpc.OutRPC
+	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
 
 	JsonResponse(w, map[string]string{
 		"success": "true",
@@ -349,8 +343,7 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 
 	wl := sess.Wallet
 	inb := append([]byte("ACCT"), wl.MainAddress.GetBytes()...)
-	clientrpc.InRPC <- SignMessage(inb)
-	re := <-clientrpc.OutRPC
+	re := clientrpc.Call(SignMessage(inb))
 	if bytes.Equal(re, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -370,8 +363,7 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := len(sentHashes) - 1; i >= 0; i-- {
 		h := sentHashes[i]
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 		if len(reply) > 3 && string(reply[:2]) == "TX" {
 			locLen := int(reply[2])
 			if len(reply) > 3+locLen {
@@ -397,8 +389,7 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := len(recvHashes) - 1; i >= 0; i-- {
 		h := recvHashes[i]
-		clientrpc.InRPC <- SignMessage(append([]byte("DETS"), h.GetBytes()...))
-		reply := <-clientrpc.OutRPC
+		reply := clientrpc.Call(SignMessage(append([]byte("DETS"), h.GetBytes()...)))
 		if len(reply) > 3 && string(reply[:2]) == "TX" {
 			locLen := int(reply[2])
 			if len(reply) > 3+locLen {
@@ -425,8 +416,7 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetPending(w http.ResponseWriter, r *http.Request) {
-	clientrpc.InRPC <- SignMessage([]byte("PEND"))
-	reply := <-clientrpc.OutRPC
+	reply := clientrpc.Call(SignMessage([]byte("PEND")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return

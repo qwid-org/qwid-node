@@ -1,0 +1,111 @@
+# qwid.org — Apache configuration
+#
+# The site was rebuilt from WordPress into a single static page. The old WP
+# URLs are still in Google's index and currently return bare 404s, which both
+# strands visitors on dead links and throws away the accumulated link equity.
+# The rules below map every known legacy path onto the section of the new page
+# that replaced it.
+#
+# Requires: mod_rewrite, mod_headers. The vhost must allow this file to take
+# effect:
+#
+#   <Directory /var/www/qwid.org>
+#       AllowOverride FileInfo Options Indexes Limit
+#   </Directory>
+#
+# If AllowOverride is off and you would rather keep the rules in the vhost,
+# paste everything below into the <VirtualHost *:443> block verbatim — the
+# directives are identical there, except that RewriteBase is not needed.
+#
+# NOTE ON ANCHORS: Apache percent-encodes the substitution URL by default, so
+# a target like /#faq would be served as /%23faq. Every rule redirecting to an
+# anchor therefore carries the NE (noescape) flag. Do not drop it.
+
+RewriteEngine On
+RewriteBase /
+
+# ---------------------------------------------------------------
+# Canonical scheme and host
+# ---------------------------------------------------------------
+
+# Everything over TLS.
+RewriteCond %{HTTPS} !=on
+RewriteRule ^ https://qwid.org%{REQUEST_URI} [R=301,L]
+
+# One canonical host, so the index never splits between www and apex.
+RewriteCond %{HTTP_HOST} ^www\.qwid\.org$ [NC]
+RewriteRule ^ https://qwid.org%{REQUEST_URI} [R=301,L]
+
+# ---------------------------------------------------------------
+# Legacy WordPress URLs -> new single-page sections
+# ---------------------------------------------------------------
+
+# The old FAQ subpage. Its content now lives in the #faq section, which has
+# been corrected: no Rainbow, no dual-chain, no Shor key-doubling.
+RewriteRule ^faq/?$ https://qwid.org/#faq [R=301,NE,L]
+
+# Old blog posts. All of them argued the quantum threat, which the new page
+# makes in #how-it-works.
+RewriteRule ^key-impacts-of-quantum-supremacy-on-blockchain/?$ https://qwid.org/#how-it-works [R=301,NE,L]
+RewriteRule ^20[0-9]{2}/ https://qwid.org/#how-it-works [R=301,NE,L]
+RewriteRule ^category/ https://qwid.org/#how-it-works [R=301,NE,L]
+RewriteRule ^tag/ https://qwid.org/#how-it-works [R=301,NE,L]
+RewriteRule ^author/ https://qwid.org/#team [R=301,NE,L]
+
+# The Green Paper was superseded by the WhitePaper. Point every uploaded copy
+# at the current document rather than 404ing.
+RewriteRule ^wp-content/uploads/.*(GreenPaper|WhitePaper).*\.pdf$ https://qwid.org/WhitePaper_1.0.pdf [R=301,NC,L]
+RewriteRule ^wp-content/ https://qwid.org/ [R=301,L]
+
+# Remaining WordPress plumbing: send it home rather than leaking 404s or,
+# worse, presenting a login form for a CMS that is no longer deployed.
+RewriteRule ^wp-admin https://qwid.org/ [R=301,L]
+RewriteRule ^wp-includes https://qwid.org/ [R=301,L]
+RewriteRule ^wp-json https://qwid.org/ [R=301,L]
+RewriteRule ^wp-login\.php$ https://qwid.org/ [R=301,L]
+RewriteRule ^feed https://qwid.org/ [R=301,L]
+RewriteRule ^sitemap_index\.xml$ https://qwid.org/sitemap.xml [R=301,L]
+
+# Never a legitimate hit now — refuse rather than redirect, so scanners stop.
+RewriteRule ^xmlrpc\.php$ - [G]
+
+# Other legacy top-level pages.
+RewriteRule ^whitepaper/?$ https://qwid.org/WhitePaper_1.0.pdf [R=301,L]
+RewriteRule ^roadmap/?$    https://qwid.org/#roadmap    [R=301,NE,L]
+RewriteRule ^team/?$       https://qwid.org/#team       [R=301,NE,L]
+RewriteRule ^contact/?$    https://qwid.org/#contact    [R=301,NE,L]
+RewriteRule ^tokenomics/?$ https://qwid.org/#tokenomics [R=301,NE,L]
+
+# ---------------------------------------------------------------
+# The editable Green Paper source ships in this directory. It carries Word
+# metadata and revision history, so it must not be publicly fetchable.
+# ---------------------------------------------------------------
+# Done with mod_rewrite rather than "Require all denied" in a <FilesMatch>,
+# because Require needs AllowOverride AuthConfig on top of FileInfo.
+RewriteRule \.(docx|doc|odt)$ - [F]
+
+# ---------------------------------------------------------------
+# Anything else that does not exist lands on the page rather than a bare 404,
+# so a stale search result is never a dead end. Kept last, and guarded against
+# looping on the document root itself.
+# ---------------------------------------------------------------
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_URI} !^/$
+RewriteRule ^ https://qwid.org/ [R=301,L]
+
+# ---------------------------------------------------------------
+# Caching
+# ---------------------------------------------------------------
+# Not wrapped in <IfModule>: that directive is rejected in .htaccess context
+# unless AllowOverride is All, and silently skipping the rules would be worse
+# than failing loudly. mod_headers is listed as a requirement above.
+<FilesMatch "\.(pdf|png|jpg|jpeg|svg|webp|woff2?)$">
+    Header set Cache-Control "public, max-age=2592000"
+</FilesMatch>
+<FilesMatch "^(sitemap\.xml|robots\.txt)$">
+    Header set Cache-Control "public, max-age=3600"
+</FilesMatch>
+<FilesMatch "\.html$">
+    Header set Cache-Control "public, max-age=600"
+</FilesMatch>

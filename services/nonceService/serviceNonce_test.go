@@ -3,10 +3,42 @@ package nonceServices
 import (
 	"testing"
 
+	"github.com/wonabru/qwid-node/account"
 	"github.com/wonabru/qwid-node/common"
 	"github.com/wonabru/qwid-node/logger"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestIsEligibleProducer(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+
+	for i := 0; i < 256; i++ {
+		account.StakingAccounts[i] = account.StakingAccountsType{
+			AllStakingAccounts: make(map[[common.AddressLength]byte]account.StakingAccount),
+		}
+	}
+	operator := func(id byte) common.Address {
+		var a common.Address
+		a.ByteValue[0] = id
+		return a
+	}
+	// 129 equally-staked operators: id 129 falls outside the top 128.
+	for id := 1; id <= 129; id++ {
+		op := operator(byte(id))
+		assert.NoError(t, account.Stake(op.GetBytes(), common.MinStakingForNode, 100, int64(1000+id), id, true, 0, 0))
+	}
+
+	t.Run("registered top-128 operator may produce", func(t *testing.T) {
+		assert.True(t, isEligibleProducer(operator(128), 128, true))
+	})
+	t.Run("unregistered pubkey blocks production", func(t *testing.T) {
+		assert.False(t, isEligibleProducer(operator(128), 128, false))
+	})
+	t.Run("non-top-128 operator may not produce", func(t *testing.T) {
+		assert.False(t, isEligibleProducer(operator(129), 129, true))
+	})
+}
 
 func TestResetToDefaultEncryptionOptData(t *testing.T) {
 	logger.InitLogger()
@@ -84,25 +116,6 @@ func TestSendFunction(t *testing.T) {
 	})
 }
 
-func TestLastRepliedIP(t *testing.T) {
-	logger.InitLogger()
-	defer logger.CloseLogger()
-
-	t.Run("last replied IP is initially zero", func(t *testing.T) {
-		expected := [4]byte{0, 0, 0, 0}
-		assert.Equal(t, expected, LastRepliedIP)
-	})
-
-	t.Run("last replied IP can be set", func(t *testing.T) {
-		newIP := [4]byte{10, 0, 0, 1}
-		LastRepliedIP = newIP
-		assert.Equal(t, newIP, LastRepliedIP)
-
-		// Reset for other tests
-		LastRepliedIP = [4]byte{0, 0, 0, 0}
-	})
-}
-
 func TestEncryptionDataConcurrency(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
@@ -146,9 +159,8 @@ func TestBytesToLenAndBytesIntegration(t *testing.T) {
 		testData := []byte{0xDE, 0xAD, 0xBE, 0xEF}
 		encoded := common.BytesToLenAndBytes(testData)
 
-		// First 4 bytes should be the length
-		length := common.GetInt32FromByte(encoded[:4])
-		assert.Equal(t, int32(4), length)
+		// The length prefix is a 4-byte big-endian int (see common.BytesToLenAndBytes).
+		assert.Equal(t, []byte{0, 0, 0, 4}, encoded[:4])
 
 		// Remaining bytes should be the data
 		assert.Equal(t, testData, encoded[4:])
