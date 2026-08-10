@@ -409,6 +409,11 @@ func handleDETS(line []byte, reply *[]byte) {
 		account.AccountsRWMutex.RLock()
 		acc := account.Accounts.AllAccounts[byt]
 		account.AccountsRWMutex.RUnlock()
+		// The history lists are not part of the account state; fill them from
+		// the index, exactly as handleACCT does. Omitting this is why looking
+		// an account up by address returned a summary with no transactions in
+		// the wallet, the explorer and the website alike.
+		acc = account.WithTxHistory(acc, byt, 50)
 		am := acc.Marshal()
 		*reply = append([]byte("AC"), am...)
 		break
@@ -485,8 +490,7 @@ func handleACCT(line []byte, reply *[]byte) {
 	// slices with the last 50 hashes from the DB index. SentCount and
 	// ReceivedCount travel alongside, so clients see the true totals even
 	// though the lists are capped.
-	acc.TransactionsSender = account.GetTxHistorySent(byt, 50)
-	acc.TransactionsRecipient = account.GetTxHistoryReceived(byt, 50)
+	acc = account.WithTxHistory(acc, byt, 50)
 	am := acc.Marshal()
 
 	*reply = am
