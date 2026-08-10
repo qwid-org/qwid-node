@@ -156,6 +156,53 @@ func (tp *TransactionPool) PeekTransactions(n int, heightOrHash int64) []transac
 	return topTransactions
 }
 
+// PoolEntry is a pooled transaction together with the priority the pool sorts
+// it by. What the priority means depends on the pool: gas price for the main
+// pool, the height the transaction settles at for escrow, and a key derived
+// from the multi-signature hash for multisig.
+type PoolEntry struct {
+	Transaction transactionsDefinition.Transaction
+	Priority    int64
+}
+
+// PeekEntries returns up to n pooled entries without applying the
+// priority filter that PeekTransactions uses.
+//
+// It exists for read-only callers such as the PEND RPC, which need to list
+// what is waiting regardless of maturity. PeekTransactions cannot serve them:
+// for the escrow pool it would hide transactions that have not matured, and
+// for the multisig pool it matches priority by equality against a hash-derived
+// key, so no height argument can ever match and pending multi-signature
+// transactions came back as an empty list.
+//
+// Deliberately a separate method rather than a change to PeekTransactions:
+// escrow settlement in blocks/processTransaction.go depends on that filter to
+// decide which transactions are due, so its behaviour is consensus-critical
+// and must not move.
+func (tp *TransactionPool) PeekEntries(n int) []PoolEntry {
+	tp.rwmutex.RLock()
+	defer tp.rwmutex.RUnlock()
+
+	if n > len(tp.priorityQueue) {
+		n = len(tp.priorityQueue)
+	}
+	entries := make([]PoolEntry, 0, n)
+	hash := [common.HashLength]byte{}
+	for i := 0; i < n; i++ {
+		item := *tp.priorityQueue[i]
+		copy(hash[:], item.GetHash().GetBytes())
+		tx, ok := tp.transactions[hash]
+		if !ok {
+			// The queue and the map are written together under the same lock,
+			// so this cannot normally happen; skip rather than serve a zero
+			// transaction to the wallet.
+			continue
+		}
+		entries = append(entries, PoolEntry{Transaction: tx, Priority: item.priority})
+	}
+	return entries
+}
+
 func (tp *TransactionPool) RemoveTransactionByHash(hash []byte) {
 	h := [common.HashLength]byte{}
 	copy(h[:], hash)

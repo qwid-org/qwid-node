@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net"
 	"net/rpc"
 	"os"
@@ -633,7 +632,15 @@ func handleSTAT(byt []byte, reply *[]byte) {
 }
 
 func handlePEND(byt []byte, reply *[]byte) {
-	// Get pending transactions from all pools
+	// Get pending transactions from all pools.
+	//
+	// MaturesAt is set for escrow only, where it is the height the transfer
+	// settles at. An escrow transaction is confirmed on-chain the moment its
+	// block is processed and only then enters the escrow pool
+	// (blocks/processTransaction.go), so it is legitimately both "in
+	// confirmed_db" and "waiting" until it matures. Reporting it as bare
+	// "pending", like a transaction still waiting to reach a block, reads as
+	// though it might never land.
 	type PendingTx struct {
 		Hash      string  `json:"hash"`
 		Sender    string  `json:"sender"`
@@ -641,6 +648,7 @@ func handlePEND(byt []byte, reply *[]byte) {
 		Amount    float64 `json:"amount"`
 		Height    int64   `json:"height"`
 		Pool      string  `json:"pool"`
+		MaturesAt int64   `json:"maturesAt,omitempty"`
 	}
 
 	pendingTxs := []PendingTx{}
@@ -658,9 +666,10 @@ func handlePEND(byt []byte, reply *[]byte) {
 		})
 	}
 
-	// Get from escrow pool (use max height to return all pending escrow txs)
-	escrowTxs := transactionsPool.PoolTxEscrow.PeekTransactions(50, math.MaxInt64)
-	for _, tx := range escrowTxs {
+	// Escrow: PeekEntries also yields the priority, which for this pool is the
+	// settlement height (tx.Height + EscrowTransactionsDelay).
+	for _, e := range transactionsPool.PoolTxEscrow.PeekEntries(50) {
+		tx := e.Transaction
 		pendingTxs = append(pendingTxs, PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),
@@ -668,12 +677,17 @@ func handlePEND(byt []byte, reply *[]byte) {
 			Amount:    float64(tx.TxData.Amount) / 1e8,
 			Height:    tx.Height,
 			Pool:      "escrow",
+			MaturesAt: e.Priority,
 		})
 	}
 
-	// Get from multi-sig pool
-	multiTxs := transactionsPool.PoolTxMultiSign.PeekTransactions(50, math.MaxInt64)
-	for _, tx := range multiTxs {
+	// Multisig: this used to call PeekTransactions(50, math.MaxInt64), but the
+	// multisig pool matches priority by equality against a key derived from
+	// the multi-signature hash, so that query could never match and the wallet
+	// showed no pending multi-signature transactions at all. No MaturesAt
+	// here: a multisig transaction waits for co-signers, not for a height.
+	for _, e := range transactionsPool.PoolTxMultiSign.PeekEntries(50) {
+		tx := e.Transaction
 		pendingTxs = append(pendingTxs, PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),

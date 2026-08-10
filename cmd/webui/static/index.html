@@ -1411,16 +1411,33 @@ contract Coin {
                 html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
                 html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.1);">';
                 html += '<th style="padding:8px;text-align:left;">Pool</th>';
+                html += '<th style="padding:8px;text-align:left;">Status</th>';
                 html += '<th style="padding:8px;text-align:left;">Amount</th>';
                 html += '<th style="padding:8px;text-align:left;">Sender</th>';
                 html += '<th style="padding:8px;text-align:left;">Recipient</th>';
                 html += '<th style="padding:8px;text-align:left;">Hash</th>';
                 html += '</tr>';
 
+                // "Pending" alone conflates two different situations. A main-pool
+                // transaction has not reached a block yet and still might not. An
+                // escrow transaction is already confirmed on-chain and only waits
+                // for its settlement height, so seeing it listed next to a hash
+                // that DETS reports as confirmed_db is expected, not a fault.
+                function statusOf(tx) {
+                    if (tx.pool === 'escrow') {
+                        return tx.maturesAt
+                            ? 'Confirmed &middot; settles at #' + tx.maturesAt
+                            : 'Confirmed &middot; awaiting settlement';
+                    }
+                    if (tx.pool === 'multisig') return 'Awaiting co-signers';
+                    return 'Awaiting block';
+                }
+
                 for (const tx of res.transactions) {
                     const poolColor = tx.pool === 'main' ? '#00d4ff' : (tx.pool === 'escrow' ? '#ffc800' : '#ff4757');
                     html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">';
                     html += '<td style="padding:8px;color:' + poolColor + ';">' + tx.pool.toUpperCase() + '</td>';
+                    html += '<td style="padding:8px;color:#aaa;">' + statusOf(tx) + '</td>';
                     html += '<td style="padding:8px;">' + tx.amount.toFixed(8) + ' QWD</td>';
                     html += '<td style="padding:8px;font-family:monospace;font-size:10px;">' + tx.sender.substring(0, 12) + '...</td>';
                     html += '<td style="padding:8px;font-family:monospace;font-size:10px;">' + tx.recipient.substring(0, 12) + '...</td>';

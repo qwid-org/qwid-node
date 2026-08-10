@@ -2,6 +2,7 @@ package blocks
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 
 	"github.com/qwid-org/qwid-node/account"
@@ -13,6 +14,13 @@ import (
 )
 
 var ZerosHash = make([]byte, common.HashLength)
+
+// ErrEscrowAlreadyMatured marks the one cancellation failure that can never
+// reverse: once the chain passes the escrow's maturity height it never goes
+// back, so such a cancellation is permanently unusable and must be evicted
+// from the pool rather than retried. Every other failure may be transient —
+// the target's block might simply not have been processed here yet.
+var ErrEscrowAlreadyMatured = errors.New("escrow transaction has already matured")
 
 func validateEscrowCancellation(tx transactionsDefinition.Transaction, height int64) (transactionsDefinition.Transaction, error) {
 	targetHash, ok := tx.CancellationTarget()
@@ -38,9 +46,50 @@ func validateEscrowCancellation(tx transactionsDefinition.Transaction, height in
 		return transactionsDefinition.Transaction{}, fmt.Errorf("cancellation sender is not an escrow account")
 	}
 	if height >= target.GetHeight()+sender.TransactionDelay {
-		return transactionsDefinition.Transaction{}, fmt.Errorf("escrow transaction has already matured")
+		return transactionsDefinition.Transaction{}, ErrEscrowAlreadyMatured
 	}
 	return target, nil
+}
+
+// FilterUnbuildableCancellations returns txs without the escrow cancellations
+// that would make a block at the given height fail validation, and evicts the
+// permanently dead ones from the main pool.
+//
+// Block assembly used to hand every pooled transaction to the block and let
+// CheckBlockTransfers judge the result. That is fine when a rejection is
+// transient, but a cancellation whose target has matured fails forever: the
+// producer logged the error and returned, leaving the transaction in the pool,
+// so the next block was assembled from the same set and failed identically.
+// Block production stopped for good (seen at height 139793).
+//
+// The validation rule itself is unchanged — a block containing such a
+// transaction is still invalid. This only stops the node from proposing one.
+func FilterUnbuildableCancellations(txs []transactionsDefinition.Transaction, height int64) []transactionsDefinition.Transaction {
+	kept := txs[:0]
+	for _, tx := range txs {
+		if _, isCancellation := tx.CancellationTarget(); !isCancellation {
+			kept = append(kept, tx)
+			continue
+		}
+		_, err := validateEscrowCancellation(tx, height)
+		if err == nil {
+			kept = append(kept, tx)
+			continue
+		}
+		if errors.Is(err, ErrEscrowAlreadyMatured) {
+			// Unusable at every future height; keeping it would re-poison
+			// every subsequent block.
+			logger.GetLogger().Printf("dropping cancellation %s from pool: %v",
+				tx.Hash.GetHex(), err)
+			transactionsPool.PoolsTx.RemoveTransactionByHash(tx.Hash.GetBytes())
+			continue
+		}
+		// Possibly transient (e.g. the target's block has not been processed
+		// here yet): hold it back from this block, but leave it pooled.
+		logger.GetLogger().Printf("holding back cancellation %s: %v",
+			tx.Hash.GetHex(), err)
+	}
+	return kept
 }
 
 func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount int64, sumFee int64, block Block) bool {
