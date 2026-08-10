@@ -76,7 +76,7 @@ package tcpip
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func TestMaxMessageSizeForTopic(t *testing.T) {

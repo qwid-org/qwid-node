@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
 )
 
 // withTempDB points database.MainDB at a throwaway RocksDB so these tests never

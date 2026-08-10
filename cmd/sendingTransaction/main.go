@@ -10,19 +10,19 @@ import (
 	"syscall"
 
 	"github.com/therecipe/qt/widgets"
-	"github.com/wonabru/qwid-node/cmd/gui/qtwidgets"
+	"github.com/qwid-org/qwid-node/cmd/gui/qtwidgets"
 	"golang.org/x/crypto/ssh/terminal"
 
 	"os"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
-	"github.com/wonabru/qwid-node/services/transactionServices"
-	"github.com/wonabru/qwid-node/statistics"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
+	"github.com/qwid-org/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 var mutex sync.Mutex

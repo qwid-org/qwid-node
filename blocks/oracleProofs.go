@@ -3,10 +3,10 @@ package blocks
 import (
 	"fmt"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/oracles"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/oracles"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
 // oracleSubmission is the authenticated content of one validator's oracle nonce

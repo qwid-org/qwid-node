@@ -243,7 +243,7 @@ func TestKEMAlgAvailable(t *testing.T) {
 
 - [ ] **Step 3: Implement in `tcpip/handshake.go`**
 
-Add imports `crypto/sha256`, `hash`, `golang.org/x/crypto/hkdf`, `io`, and `github.com/wonabru/qwid-node/crypto/oqs`.
+Add imports `crypto/sha256`, `hash`, `golang.org/x/crypto/hkdf`, `io`, and `github.com/qwid-org/qwid-node/crypto/oqs`.
 
 KEM alg selection + key derivation:
 ```go

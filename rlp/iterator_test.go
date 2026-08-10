@@ -19,7 +19,7 @@ package rlp
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common/hexutil"
+	"github.com/qwid-org/qwid-node/common/hexutil"
 )
 
 // TestIterator tests some basic things about the ListIterator. A more

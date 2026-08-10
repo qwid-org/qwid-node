@@ -3,8 +3,8 @@ package account
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
 )
 
 // TestPruneStakingDetails: reward entries land every block, so the details map

@@ -8,9 +8,9 @@ import (
 
 	"github.com/therecipe/qt/core"
 	"github.com/therecipe/qt/widgets"
-	"github.com/wonabru/qwid-node/common"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/common"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 var err error

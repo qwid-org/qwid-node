@@ -4,11 +4,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
+	"github.com/qwid-org/qwid-node/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

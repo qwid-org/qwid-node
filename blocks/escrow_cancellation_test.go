@@ -3,10 +3,10 @@ package blocks
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/transactionsPool"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 )
 
 func TestValidateEscrowCancellation(t *testing.T) {

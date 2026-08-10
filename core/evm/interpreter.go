@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"hash"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/common/math"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common/math"
 )
 
 // Config are the configuration options for the Interpreter

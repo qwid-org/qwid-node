@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
-	"github.com/wonabru/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/statistics"
 )
 
 type ValidatorInfo struct {

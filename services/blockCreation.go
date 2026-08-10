@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto/oqs"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/message"
-	"github.com/wonabru/qwid-node/oracles"
-	"github.com/wonabru/qwid-node/tcpip"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/transactionsPool"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/message"
+	"github.com/qwid-org/qwid-node/oracles"
+	"github.com/qwid-org/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 var (

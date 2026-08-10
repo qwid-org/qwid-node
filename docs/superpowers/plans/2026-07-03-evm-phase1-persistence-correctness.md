@@ -64,7 +64,7 @@ package stateDB
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func sampleState() StateAccount {
@@ -126,10 +126,10 @@ package stateDB
 import (
 	"encoding/json"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
+	"github.com/qwid-org/qwid-node/logger"
 )
 
 // persistedState is the subset of StateAccount written to disk. Transient
@@ -428,8 +428,8 @@ package blocks
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
 )
 
 // TestEVMStatePersistsAcrossReload deploys nothing but exercises the
@@ -503,7 +503,7 @@ package stateDB
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func addr(b byte) common.Address {
@@ -556,7 +556,7 @@ Create `core/stateDB/journal.go`:
 ```go
 package stateDB
 
-import "github.com/wonabru/qwid-node/common"
+import "github.com/qwid-org/qwid-node/common"
 
 // changeEntry is one reversible mutation recorded during execution.
 type changeEntry interface {
@@ -698,7 +698,7 @@ func TestSuicide(t *testing.T) {
 }
 ```
 
-Add `"github.com/wonabru/qwid-node/core/types"` to the test imports.
+Add `"github.com/qwid-org/qwid-node/core/types"` to the test imports.
 
 - [ ] **Step 2: Run to confirm failure**
 

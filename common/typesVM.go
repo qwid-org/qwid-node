@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/wonabru/qwid-node/common/hexutil"
+	"github.com/qwid-org/qwid-node/common/hexutil"
 	"math"
 	"math/big"
 	"math/rand"

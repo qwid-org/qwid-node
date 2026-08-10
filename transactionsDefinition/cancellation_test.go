@@ -3,7 +3,7 @@ package transactionsDefinition
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func TestCancellationOptDataRoundTrip(t *testing.T) {

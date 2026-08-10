@@ -1,7 +1,7 @@
 package account
 
 import (
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func getRemainingSupply(supply int64) int64 {

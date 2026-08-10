@@ -5,12 +5,12 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/message"
-	"github.com/wonabru/qwid-node/services"
-	"github.com/wonabru/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/message"
+	"github.com/qwid-org/qwid-node/services"
+	"github.com/qwid-org/qwid-node/tcpip"
 )
 
 // sampleIPs returns up to n distinct entries of ips chosen at random (all of ips

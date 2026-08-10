@@ -7,17 +7,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/message"
-	"github.com/wonabru/qwid-node/pubkeys"
-	"github.com/wonabru/qwid-node/services"
-	"github.com/wonabru/qwid-node/tcpip"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/voting"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/message"
+	"github.com/qwid-org/qwid-node/pubkeys"
+	"github.com/qwid-org/qwid-node/services"
+	"github.com/qwid-org/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/voting"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 // NP-H11: oracle values influence consensus, so they must come from a

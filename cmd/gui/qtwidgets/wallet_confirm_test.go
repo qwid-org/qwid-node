@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 // TestMatchesOverwriteConfirmationRejectsCasualAnswers: the GUI restore now

@@ -16,7 +16,7 @@
 
 package params
 
-import "github.com/wonabru/qwid-node/common"
+import "github.com/qwid-org/qwid-node/common"
 
 // MainnetBootnodes are the enode URLs of the P2P bootstrap nodes running on
 // the main Ethereum network.

@@ -1,8 +1,8 @@
 package stateDB
 
 import (
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // changeEntry is one reversible mutation recorded during execution.

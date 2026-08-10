@@ -346,7 +346,7 @@ Serce bezpieczeństwa całej zmiany. RNG liboqs jest globalny dla procesu, a `OQ
 - Test: `crypto/oqs/deterministic_test.go`
 
 **Interfaces:**
-- Consumes: `github.com/wonabru/qwid-node/crypto/oqs/rand` — `RandomBytesCustomAlgorithm(fun func([]byte, int)) error`, `RandomBytesSwitchAlgorithm(algName string) error`; `golang.org/x/crypto/hkdf` — `Expand(hash func() hash.Hash, pseudorandomKey, info []byte) io.Reader`
+- Consumes: `github.com/qwid-org/qwid-node/crypto/oqs/rand` — `RandomBytesCustomAlgorithm(fun func([]byte, int)) error`, `RandomBytesSwitchAlgorithm(algName string) error`; `golang.org/x/crypto/hkdf` — `Expand(hash func() hash.Hash, pseudorandomKey, info []byte) io.Reader`
 - Produces: `func (sig *Signature) GenerateKeyPairFromSeed(seed []byte) (pub []byte, drawn int, err error)`; niewyeksportowane `randMutex sync.Mutex` i `(sig *Signature) generateKeyPairUnlocked() ([]byte, error)`
 
 - [ ] **Step 1: Napisz test, który nie przechodzi**
@@ -656,8 +656,8 @@ import (
 	"errors"
 	"io"
 
-	oqsrand "github.com/wonabru/qwid-node/crypto/oqs/rand"
-	"github.com/wonabru/qwid-node/logger"
+	oqsrand "github.com/qwid-org/qwid-node/crypto/oqs/rand"
+	"github.com/qwid-org/qwid-node/logger"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -792,7 +792,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // newSeedTestWallet builds a wallet whose files land in a throwaway directory.
@@ -1195,7 +1195,7 @@ package wallet
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // TestSchemeChangeIsReproducibleFromPhrase: when the chain votes in a new

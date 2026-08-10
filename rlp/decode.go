@@ -28,7 +28,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/wonabru/qwid-node/rlp/internal/rlpstruct"
+	"github.com/qwid-org/qwid-node/rlp/internal/rlpstruct"
 )
 
 //lint:ignore ST1012 EOL is not an error.

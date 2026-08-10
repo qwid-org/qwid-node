@@ -88,7 +88,7 @@ func TestPublicViewNilSafe(t *testing.T) {
 ```go
 package wallet
 
-import "github.com/wonabru/qwid-node/common"
+import "github.com/qwid-org/qwid-node/common"
 
 // PublicWalletView is the RPC-safe projection of a Wallet: identity/public fields
 // only. It deliberately omits KdfSalt, EncryptedSecretKey, Iv, HomePath, and the

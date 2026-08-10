@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	oqsrand "github.com/wonabru/qwid-node/crypto/oqs/rand"
+	oqsrand "github.com/qwid-org/qwid-node/crypto/oqs/rand"
 	"golang.org/x/crypto/hkdf"
 )
 

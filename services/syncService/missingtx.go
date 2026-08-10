@@ -4,10 +4,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/services/transactionServices"
-	"github.com/wonabru/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
+	"github.com/qwid-org/qwid-node/tcpip"
 )
 
 // Missing-transaction request bookkeeping.

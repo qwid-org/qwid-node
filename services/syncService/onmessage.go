@@ -7,18 +7,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/logger"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/message"
-	"github.com/wonabru/qwid-node/services"
-	nonceServices "github.com/wonabru/qwid-node/services/nonceService"
-	"github.com/wonabru/qwid-node/services/transactionServices"
-	"github.com/wonabru/qwid-node/statistics"
-	"github.com/wonabru/qwid-node/tcpip"
-	"github.com/wonabru/qwid-node/transactionsPool"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/message"
+	"github.com/qwid-org/qwid-node/services"
+	nonceServices "github.com/qwid-org/qwid-node/services/nonceService"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
+	"github.com/qwid-org/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 )
 
 var err error

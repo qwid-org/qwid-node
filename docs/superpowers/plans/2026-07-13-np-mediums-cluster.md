@@ -38,7 +38,7 @@ package tcpip
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func TestIsIPBannedEvictsExpired(t *testing.T) {
@@ -396,7 +396,7 @@ package syncService
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func TestClampHeaderSpan(t *testing.T) {

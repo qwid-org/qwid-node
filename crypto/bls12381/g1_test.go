@@ -6,7 +6,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func (g *G1) one() *PointG1 {

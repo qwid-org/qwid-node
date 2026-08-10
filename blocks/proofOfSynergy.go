@@ -1,7 +1,7 @@
 package blocks
 
 import (
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 	"math"
 	"math/big"
 )
