@@ -63,8 +63,12 @@ type AccountResponse struct {
 	StakingDetails  []StakingDetail `json:"stakingDetails"`
 	EscrowDelay     int64           `json:"escrowDelay"`
 	MultiSignNumber uint8           `json:"multiSignNumber"`
-	SentCount       int             `json:"sentCount"`
-	ReceivedCount   int             `json:"receivedCount"`
+	// Which addresses may co-sign. Without this the threshold alone is
+	// unactionable: an owner whose transfer sits unapproved cannot tell
+	// whether the address that signed is authorised at all.
+	MultiSignAddresses []string `json:"multiSignAddresses,omitempty"`
+	SentCount          int      `json:"sentCount"`
+	ReceivedCount      int      `json:"receivedCount"`
 }
 
 type StakingDetail struct {
@@ -407,18 +411,27 @@ func GetAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	signers := make([]string, 0, len(acc.MultiSignAddresses))
+	for _, a := range acc.MultiSignAddresses {
+		addr := common.Address{}
+		if err := addr.Init(a[:]); err == nil {
+			signers = append(signers, addr.GetHex())
+		}
+	}
+
 	resp := AccountResponse{
-		Address:         MainWallet.MainAddress.GetHex(),
-		Balance:         conf,
-		StakedAmount:    stake,
-		LockedAmount:    locks,
-		RewardsAmount:   rewards,
-		TotalHoldings:   conf + stake + rewards,
-		StakingDetails:  stakingDetails,
-		EscrowDelay:     acc.TransactionDelay,
-		MultiSignNumber: acc.MultiSignNumber,
-		SentCount:       int(acc.SentCount),
-		ReceivedCount:   int(acc.ReceivedCount),
+		Address:            MainWallet.MainAddress.GetHex(),
+		Balance:            conf,
+		StakedAmount:       stake,
+		LockedAmount:       locks,
+		RewardsAmount:      rewards,
+		TotalHoldings:      conf + stake + rewards,
+		StakingDetails:     stakingDetails,
+		EscrowDelay:        acc.TransactionDelay,
+		MultiSignNumber:    acc.MultiSignNumber,
+		MultiSignAddresses: signers,
+		SentCount:          int(acc.SentCount),
+		ReceivedCount:      int(acc.ReceivedCount),
 	}
 	jsonResponse(w, resp)
 }
@@ -980,6 +993,10 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 						"amount":    account.Int64toFloat64(tx.TxData.Amount),
 						"height":    tx.Height,
 						"time":      tx.TxParam.SendingTime,
+						// DETS already reports where the transaction lives; the
+						// history discarded it and listed everything alike, so a
+						// transfer still sitting in escrow looked settled.
+						"location": string(reply[3 : 3+locLen]),
 					})
 				}
 			}
@@ -1001,12 +1018,13 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 				tx, _, err := tx.GetFromBytes(reply[3+locLen:])
 				if err == nil {
 					transactions = append(transactions, map[string]interface{}{
-						"type":   "received",
-						"hash":   tx.Hash.GetHex(),
-						"sender": tx.TxParam.Sender.GetHex(),
-						"amount": account.Int64toFloat64(tx.TxData.Amount),
-						"height": tx.Height,
-						"time":   tx.TxParam.SendingTime,
+						"type":     "received",
+						"hash":     tx.Hash.GetHex(),
+						"sender":   tx.TxParam.Sender.GetHex(),
+						"amount":   account.Int64toFloat64(tx.TxData.Amount),
+						"height":   tx.Height,
+						"time":     tx.TxParam.SendingTime,
+						"location": string(reply[3 : 3+locLen]),
 					})
 				}
 			}

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net"
 	"net/rpc"
 	"os"
@@ -401,6 +400,46 @@ func handleVIEW(line []byte, reply *[]byte) {
 	*reply, _ = hex.DecodeString(l)
 }
 
+// txLocation describes where a transaction currently is.
+//
+// Being on the chain and being outstanding are independent facts: an escrow
+// transfer is written to the confirmed DB by the block that carries it and
+// only then enters the escrow pool, where it waits until its settlement
+// height. The same holds for a transfer awaiting co-signatures. Reporting a
+// single first-match location put every such transaction under plain
+// "confirmed_db" and made the wallet show unsettled transfers as done.
+//
+// "confirmed_db" therefore still wins as the primary state — that is what most
+// callers ask about — and the outstanding state is appended as a qualifier:
+//
+//	confirmed_db            on chain, nothing outstanding
+//	confirmed_db+escrow     on chain, value not moved yet
+//	confirmed_db+multisig   on chain, awaiting signatures
+//
+// Transactions that never reached a block keep their previous single values.
+func txLocation(inConfirmed, inPoolDB, inMain, inEscrow, inMultisig bool) string {
+	if inConfirmed {
+		switch {
+		case inEscrow:
+			return "confirmed_db+escrow"
+		case inMultisig:
+			return "confirmed_db+multisig"
+		}
+		return "confirmed_db"
+	}
+	switch {
+	case inPoolDB:
+		return "pool_db"
+	case inMain:
+		return "memory_main"
+	case inEscrow:
+		return "memory_escrow"
+	case inMultisig:
+		return "memory_multisign"
+	}
+	return ""
+}
+
 func handleDETS(line []byte, reply *[]byte) {
 
 	switch len(line) {
@@ -410,38 +449,40 @@ func handleDETS(line []byte, reply *[]byte) {
 		account.AccountsRWMutex.RLock()
 		acc := account.Accounts.AllAccounts[byt]
 		account.AccountsRWMutex.RUnlock()
+		// Same as handleACCT: the state no longer carries the history lists,
+		// so fill the transport slices from the DB index - the address-details
+		// views (webui explorer, tx history) are built from this reply.
+		acc.TransactionsSender = account.GetTxHistorySent(byt, 50)
+		acc.TransactionsRecipient = account.GetTxHistoryReceived(byt, 50)
 		am := acc.Marshal()
 		*reply = append([]byte("AC"), am...)
 		break
 	case common.HashLength:
-		location := ""
 		var tx transactionsDefinition.Transaction
 		var err error
 
 		// Check confirmed DB (TT)
 		tx, err = transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], line)
-		if err == nil {
-			location = "confirmed_db"
-		}
+		inConfirmed := err == nil
 
-		// Check pool DB (D0)
-		if location == "" {
+		// Check pool DB (D0). Only needed for the transaction bytes when the
+		// confirmed DB did not have them.
+		inPoolDB := false
+		if !inConfirmed {
 			tx, err = transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], line)
-			if err == nil {
-				location = "pool_db"
-			}
+			inPoolDB = err == nil
 		}
 
-		// Check in-memory pools
-		if location == "" && transactionsPool.PoolsTx.HasTransaction(line) {
-			location = "memory_main"
-		}
-		if location == "" && transactionsPool.PoolTxEscrow.HasTransaction(line) {
-			location = "memory_escrow"
-		}
-		if location == "" && transactionsPool.PoolTxMultiSign.HasTransaction(line) {
-			location = "memory_multisign"
-		}
+		// Pool membership is checked unconditionally: a confirmed transaction
+		// can still be waiting in the escrow or multisig pool, and that is
+		// exactly the state the old first-match resolution hid.
+		location := txLocation(
+			inConfirmed,
+			inPoolDB,
+			transactionsPool.PoolsTx.HasTransaction(line),
+			transactionsPool.PoolTxEscrow.HasTransaction(line),
+			transactionsPool.PoolTxMultiSign.HasTransaction(line),
+		)
 
 		if location == "" {
 			logger.GetLogger().Println("transaction not found in any location:", hex.EncodeToString(line))
@@ -486,8 +527,7 @@ func handleACCT(line []byte, reply *[]byte) {
 	// slices with the last 50 hashes from the DB index. SentCount and
 	// ReceivedCount travel alongside, so clients see the true totals even
 	// though the lists are capped.
-	acc.TransactionsSender = account.GetTxHistorySent(byt, 50)
-	acc.TransactionsRecipient = account.GetTxHistoryReceived(byt, 50)
+	acc = account.WithTxHistory(acc, byt, 50)
 	am := acc.Marshal()
 
 	*reply = am
@@ -597,10 +637,13 @@ func handleCNCL(byt []byte, reply *[]byte) {
 		if transactionsPool.PoolTxMultiSign.TransactionExists(byt) {
 			tx := transactionsPool.PoolTxMultiSign.PopTransactionByHash(byt)
 			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
-				transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.Hash)
+				transactionsPool.AddMultiSignTransaction(tx)
 				*reply = []byte("you are not the owner of transaction")
 				return
 			}
+			// Drop the persisted copy too, or the restart would resurrect the
+			// cancelled transaction into the pool.
+			transactionsPool.RemoveMultiSignTransaction(byt)
 			transactionsPool.PoolTxMultiSign.BanTransactionByHash(byt)
 			*reply = []byte("transaction cancelled locally")
 			return
@@ -633,7 +676,15 @@ func handleSTAT(byt []byte, reply *[]byte) {
 }
 
 func handlePEND(byt []byte, reply *[]byte) {
-	// Get pending transactions from all pools
+	// Get pending transactions from all pools.
+	//
+	// MaturesAt is set for escrow only, where it is the height the transfer
+	// settles at. An escrow transaction is confirmed on-chain the moment its
+	// block is processed and only then enters the escrow pool
+	// (blocks/processTransaction.go), so it is legitimately both "in
+	// confirmed_db" and "waiting" until it matures. Reporting it as bare
+	// "pending", like a transaction still waiting to reach a block, reads as
+	// though it might never land.
 	type PendingTx struct {
 		Hash      string  `json:"hash"`
 		Sender    string  `json:"sender"`
@@ -641,6 +692,14 @@ func handlePEND(byt []byte, reply *[]byte) {
 		Amount    float64 `json:"amount"`
 		Height    int64   `json:"height"`
 		Pool      string  `json:"pool"`
+		MaturesAt int64   `json:"maturesAt,omitempty"`
+		// Multisig only. Approves is the hash of the transaction a
+		// co-signature is aimed at — without it an owner with several pending
+		// transfers cannot tell which one a signature belongs to. Approvals /
+		// Required are the progress on a main transaction.
+		Approves  string `json:"approves,omitempty"`
+		Approvals int    `json:"approvals,omitempty"`
+		Required  int    `json:"required,omitempty"`
 	}
 
 	pendingTxs := []PendingTx{}
@@ -658,9 +717,14 @@ func handlePEND(byt []byte, reply *[]byte) {
 		})
 	}
 
-	// Get from escrow pool (use max height to return all pending escrow txs)
-	escrowTxs := transactionsPool.PoolTxEscrow.PeekTransactions(50, math.MaxInt64)
-	for _, tx := range escrowTxs {
+	// Escrow. MaturesAt comes from blocks.EscrowMaturityHeight, which reads the
+	// sender account's delay — the value settlement actually gates on. The
+	// escrow pool's own ordering key must NOT be used here: it is
+	// tx.Height + tx.TxData.EscrowTransactionsDelay, and that field is set only
+	// on a ModifyEscrow configuration transaction, so for an ordinary transfer
+	// it is zero and the key equals the transaction's own height.
+	for _, e := range transactionsPool.PoolTxEscrow.PeekEntries(50) {
+		tx := e.Transaction
 		pendingTxs = append(pendingTxs, PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),
@@ -668,20 +732,36 @@ func handlePEND(byt []byte, reply *[]byte) {
 			Amount:    float64(tx.TxData.Amount) / 1e8,
 			Height:    tx.Height,
 			Pool:      "escrow",
+			MaturesAt: blocks.EscrowMaturityHeight(tx),
 		})
 	}
 
-	// Get from multi-sig pool
-	multiTxs := transactionsPool.PoolTxMultiSign.PeekTransactions(50, math.MaxInt64)
-	for _, tx := range multiTxs {
-		pendingTxs = append(pendingTxs, PendingTx{
+	// Multisig: this used to call PeekTransactions(50, math.MaxInt64), but the
+	// multisig pool matches priority by equality against a key derived from
+	// the multi-signature hash, so that query could never match and the wallet
+	// showed no pending multi-signature transactions at all. No MaturesAt
+	// here: a multisig transaction waits for co-signers, not for a height.
+	for _, e := range transactionsPool.PoolTxMultiSign.PeekEntries(50) {
+		tx := e.Transaction
+		entry := PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),
 			Recipient: tx.TxData.Recipient.GetHex(),
 			Amount:    float64(tx.TxData.Amount) / 1e8,
 			Height:    tx.Height,
 			Pool:      "multisig",
-		})
+		}
+		if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), blocks.ZerosHash) {
+			// A main transaction: report how far its approvals have got. The
+			// group is keyed by this transaction's own hash, which is also the
+			// key its co-signatures were pooled under.
+			group := transactionsPool.PoolTxMultiSign.PeekTransactions(
+				common.MaxTransactionInPool, common.GetInt64FromByte(tx.Hash.GetBytes()))
+			entry.Approvals, entry.Required = blocks.CountMultiSignApprovals(tx, group)
+		} else {
+			entry.Approves = tx.TxParam.MultiSignTx.GetHex()
+		}
+		pendingTxs = append(pendingTxs, entry)
 	}
 
 	result, err := json.Marshal(pendingTxs)

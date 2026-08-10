@@ -580,6 +580,16 @@ func newFrontierInstructionSet() JumpTable {
 			minStack:    minStack(0, 0),
 			maxStack:    maxStack(0, 0),
 		},
+		// EIP-3855. Folded into the base instruction set rather than gated
+		// behind a Shanghai fork: this chain has no fork schedule, and every
+		// current Solidity release emits PUSH0 by default, so anything else
+		// leaves newcomers unable to deploy a contract they compiled by the book.
+		PUSH0: {
+			execute:     opPush0,
+			constantGas: GasQuickStep,
+			minStack:    minStack(0, 1),
+			maxStack:    maxStack(0, 1),
+		},
 		PUSH1: {
 			execute:     opPush1,
 			constantGas: GasFastestStep,

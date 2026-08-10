@@ -172,6 +172,17 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 			txs = append(txs, tx)
 		}
+		// Drop escrow cancellations that this block's height would reject.
+		// Without this, one matured cancellation left in the pool fails
+		// CheckBlockTransfers below on every attempt and the node stops
+		// producing blocks entirely.
+		//
+		// nonceHeight, not h+1: it is the nonce transaction's height that
+		// becomes the block header height in CreateBlockFromNonceMessage, and
+		// therefore the height CheckBlockTransfers validates against. The two
+		// are equal here thanks to the guard above, but this must not silently
+		// diverge from validation if that guard ever changes.
+		txs = blocks.FilterUnbuildableCancellations(txs, nonceHeight)
 		txsBytes := make([][]byte, len(txs))
 		transactionsHashes := []common.Hash{}
 		for _, tx := range txs {

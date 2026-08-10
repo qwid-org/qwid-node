@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy — QWID Foundation</title>
+<meta name="description" content="What qwid.org stores about visitors: no cookies, no analytics, no third-party requests. Server access logs only.">
+<link rel="canonical" href="https://qwid.org/privacy.html">
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --void:#020810;
+  --surface:#080f1e;
+  --cyan:#00e5ff;
+  --gold:#f0b429;
+  --green:#2ed573;
+  --text:#b8cceb;
+  --muted:#526480;
+  --card-border:rgba(0,229,255,0.12);
+}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Barlow',sans-serif;background:var(--void);color:var(--text);line-height:1.7;min-height:100vh}
+a{color:var(--cyan);text-decoration:none}
+a:hover{text-decoration:underline}
+.site-header{
+  background:rgba(2,8,16,0.95);border-bottom:1px solid var(--card-border);
+  padding:0 2rem;height:64px;display:flex;align-items:center;justify-content:space-between;
+  position:sticky;top:0;z-index:100;
+}
+.site-logo{font-family:'Orbitron',sans-serif;font-weight:900;font-size:1.2rem;color:#fff;letter-spacing:.05em}
+.site-logo span{color:var(--cyan)}
+.back-link{
+  font-family:'Barlow Condensed',sans-serif;font-size:.75rem;font-weight:700;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--muted);
+  border:1px solid rgba(0,229,255,.15);padding:.35rem .9rem;border-radius:6px;
+}
+.back-link:hover{color:var(--cyan);border-color:var(--cyan);text-decoration:none}
+main{max-width:760px;margin:0 auto;padding:3rem 2rem 5rem}
+h1{font-family:'Barlow Condensed',sans-serif;font-weight:800;font-size:2.2rem;color:#fff;margin-bottom:.4rem}
+.updated{font-size:.85rem;color:var(--muted);margin-bottom:2.5rem}
+h2{
+  font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:1.3rem;
+  color:var(--cyan);letter-spacing:.04em;margin:2.25rem 0 .75rem;
+  display:flex;align-items:center;gap:.5rem;
+}
+h2::before{content:'';display:inline-block;width:3px;height:1.2em;background:var(--cyan);border-radius:2px}
+p{margin-bottom:.9rem}
+ul{padding-left:1.4rem;margin:.5rem 0 1rem;display:flex;flex-direction:column;gap:.35rem}
+li::marker{color:var(--cyan)}
+strong{color:#e8f4ff}
+.callout{
+  background:rgba(46,213,115,.07);border:1px solid rgba(46,213,115,.25);
+  border-left:3px solid var(--green);border-radius:0 8px 8px 0;
+  padding:1.1rem 1.25rem;margin:1.5rem 0;
+}
+.callout strong{color:var(--green)}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.92rem;display:block;overflow-x:auto}
+th{
+  text-align:left;padding:.6rem .8rem;border-bottom:1px solid rgba(0,229,255,.2);
+  font-family:'Barlow Condensed',sans-serif;font-size:.75rem;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);white-space:nowrap;
+}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(0,229,255,.05);vertical-align:top}
+footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;font-size:.85rem;color:var(--muted)}
+@media(max-width:600px){main{padding:2rem 1.2rem 4rem}h1{font-size:1.6rem}}
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <a href="/" class="site-logo">QW<span>ID</span></a>
+  <a href="/" class="back-link">← Back to qwid.org</a>
+</header>
+
+<main>
+  <h1>Privacy</h1>
+  <div class="updated">Last updated: 10 August 2026</div>
+
+  <div class="callout">
+    <strong>Short version.</strong> This website sets no cookies, runs no analytics, and makes
+    no requests to any other company. Nothing is stored on your device, and your browsing is
+    not profiled. The only record of a visit is a standard web-server access log, kept for 14
+    days. The one exception is if you write to us — that is covered under
+    <em>If you contact us</em> below.
+  </div>
+
+  <h2>Who is responsible</h2>
+  <p>
+    QWID Foundation operates the website at <strong>qwid.org</strong>. For any question about
+    this notice or about your data, write to
+    <span class="mail" data-u="support" data-d="qwid.org"><noscript>support (at) qwid.org</noscript></span>,
+    or use the <a href="/#contact">contact form</a>.
+  </p>
+
+  <h2>Cookies and local storage</h2>
+  <p>
+    <strong>None are used.</strong> The site stores nothing on your device — no cookies, no
+    <code>localStorage</code>, no <code>sessionStorage</code>, no fingerprinting. Because
+    nothing is stored and nothing non-essential is loaded, no consent banner is required and
+    none is shown.
+  </p>
+  <p>
+    Google Analytics was previously embedded on this site and was removed in August 2026,
+    together with the cookies it set. No analytics product replaced it.
+  </p>
+
+  <h2>What your browser loads</h2>
+  <p>
+    <strong>Everything this site needs comes from our own servers.</strong> No other company
+    receives a request when you open a page here, so your IP address is never disclosed to a
+    third party just for reading.
+  </p>
+  <ul>
+    <li>
+      <strong>Fonts and scripts</strong> are served from <strong>qwid.org</strong>, not from a
+      content-delivery network. Sites that pull fonts from an external CDN hand your IP
+      address to that provider on every visit; this one does not.
+    </li>
+    <li>
+      <strong>Live network figures</strong> on the home page — block height, supply,
+      validators — are fetched from <strong>explorer.qwid.org</strong>, which is also ours and
+      logs requests exactly as described below. Block scripts and the figures simply do not
+      appear; nothing else changes.
+    </li>
+  </ul>
+  <p>
+    Links pointing off the site, such as GitHub, LinkedIn or X, are ordinary links. Nothing
+    reaches those services unless you click, and from that point their own privacy terms
+    apply.
+  </p>
+
+  <h2>Server logs</h2>
+  <p>
+    The web server records each request, as web servers do. Unless you write to us, this is
+    the only personal data processed here.
+  </p>
+  <table>
+    <thead>
+      <tr><th>What</th><th>Why</th><th>Kept for</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>IP address, timestamp, requested URL, HTTP status, user agent, referrer</td>
+        <td>Operating the service securely: diagnosing faults and identifying abuse such as
+            scanning or denial-of-service attempts</td>
+        <td>Rotated daily, deleted after 14 days</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    The lawful basis is legitimate interest in keeping the site available and secure
+    (Art. 6(1)(f) GDPR). Logs are not used to build profiles, are not combined with any other
+    source, and are not sold or shared. They are disclosed only if a competent authority
+    compels it by law.
+  </p>
+
+  <h2>If you contact us</h2>
+  <p>
+    The contact form asks for your name, e-mail address, an optional subject and your message.
+    Those details are used for one purpose: to read your message and reply to it. Nothing is
+    added to a mailing list, and writing to us does not sign you up for anything.
+  </p>
+  <table>
+    <thead>
+      <tr><th>What</th><th>Why</th><th>Kept for</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Name, e-mail address, subject, message</td>
+        <td>Answering your enquiry (Art. 6(1)(b) or 6(1)(f) GDPR, depending on what you write
+            about)</td>
+        <td>As long as the matter is open, and afterwards only where a record is needed —
+            then deleted on request</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Messages are delivered to <strong>support@qwid.org</strong> using Amazon Simple Email
+    Service, so <strong>Amazon Web Services</strong> carries them in transit and processes
+    them on our behalf as our provider. No other company is involved, and the form does not
+    route through a personal mailbox.
+  </p>
+
+  <h2>Blockchain data is not covered by this notice</h2>
+  <p>
+    The QWID network is a public blockchain. Addresses, transactions and balances are
+    replicated across every node by design, and <strong>nothing published to a blockchain can
+    be edited or erased</strong> — not by QWID Foundation and not by anyone else. This is a
+    property of the technology, not a policy choice.
+  </p>
+  <p>
+    QWID Foundation does not operate a wallet service on your behalf and never receives your
+    private keys or recovery phrase: they stay in your wallet, encrypted, and are never
+    transmitted to the network. Consider carefully what you attach to an address, because it
+    is permanent and public.
+  </p>
+
+  <h2>Your rights</h2>
+  <p>
+    Under the GDPR you may request access to the personal data held about you, its correction
+    or erasure, restriction of processing, and you may object to processing based on
+    legitimate interest. Write to
+    <span class="mail" data-u="support" data-d="qwid.org"><noscript>support (at) qwid.org</noscript></span>
+    or use the <a href="/#contact">contact form</a>.
+  </p>
+  <p>
+    In practice the only data held is the server log described above, which is identifiable
+    solely by IP address — so a request needs to reach us within the 14-day retention window
+    to be actionable.
+  </p>
+  <p>
+    You also have the right to lodge a complaint with a supervisory authority. In Poland that
+    is the President of the Personal Data Protection Office (Prezes Urzędu Ochrony Danych
+    Osobowych), <a href="https://uodo.gov.pl" target="_blank" rel="noopener">uodo.gov.pl</a>.
+  </p>
+
+  <h2>Changes</h2>
+  <p>
+    If the site ever starts using analytics, embedding third-party content, or storing anything
+    on your device, this page will be updated before that change goes live, and consent will be
+    requested where the law requires it.
+  </p>
+</main>
+
+<footer>
+  &copy; 2025&ndash;2026 QWID Foundation &middot; <a href="/">qwid.org</a>
+</footer>
+
+<script>
+// The contact address is assembled here rather than written into the markup,
+// so it never appears as a literal mailto: in the served HTML. This defeats
+// the crawlers that harvest addresses with a regex over page source, which is
+// most of them; it does not defeat a harvester that executes JavaScript, and
+// nothing short of dropping the address entirely would. Without scripting the
+// <noscript> fallback still shows a human-readable form, which matters because
+// a privacy notice has to leave a usable channel for data-subject requests.
+document.querySelectorAll('span.mail').forEach(function (el) {
+  var addr = el.dataset.u + String.fromCharCode(64) + el.dataset.d;
+  var a = document.createElement('a');
+  a.href = 'mailto:' + addr;
+  a.textContent = addr;
+  el.textContent = '';
+  el.appendChild(a);
+});
+</script>
+
+</body>
+</html>

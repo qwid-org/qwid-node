@@ -1,15 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-BTPFKCG0HZ"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-  gtag('config', 'G-BTPFKCG0HZ');
-</script>
+<!-- No analytics, no cookies, no third-party requests. Google Analytics used to
+     load here unconditionally, which set _ga cookies before the visitor could
+     consent to anything. Removing it is what lets this site run without a
+     consent banner at all; if analytics are ever wanted back, use a cookieless
+     tool and update privacy.html to match. -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QWID Foundation — Blockchain Beyond Quantum</title>
@@ -30,9 +26,7 @@
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Organization","name":"QWID Foundation","description":"Quantum-resistant blockchain running two independent post-quantum signature families — Falcon-512 (lattice) and MAYO-5 (multivariate) — with EVM smart contracts and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/qwid-org/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
 </script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="fonts/fonts.css">
 <style>
 /* ===================== RESET & ROOT ===================== */
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
@@ -1098,11 +1092,15 @@ img{max-width:100%}
 .audit-badge--green{background:rgba(46,213,115,.12);border:1px solid rgba(46,213,115,.3);color:var(--green)}
 .audit-badge--cyan{background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.2);color:var(--cyan)}
 .audit-badge--gold{background:rgba(240,180,41,.1);border:1px solid rgba(240,180,41,.3);color:var(--gold)}
-.audit-co-cats{display:flex;flex-direction:column;gap:.55rem}
-.audit-cat{display:flex;align-items:center;gap:.75rem}
+/* Areas covered, as plain labels. They used to carry per-area scores out of
+   10, which an internal review has no standing to award — the format read as
+   a third-party audit's verdict. The coverage itself is the honest claim. */
+.audit-co-cats{display:flex;flex-wrap:wrap;gap:.5rem}
+.audit-cat{display:flex;align-items:center}
 .audit-cat-name{
-  font-family:'Barlow Condensed',sans-serif;font-size:.8rem;font-weight:600;
-  letter-spacing:.04em;color:var(--muted);width:150px;flex-shrink:0;
+  font-family:'Barlow Condensed',sans-serif;font-size:.75rem;font-weight:600;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+  border:1px solid rgba(0,229,255,.15);border-radius:20px;padding:.3rem .8rem;
 }
 .audit-cat-bar{flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden}
 .audit-cat-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cyan),var(--blue))}
@@ -1135,8 +1133,8 @@ img{max-width:100%}
 .audit-ready{
   font-family:'Barlow Condensed',sans-serif;font-weight:700;
   font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;
-  background:rgba(46,213,115,.15);border:1px solid rgba(46,213,115,.35);
-  color:var(--green);padding:.4rem 1.1rem;border-radius:20px;
+  background:rgba(240,180,41,.12);border:1px solid rgba(240,180,41,.35);
+  color:var(--gold);padding:.4rem 1.1rem;border-radius:20px;
 }
 .audit-stats-row{display:flex;gap:1.5rem}
 .audit-s{text-align:center}
@@ -1156,7 +1154,6 @@ img{max-width:100%}
 @media(max-width:720px){
   .audit-callout-inner{grid-template-columns:1fr;gap:2rem}
   .audit-co-right{flex-direction:row;flex-wrap:wrap;justify-content:center}
-  .audit-cat-name{width:120px}
 }
 
 /* ===================== RESPONSIVE MISC ===================== */
@@ -1538,7 +1535,7 @@ a.htrust-item:hover{color:var(--cyan)}
           <circle cx="12" cy="20" r="1.5" fill="var(--cyan)"/>
         </svg>
         <h3>PRICE &amp; RAND Oracles</h3>
-        <p>Two on-chain oracles included at the protocol layer. PRICE Oracle provides decentralized QWD/USD rates. RAND Oracle generates verifiable random numbers for DeFi and GameFi — both completely free.</p>
+        <p>Two on-chain oracles included at the protocol layer. PRICE Oracle provides decentralized USD price rates. RAND Oracle generates verifiable random numbers for DeFi and GameFi — both completely free.</p>
       </div>
 
       <!-- 7 Governance -->
@@ -1649,7 +1646,7 @@ a.htrust-item:hover{color:var(--cyan)}
           </tr>
           <tr>
             <td>Time to Finality</td>
-            <td class="td-qwid">~5s</td>
+            <td class="td-qwid">~10s (1 block)</td>
             <td>~15 min</td>
             <td>~60 min</td>
           </tr>
@@ -1686,47 +1683,28 @@ a.htrust-item:hover{color:var(--cyan)}
         <span class="audit-badge audit-badge--gold">100% Open Source</span>
       </div>
       <div class="audit-co-cats">
-        <div class="audit-cat">
-          <span class="audit-cat-name">Cryptography</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:100%"></div></div>
-          <span class="audit-cat-score">10/10</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">State Management</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:100%"></div></div>
-          <span class="audit-cat-score">10/10</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Tx Validation</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:98%"></div></div>
-          <span class="audit-cat-score">9.8</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Consensus</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:95%"></div></div>
-          <span class="audit-cat-score">9.5</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Network Security</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:95%"></div></div>
-          <span class="audit-cat-score">9.5</span>
-        </div>
+        <div class="audit-cat"><span class="audit-cat-name">Cryptography</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">State Management</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Tx Validation</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Consensus &amp; EVM</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Network &amp; RPC</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Database</span></div>
       </div>
     </div>
     <div class="audit-co-right">
       <div class="audit-score-ring">
         <svg viewBox="0 0 160 160" width="160" height="160">
           <circle class="ring-bg" cx="80" cy="80" r="65"/>
-          <circle class="ring-val" cx="80" cy="80" r="65" stroke-dasharray="408" stroke-dashoffset="10"/>
+          <circle class="ring-val" cx="80" cy="80" r="65" stroke-dasharray="408" stroke-dashoffset="0"/>
         </svg>
-        <div class="audit-score-num">9.75</div>
-        <div class="audit-score-denom">out of 10</div>
+        <div class="audit-score-num">0</div>
+        <div class="audit-score-denom">open findings</div>
       </div>
-      <span class="audit-ready">✓ Mainnet Ready</span>
+      <span class="audit-ready">External audit pending</span>
       <div class="audit-stats-row">
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">Critical</span></div>
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">High</span></div>
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">Medium</span></div>
+        <div class="audit-s"><span class="audit-s-val">158</span><span class="audit-s-lbl">Enumerated</span></div>
+        <div class="audit-s"><span class="audit-s-val">14</span><span class="audit-s-lbl">Deferred</span></div>
+        <div class="audit-s"><span class="audit-s-val">284</span><span class="audit-s-lbl">Go files</span></div>
       </div>
       <a href="audit.html" target="_blank" rel="noopener" class="audit-co-cta">View Full Report →</a>
     </div>
@@ -1944,7 +1922,7 @@ a.htrust-item:hover{color:var(--cyan)}
             <a href="https://explorer.qwid.org" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Live ↗</a>
           </div>
           <div class="timeline-title">Phase 3 — DeFi Primitives</div>
-          <p class="timeline-desc">Protocol-level DEX with constant-product AMM. PRICE Oracle providing decentralized QWD/USD rates. RAND Oracle for verifiable on-chain randomness. Staking system with 256 delegated accounts and 128 active validators.</p>
+          <p class="timeline-desc">Protocol-level DEX with constant-product AMM. PRICE Oracle providing decentralized USD price rates. RAND Oracle for verifiable on-chain randomness. Staking system with 256 delegated accounts and 128 active validators.</p>
         </div>
 
         <div class="timeline-item done">
@@ -2041,7 +2019,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What is the QWID PRICE Oracle?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">The PRICE Oracle provides decentralized access to QWD token USD exchange rates within smart contracts. Network incentives encourage nodes to submit pricing data, with the median price determining the rate. Included per-block on the main chain at no charge.</div>
+          <div class="faq-a">The PRICE Oracle provides decentralized access to QWD token USD exchange rates within smart contracts. Network incentives encourage nodes to submit pricing data, and the rate is the median of what validators report, with the highest and lowest submissions discarded. Included per-block on the main chain at no charge.<br><br><strong>On the public testnet the figure is a stand-in, not a QWD price.</strong> QWD is not traded on any exchange yet, so there is no market rate to report; validators currently submit an external reference quote to exercise the mechanism end to end. The oracle carries a real QWD/USD rate once the token trades. The value shown in the wallet and the explorer is deliberately labelled without a ticker for that reason.</div>
         </div>
 
         <div class="faq-item">
@@ -2580,8 +2558,8 @@ a.htrust-item:hover{color:var(--cyan)}
       </div>
     </div>
     <div class="footer-bottom">
-      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Foundation. Open-source software released under MIT License.</span>
-      <span class="footer-copy" style="color:var(--muted)">Chain ID 23 &middot; Falcon-512 &middot; MAYO-5</span>
+      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Foundation. Open-source software released under MIT License. &middot; <a href="privacy.html">Privacy</a></span>
+      <span class="footer-copy" style="color:var(--muted)">No cookies &middot; No trackers &middot; Chain ID 23</span>
     </div>
   </div>
 </footer>

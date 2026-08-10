@@ -98,10 +98,18 @@ RewriteRule \.(docx|doc|odt)$ - [F]
 # Anything else that does not exist lands on the page rather than a bare 404,
 # so a stale search result is never a dead end. Kept last, and guarded against
 # looping on the document root itself.
+#
+# Assets are deliberately EXCLUDED from this rule. A missing page should be
+# redirected; a missing stylesheet or font must fail loudly with a 404. When
+# assets were included, a deploy that skipped the fonts/ directory answered
+# every font request with "301 -> homepage": the browser silently fell back to
+# a system font, the page looked subtly wrong, and nothing in the logs said
+# why. A 404 makes that a five-second diagnosis.
 # ---------------------------------------------------------------
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteCond %{REQUEST_URI} !^/$
+RewriteCond %{REQUEST_URI} !\.(css|js|mjs|map|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|webp|ico|pdf|xml|txt|json)$ [NC]
 RewriteRule ^ https://qwid.org/ [R=301,L]
 
 # ---------------------------------------------------------------

@@ -42,7 +42,10 @@ func UpdateAccountStats() {
 	txt += fmt.Sprintln("Heights max:", st.HeightMax)
 	txt += fmt.Sprintln("Time interval [sec.]:", st.TimeInterval)
 	txt += fmt.Sprintln("Difficulty:", st.Difficulty)
-	txt += fmt.Sprintln("\nPrice Oracle:", st.PriceOracle, " QWD/USD")
+	// No ticker: on testnet the feed carries a stand-in quote, because QWD is
+	// not traded anywhere yet. Labelling it QWD/USD would state a market price
+	// that does not exist.
+	txt += fmt.Sprintln("\nPrice Oracle:", st.PriceOracle)
 	txt += fmt.Sprintln("Rand Oracle:", st.RandOracle)
 	txt += fmt.Sprintln("\nNumber of transactions : ", st.Transactions, "/", st.TransactionsPending)
 	txt += fmt.Sprintln("Size of transactions [kB] : ", st.TransactionsSize/1024, "/", st.TransactionsPendingSize/1024)

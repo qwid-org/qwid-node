@@ -22,7 +22,7 @@ var (
 	DifficultyMultiplier           int32   = 10
 	BlockTimeInterval              float32 = 10 // 10 sec.
 	MaxBlockTimeInterval           int64   = 2000
-	MinNumberOfBlocksInStake       int64   = 36
+	MinNumberOfBlocksInStake       int64   = 6 // should be 36 but for testnet is released this number
 	MaxBlockForwardInTime          int64   = 15
 	DifficultyChange               float32 = 10
 	MaxGasUsage                    int64   = 13700000 // circa 6.5k transactions in block
@@ -117,6 +117,12 @@ var (
 	DexAccountsDBPrefix              = [2]byte{'D', 'A'}
 	BadTransactionDBPrefix           = [2]byte{'B', 'T'}
 	EscrowPoolDBPrefix               = [2]byte{'E', 'P'}
+	// MultiSignPoolDBPrefix mirrors EscrowPoolDBPrefix for the multisig pool.
+	// That pool is consensus state rebuilt from applied blocks (main txs and
+	// their confirmations enter it at block-apply time), so losing it on a
+	// restart made any later block carrying a confirmation unappliable -
+	// "no main transaction in multi signature pool" - forever.
+	MultiSignPoolDBPrefix = [2]byte{'M', 'P'}
 	// Per-account transaction-history index (account/txHistory.go):
 	// prefix | address | sequence -> tx hash. Kept OUTSIDE the account state
 	// snapshot so the snapshot stops growing with transaction history.

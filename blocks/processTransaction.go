@@ -2,6 +2,7 @@ package blocks
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 
 	"github.com/qwid-org/qwid-node/account"
@@ -13,6 +14,13 @@ import (
 )
 
 var ZerosHash = make([]byte, common.HashLength)
+
+// ErrEscrowAlreadyMatured marks the one cancellation failure that can never
+// reverse: once the chain passes the escrow's maturity height it never goes
+// back, so such a cancellation is permanently unusable and must be evicted
+// from the pool rather than retried. Every other failure may be transient —
+// the target's block might simply not have been processed here yet.
+var ErrEscrowAlreadyMatured = errors.New("escrow transaction has already matured")
 
 func validateEscrowCancellation(tx transactionsDefinition.Transaction, height int64) (transactionsDefinition.Transaction, error) {
 	targetHash, ok := tx.CancellationTarget()
@@ -38,9 +46,117 @@ func validateEscrowCancellation(tx transactionsDefinition.Transaction, height in
 		return transactionsDefinition.Transaction{}, fmt.Errorf("cancellation sender is not an escrow account")
 	}
 	if height >= target.GetHeight()+sender.TransactionDelay {
-		return transactionsDefinition.Transaction{}, fmt.Errorf("escrow transaction has already matured")
+		return transactionsDefinition.Transaction{}, ErrEscrowAlreadyMatured
 	}
 	return target, nil
+}
+
+// CountMultiSignApprovals reports how many valid approvals mainTx has within
+// group, and how many its sender account requires. group is the multisig pool
+// entries keyed by mainTx's hash — the main transaction plus every co-signature
+// aimed at it.
+//
+// It mirrors the rule ProcessTransactionsMultiSign applies: an entry counts
+// only when its sender is an authorised signer that has not already been
+// counted, its recipient equals the main transaction's, and its amount is
+// zero. The main transaction therefore never approves itself, which is the
+// part owners get wrong.
+//
+// Used both by ProcessTransactionsMultiSign to decide settlement and by the
+// PEND RPC to report progress, so the wallet can never disagree with the node
+// about how many signatures are in.
+//
+// It copies the authorised-signer slice. Reslicing acc.MultiSignAddresses in
+// place — as the settlement loop once did — mutates the account held in the
+// global map, because a value copy of an Account shares the slice's backing
+// array.
+func CountMultiSignApprovals(mainTx transactionsDefinition.Transaction,
+	group []transactionsDefinition.Transaction) (approvals int, required int) {
+
+	acc, exists := account.GetAccountByAddressBytes(mainTx.TxParam.Sender.GetBytes())
+	if !exists {
+		return 0, 0
+	}
+	required = int(acc.MultiSignNumber)
+
+	notApprovedYet := append([][common.AddressLength]byte(nil), acc.MultiSignAddresses...)
+	for _, t := range group {
+		if t.TxData.Amount != 0 ||
+			!bytes.Equal(mainTx.TxData.Recipient.GetBytes(), t.TxData.Recipient.GetBytes()) {
+			continue
+		}
+		sender := t.TxParam.Sender.ByteValue
+		for i, appr := range notApprovedYet {
+			if sender == appr {
+				approvals++
+				notApprovedYet = append(notApprovedYet[:i], notApprovedYet[i+1:]...)
+				break
+			}
+		}
+	}
+	return approvals, required
+}
+
+// EscrowMaturityHeight reports the height at which a pooled escrow transaction
+// becomes settleable, or 0 when the sender is unknown or is not an escrow
+// account.
+//
+// It reads the delay from the SENDER ACCOUNT, which is what
+// ProcessTransactionsEscrow gates on and what validateEscrowCancellation
+// measures the cancellation window with. Note that this is deliberately NOT
+// tx.Height + tx.TxData.EscrowTransactionsDelay, the key the escrow pool
+// happens to be ordered by: that field is only ever set on a ModifyEscrow
+// configuration transaction, so on an ordinary transfer it is zero and the
+// pool's ordering key equals the transaction's own height — a height already
+// in the past, useless as a settlement estimate.
+func EscrowMaturityHeight(tx transactionsDefinition.Transaction) int64 {
+	sender := tx.GetSenderAddress()
+	acc, exists := account.GetAccountByAddressBytes(sender.GetBytes())
+	if !exists || acc.TransactionDelay <= 0 {
+		return 0
+	}
+	return tx.GetHeight() + acc.TransactionDelay
+}
+
+// FilterUnbuildableCancellations returns txs without the escrow cancellations
+// that would make a block at the given height fail validation, and evicts the
+// permanently dead ones from the main pool.
+//
+// Block assembly used to hand every pooled transaction to the block and let
+// CheckBlockTransfers judge the result. That is fine when a rejection is
+// transient, but a cancellation whose target has matured fails forever: the
+// producer logged the error and returned, leaving the transaction in the pool,
+// so the next block was assembled from the same set and failed identically.
+// Block production stopped for good (seen at height 139793).
+//
+// The validation rule itself is unchanged — a block containing such a
+// transaction is still invalid. This only stops the node from proposing one.
+func FilterUnbuildableCancellations(txs []transactionsDefinition.Transaction, height int64) []transactionsDefinition.Transaction {
+	kept := txs[:0]
+	for _, tx := range txs {
+		if _, isCancellation := tx.CancellationTarget(); !isCancellation {
+			kept = append(kept, tx)
+			continue
+		}
+		_, err := validateEscrowCancellation(tx, height)
+		if err == nil {
+			kept = append(kept, tx)
+			continue
+		}
+		if errors.Is(err, ErrEscrowAlreadyMatured) {
+			// Unusable at every future height; keeping it would re-poison
+			// every subsequent block.
+			logger.GetLogger().Printf("dropping cancellation %s from pool: %v",
+				tx.Hash.GetHex(), err)
+			transactionsPool.PoolsTx.RemoveTransactionByHash(tx.Hash.GetBytes())
+			continue
+		}
+		// Possibly transient (e.g. the target's block has not been processed
+		// here yet): hold it back from this block, but leave it pooled.
+		logger.GetLogger().Printf("holding back cancellation %s: %v",
+			tx.Hash.GetHex(), err)
+	}
+	return kept
 }
 
 func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount int64, sumFee int64, block Block) bool {
@@ -329,10 +445,10 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 		} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 			//TODO MultiSignNumber
 			tx.Height = height
-			transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.Hash)
+			transactionsPool.AddMultiSignTransaction(tx)
 		} else {
 			if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
-				transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.TxParam.MultiSignTx)
+				transactionsPool.AddMultiSignTransaction(tx)
 			}
 			// DB-C2: for contract-call txs the EVM already moved Amount as
 			// msg.value; the native path must not move it again. Non-contract
@@ -362,6 +478,19 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 	return nil
 }
 
+// loadMultiSignMainTx recovers a multisig main transaction from the durable
+// transaction databases. Every applied block stores its transactions in the
+// confirmed DB, so a node that applied the main tx's block - however long ago -
+// can always rebuild the pool entry from there; the pool DB covers a main tx
+// that is still pending on this node.
+func loadMultiSignMainTx(hash common.Hash) (transactionsDefinition.Transaction, error) {
+	t, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], hash.GetBytes())
+	if err == nil {
+		return t, nil
+	}
+	return transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], hash.GetBytes())
+}
+
 func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height int64, tree *transactionsPool.MerkleTree) error {
 	// INVARIANT (EVM Phase 3a / DB-C2): matured txs settled here move value
 	// natively and UNCONDITIONALLY. This is correct only because these pooled
@@ -377,27 +506,51 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 
 	txs := transactionsPool.PoolTxMultiSign.PeekTransactions(common.MaxTransactionInPool, common.GetInt64FromByte(tx.TxParam.MultiSignTx.GetBytes()))
 
+	// NOTE: found must be an explicit flag. The previous detection - checking
+	// len(mainTx.GetBytes()) == 0 - was dead code: a zero-value Transaction
+	// serializes to ~290 bytes, so a missing main tx slipped through with
+	// Height 0 and hit the expiry branch below, which reported the same
+	// message and permanently rejected the block.
 	mainTx := transactionsDefinition.Transaction{}
+	mainFound := false
 	for _, t := range txs {
 		if bytes.Equal(t.Hash.GetBytes(), tx.TxParam.MultiSignTx.GetBytes()) {
 			mainTx = t
+			mainFound = true
 			break
 		}
 	}
 
-	if len(mainTx.GetBytes()) == 0 {
-		for _, t := range txs {
-			transactionsPool.PoolTxMultiSign.RemoveTransactionByHash(t.Hash.GetBytes())
+	if !mainFound {
+		// The pool is rebuilt from applied blocks, and the main tx travelled in
+		// one - so if it is not in the pool (restart wiped the pre-persistence
+		// pool, or the pool entry was evicted), recover it from the transaction
+		// databases instead of rejecting the block. Rejecting here bricked the
+		// chain: the block can never apply without the main tx, and the main tx
+		// never arrives again on its own.
+		if recovered, err := loadMultiSignMainTx(tx.TxParam.MultiSignTx); err == nil {
+			logger.GetLogger().Printf("multisig main tx %x recovered from the transaction DB into the pool",
+				tx.TxParam.MultiSignTx.GetBytes()[:8])
+			mainTx = recovered
+			mainFound = true
+			transactionsPool.AddMultiSignTransaction(mainTx)
 		}
-		return fmt.Errorf("no main transaction in multi signature pool")
+	}
+
+	if !mainFound {
+		for _, t := range txs {
+			transactionsPool.RemoveMultiSignTransaction(t.Hash.GetBytes())
+		}
+		return fmt.Errorf("no main transaction %x in multi signature pool or transaction DBs",
+			tx.TxParam.MultiSignTx.GetBytes()[:8])
 	}
 
 	// remove transactions related to main if more than a week in pool
 	if height-mainTx.GetHeight() > common.MaxTransactionInMultiSigPool {
 		for _, t := range txs {
-			transactionsPool.PoolTxMultiSign.RemoveTransactionByHash(t.Hash.GetBytes())
+			transactionsPool.RemoveMultiSignTransaction(t.Hash.GetBytes())
 		}
-		return fmt.Errorf("no main transaction in multi signature pool")
+		return fmt.Errorf("main transaction %x expired in multi signature pool", mainTx.Hash.GetBytes()[:8])
 	}
 
 	acc, exist := account.GetAccountByAddressBytes(mainTx.TxParam.Sender.GetBytes())
@@ -408,24 +561,14 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 		logger.GetLogger().Println("not enough signatures for transactions to process ", tx.TxParam.MultiSignTx.GetHex())
 		return nil
 	}
-	numApprovals := 0
-	notApprovedYet := acc.MultiSignAddresses[:]
-	for _, t := range txs {
-		sender := t.TxParam.Sender.ByteValue
-		appi := -1
-		for i, appr := range notApprovedYet {
-			if sender == appr && bytes.Equal(mainTx.TxData.Recipient.GetBytes(), t.TxData.Recipient.GetBytes()) && t.TxData.Amount == 0 {
-				numApprovals++
-				appi = i
-				break
-			}
-		}
-		if appi > 0 {
-			notApprovedYet = append(notApprovedYet[:appi], notApprovedYet[appi+1:]...)
-		} else if appi == 0 {
-			notApprovedYet = notApprovedYet[1:]
-		}
-	}
+	// Counting lives in CountMultiSignApprovals so the rule exists once. The
+	// loop that used to be inlined here tracked outstanding signers with
+	// acc.MultiSignAddresses[:], which shares its backing array with the
+	// account in the global map; removing a matched signer shifted elements
+	// inside that array and rewrote the account's authorised-signer list.
+	// [A B C] became [A C C] — B could no longer approve anything and C
+	// occupied two slots, so one address could satisfy two approvals.
+	numApprovals, _ := CountMultiSignApprovals(mainTx, txs)
 	if numApprovals < int(acc.MultiSignNumber) {
 		logger.GetLogger().Println("not enough signatures for transactions to process ", tx.TxParam.MultiSignTx.GetHex())
 		return nil
@@ -453,7 +596,7 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 		if acc.TransactionDelay > 0 && mainTx.GetHeight()+acc.TransactionDelay > height {
 			return fmt.Errorf("transaction should not be executed, should be delayed %v", mainTx.Hash.GetHex())
 		} else {
-			transactionsPool.PoolTxMultiSign.RemoveTransactionByHash(mainTx.Hash.GetBytes())
+			transactionsPool.RemoveMultiSignTransaction(mainTx.Hash.GetBytes())
 			err = AddBalance(address.ByteValue, -amount)
 			if err != nil {
 				// this can happen very rare. Only when escrow is multisign account
@@ -514,17 +657,24 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			logger.GetLogger().Printf("  escrow tx[%d]: senderAcc.TransactionDelay=%d, txHeight+delay=%d, currentHeight=%d",
 				i, senderAcc.TransactionDelay, tx.GetHeight()+senderAcc.TransactionDelay, height)
 			if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
+				// Skip this one and keep going, as the delegated-account branch
+				// above already does (AC-M7). Returning here abandoned every
+				// remaining entry in the batch, and the pool is a max-heap keyed
+				// on the height an entry was pooled at, so the newest — and
+				// therefore least mature — transaction is served first. One
+				// fresh escrow transfer was enough to hold every older, already
+				// due transfer past its promised delay.
 				logger.GetLogger().Printf("  escrow tx[%d]: NOT READY, need to wait %d more blocks", i, tx.GetHeight()+senderAcc.TransactionDelay-height)
-				return fmt.Errorf("transaction should not be executed %v", tx.Hash.GetHex())
+				continue
 			} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 				logger.GetLogger().Printf("  escrow tx[%d]: moving to multisign pool", i)
-				if transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.Hash) {
+				if transactionsPool.AddMultiSignTransaction(tx) {
 					transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				}
 			} else {
 				logger.GetLogger().Printf("  escrow tx[%d]: EXECUTING (delay passed or no delay)", i)
 				if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
-					transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.TxParam.MultiSignTx)
+					transactionsPool.AddMultiSignTransaction(tx)
 				}
 				err = AddBalance(address.ByteValue, -amount)
 				if err != nil {

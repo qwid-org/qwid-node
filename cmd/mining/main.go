@@ -12,6 +12,7 @@ import (
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/oracles"
 	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/services"
 	"github.com/qwid-org/qwid-node/statistics"
@@ -205,6 +206,19 @@ func main() {
 	if err := transactionsPool.LoadEscrowPoolFromDB(); err != nil {
 		logger.GetLogger().Println("could not load persisted escrow pool", err)
 	}
+	// Same for pending multisig transfers: the pool accumulates the main tx and
+	// its confirmations across an arbitrary number of blocks, and a restart
+	// that emptied it made any later confirmation-carrying block unappliable
+	// ("no main transaction in multi signature pool").
+	if err := transactionsPool.LoadMultiSignPoolFromDB(); err != nil {
+		logger.GetLogger().Println("could not load persisted multisig pool", err)
+	}
+
+	// Keep a BTC/USD quote warm in the background. The nonce path reads the
+	// cache without blocking, so an unreachable feed costs this node its
+	// contribution to the price median and nothing else — never a stalled
+	// block. Runs for the process lifetime; nothing closes the channel.
+	oracles.StartPriceFeed(nil, make(chan struct{}))
 
 	//Load Main Blockchain
 	services.SetBlockHeightAfterCheck()
