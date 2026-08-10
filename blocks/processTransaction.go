@@ -51,6 +51,27 @@ func validateEscrowCancellation(tx transactionsDefinition.Transaction, height in
 	return target, nil
 }
 
+// EscrowMaturityHeight reports the height at which a pooled escrow transaction
+// becomes settleable, or 0 when the sender is unknown or is not an escrow
+// account.
+//
+// It reads the delay from the SENDER ACCOUNT, which is what
+// ProcessTransactionsEscrow gates on and what validateEscrowCancellation
+// measures the cancellation window with. Note that this is deliberately NOT
+// tx.Height + tx.TxData.EscrowTransactionsDelay, the key the escrow pool
+// happens to be ordered by: that field is only ever set on a ModifyEscrow
+// configuration transaction, so on an ordinary transfer it is zero and the
+// pool's ordering key equals the transaction's own height — a height already
+// in the past, useless as a settlement estimate.
+func EscrowMaturityHeight(tx transactionsDefinition.Transaction) int64 {
+	sender := tx.GetSenderAddress()
+	acc, exists := account.GetAccountByAddressBytes(sender.GetBytes())
+	if !exists || acc.TransactionDelay <= 0 {
+		return 0
+	}
+	return tx.GetHeight() + acc.TransactionDelay
+}
+
 // FilterUnbuildableCancellations returns txs without the escrow cancellations
 // that would make a block at the given height fail validation, and evicts the
 // permanently dead ones from the main pool.
