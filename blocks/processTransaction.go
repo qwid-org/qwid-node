@@ -657,8 +657,15 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			logger.GetLogger().Printf("  escrow tx[%d]: senderAcc.TransactionDelay=%d, txHeight+delay=%d, currentHeight=%d",
 				i, senderAcc.TransactionDelay, tx.GetHeight()+senderAcc.TransactionDelay, height)
 			if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
+				// Skip this one and keep going, as the delegated-account branch
+				// above already does (AC-M7). Returning here abandoned every
+				// remaining entry in the batch, and the pool is a max-heap keyed
+				// on the height an entry was pooled at, so the newest — and
+				// therefore least mature — transaction is served first. One
+				// fresh escrow transfer was enough to hold every older, already
+				// due transfer past its promised delay.
 				logger.GetLogger().Printf("  escrow tx[%d]: NOT READY, need to wait %d more blocks", i, tx.GetHeight()+senderAcc.TransactionDelay-height)
-				return fmt.Errorf("transaction should not be executed %v", tx.Hash.GetHex())
+				continue
 			} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 				logger.GetLogger().Printf("  escrow tx[%d]: moving to multisign pool", i)
 				if transactionsPool.AddMultiSignTransaction(tx) {
