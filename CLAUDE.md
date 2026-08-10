@@ -135,7 +135,11 @@ BIND_ADDRESS=127.0.0.1               # HTTP listener bind host; default all inte
 TRUST_PROXY=true                     # Trust X-Forwarded-For only when behind a trusted proxy (else clients spoof IPs past rate limits).
 CORS_ALLOWED_ORIGINS=<origins>       # Comma-separated allowlist; only these origins are reflected. Default: none.
 COOKIE_INSECURE=true                 # Local HTTP dev only; unset in prod so the session cookie is Secure.
-SMTP_USER / SMTP_PASS                # Optional, for website email features.
+SMTP_USER / SMTP_PASS                # SES SMTP credentials (IAM, not an email address). Without them the contact form returns 503.
+SMTP_HOST=<ses-endpoint>             # Default email-smtp.us-east-1.amazonaws.com (N. Virginia, matches the domain MX). Region-specific — SES SMTP credentials are not portable between regions.
+SMTP_PORT=587                        # Default 587 (STARTTLS).
+CONTACT_TO=support@qwid.org          # Where the contact form delivers.
+CONTACT_FROM=support@qwid.org        # Envelope + From: sender. MUST be an identity verified in SES, or SES rejects the message. Never SMTP_USER — the visitor's address goes in Reply-To.
 ```
 
 Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change and website-registration flows.

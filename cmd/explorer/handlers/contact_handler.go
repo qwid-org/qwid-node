@@ -9,6 +9,67 @@ import (
 	"strings"
 )
 
+// mailConfig is where the contact form posts. Amazon SES rather than Gmail:
+// the domain already sends through SES (its SPF record is
+// "v=spf1 include:amazonses.com ~all"), and relaying visitor messages through
+// Gmail put Google in the path of personal data for no reason the privacy
+// notice could justify.
+type mailConfig struct {
+	Host string
+	Port string
+	To   string
+	From string
+}
+
+func (c mailConfig) Addr() string { return c.Host + ":" + c.Port }
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// contactMailConfig resolves the mail settings, defaulting to the SES endpoint
+// in the region this node runs in. Override SMTP_HOST when deploying elsewhere
+// — an SES SMTP endpoint is region-specific and credentials are not portable
+// between regions.
+func contactMailConfig() mailConfig {
+	return mailConfig{
+		Host: envOr("SMTP_HOST", "email-smtp.us-east-1.amazonaws.com"),
+		Port: envOr("SMTP_PORT", "587"),
+		To:   envOr("CONTACT_TO", "support@qwid.org"),
+		From: envOr("CONTACT_FROM", "support@qwid.org"),
+	}
+}
+
+// buildContactMessage assembles the RFC 5322 message.
+//
+// From: must be an identity SES has verified, so it is cfg.From and never the
+// visitor's address — SES rejects the message otherwise, and sending as an
+// arbitrary third party would be spoofing in any case. The visitor's address
+// goes in Reply-To, so replying still reaches them, and is repeated in the
+// body in case a client drops Reply-To.
+//
+// Callers must reject CR/LF in name, email and subject before calling this;
+// SendContact does that (WH-H7). Otherwise a crafted field would inject extra
+// headers here.
+func buildContactMessage(cfg mailConfig, name, email, subject, message string) []byte {
+	displaySubject := "[QWID Contact] New message"
+	if subject != "" {
+		displaySubject = "[QWID Contact] " + subject
+	}
+	body := fmt.Sprintf("From: %s <%s>\r\n\r\n%s", name, email, message)
+	return []byte("To: " + cfg.To + "\r\n" +
+		"From: " + cfg.From + "\r\n" +
+		"Reply-To: " + email + "\r\n" +
+		"Subject: " + displaySubject + "\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"\r\n" +
+		body)
+}
+
 func SendContact(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		jsonError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -54,23 +115,14 @@ func SendContact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	to := "wonabru@gmail.com"
-	subject := fmt.Sprintf("[QWID Contact] %s", req.Subject)
-	if req.Subject == "" {
-		subject = "[QWID Contact] New message"
-	}
-	body := fmt.Sprintf("From: %s <%s>\r\nSubject: %s\r\n\r\n%s", req.Name, req.Email, subject, req.Message)
-	msg := []byte("To: " + to + "\r\n" +
-		"From: " + smtpUser + "\r\n" +
-		"Reply-To: " + req.Email + "\r\n" +
-		"Subject: " + subject + "\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/plain; charset=UTF-8\r\n" +
-		"\r\n" +
-		body)
+	cfg := contactMailConfig()
+	msg := buildContactMessage(cfg, req.Name, req.Email, req.Subject, req.Message)
 
-	auth := smtp.PlainAuth("", smtpUser, smtpPass, "smtp.gmail.com")
-	if err := smtp.SendMail("smtp.gmail.com:587", auth, smtpUser, []string{to}, msg); err != nil {
+	// The envelope sender is cfg.From, not smtpUser: with SES the username is
+	// an IAM credential, and SES requires the envelope sender to be a verified
+	// identity.
+	auth := smtp.PlainAuth("", smtpUser, smtpPass, cfg.Host)
+	if err := smtp.SendMail(cfg.Addr(), auth, cfg.From, []string{cfg.To}, msg); err != nil {
 		jsonError(w, "Failed to send message", http.StatusInternalServerError)
 		return
 	}
