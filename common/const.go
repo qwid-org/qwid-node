@@ -117,6 +117,12 @@ var (
 	DexAccountsDBPrefix              = [2]byte{'D', 'A'}
 	BadTransactionDBPrefix           = [2]byte{'B', 'T'}
 	EscrowPoolDBPrefix               = [2]byte{'E', 'P'}
+	// MultiSignPoolDBPrefix mirrors EscrowPoolDBPrefix for the multisig pool.
+	// That pool is consensus state rebuilt from applied blocks (main txs and
+	// their confirmations enter it at block-apply time), so losing it on a
+	// restart made any later block carrying a confirmation unappliable -
+	// "no main transaction in multi signature pool" - forever.
+	MultiSignPoolDBPrefix = [2]byte{'M', 'P'}
 	// Per-account transaction-history index (account/txHistory.go):
 	// prefix | address | sequence -> tx hash. Kept OUTSIDE the account state
 	// snapshot so the snapshot stops growing with transaction history.

@@ -600,10 +600,13 @@ func handleCNCL(byt []byte, reply *[]byte) {
 		if transactionsPool.PoolTxMultiSign.TransactionExists(byt) {
 			tx := transactionsPool.PoolTxMultiSign.PopTransactionByHash(byt)
 			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
-				transactionsPool.PoolTxMultiSign.AddTransaction(tx, tx.Hash)
+				transactionsPool.AddMultiSignTransaction(tx)
 				*reply = []byte("you are not the owner of transaction")
 				return
 			}
+			// Drop the persisted copy too, or the restart would resurrect the
+			// cancelled transaction into the pool.
+			transactionsPool.RemoveMultiSignTransaction(byt)
 			transactionsPool.PoolTxMultiSign.BanTransactionByHash(byt)
 			*reply = []byte("transaction cancelled locally")
 			return

@@ -205,6 +205,13 @@ func main() {
 	if err := transactionsPool.LoadEscrowPoolFromDB(); err != nil {
 		logger.GetLogger().Println("could not load persisted escrow pool", err)
 	}
+	// Same for pending multisig transfers: the pool accumulates the main tx and
+	// its confirmations across an arbitrary number of blocks, and a restart
+	// that emptied it made any later confirmation-carrying block unappliable
+	// ("no main transaction in multi signature pool").
+	if err := transactionsPool.LoadMultiSignPoolFromDB(); err != nil {
+		logger.GetLogger().Println("could not load persisted multisig pool", err)
+	}
 
 	//Load Main Blockchain
 	services.SetBlockHeightAfterCheck()

@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
 )
 
 // TestHandleDETSFillsTxHistory: the address-details views (webui explorer,
