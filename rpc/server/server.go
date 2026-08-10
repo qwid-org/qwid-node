@@ -653,6 +653,13 @@ func handlePEND(byt []byte, reply *[]byte) {
 		Height    int64   `json:"height"`
 		Pool      string  `json:"pool"`
 		MaturesAt int64   `json:"maturesAt,omitempty"`
+		// Multisig only. Approves is the hash of the transaction a
+		// co-signature is aimed at — without it an owner with several pending
+		// transfers cannot tell which one a signature belongs to. Approvals /
+		// Required are the progress on a main transaction.
+		Approves  string `json:"approves,omitempty"`
+		Approvals int    `json:"approvals,omitempty"`
+		Required  int    `json:"required,omitempty"`
 	}
 
 	pendingTxs := []PendingTx{}
@@ -696,14 +703,25 @@ func handlePEND(byt []byte, reply *[]byte) {
 	// here: a multisig transaction waits for co-signers, not for a height.
 	for _, e := range transactionsPool.PoolTxMultiSign.PeekEntries(50) {
 		tx := e.Transaction
-		pendingTxs = append(pendingTxs, PendingTx{
+		entry := PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),
 			Recipient: tx.TxData.Recipient.GetHex(),
 			Amount:    float64(tx.TxData.Amount) / 1e8,
 			Height:    tx.Height,
 			Pool:      "multisig",
-		})
+		}
+		if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), blocks.ZerosHash) {
+			// A main transaction: report how far its approvals have got. The
+			// group is keyed by this transaction's own hash, which is also the
+			// key its co-signatures were pooled under.
+			group := transactionsPool.PoolTxMultiSign.PeekTransactions(
+				common.MaxTransactionInPool, common.GetInt64FromByte(tx.Hash.GetBytes()))
+			entry.Approvals, entry.Required = blocks.CountMultiSignApprovals(tx, group)
+		} else {
+			entry.Approves = tx.TxParam.MultiSignTx.GetHex()
+		}
+		pendingTxs = append(pendingTxs, entry)
 	}
 
 	result, err := json.Marshal(pendingTxs)
