@@ -2,9 +2,9 @@ package qtwidgets
 
 import (
 	"fmt"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto/oqs"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
 	"github.com/therecipe/qt/widgets"
 )
 

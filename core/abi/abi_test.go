@@ -26,9 +26,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/common/math"
-	"github.com/wonabru/qwid-node/crypto"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common/math"
+	"github.com/qwid-org/qwid-node/crypto"
 )
 
 const jsondata = `

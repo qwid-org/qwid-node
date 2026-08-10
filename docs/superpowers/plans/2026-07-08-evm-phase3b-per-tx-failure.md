@@ -49,7 +49,7 @@ import (
 	"fmt"
 	"testing"
 
-	vm "github.com/wonabru/qwid-node/core/evm"
+	vm "github.com/qwid-org/qwid-node/core/evm"
 )
 
 func TestIsEVMExecutionError(t *testing.T) {
@@ -94,7 +94,7 @@ Expected: FAIL — `isEVMExecutionError` undefined (and possibly a compile error
 
 - [ ] **Step 3: Implement the helper**
 
-First add `"errors"` to the import block in `blocks/evaluate.go` (it is not currently imported; `vm "github.com/wonabru/qwid-node/core/evm"` already is).
+First add `"errors"` to the import block in `blocks/evaluate.go` (it is not currently imported; `vm "github.com/qwid-org/qwid-node/core/evm"` already is).
 
 Then add the helper (near the other package-level helpers in `evaluate.go`):
 
@@ -165,7 +165,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing test (EvaluateSC returns an execution error for reverting code)**
 
-Append to `blocks/evm_failure_test.go` (imports needed: `math/big` not required here; add `"github.com/wonabru/qwid-node/account"`, `"github.com/wonabru/qwid-node/common"`, `"github.com/wonabru/qwid-node/logger"`, `"github.com/wonabru/qwid-node/transactionsDefinition"`). Minimal reverting init code `0x60006000fd` (`PUSH1 0 PUSH1 0 REVERT`) reverts during contract construction, so a Create returns an execution error:
+Append to `blocks/evm_failure_test.go` (imports needed: `math/big` not required here; add `"github.com/qwid-org/qwid-node/account"`, `"github.com/qwid-org/qwid-node/common"`, `"github.com/qwid-org/qwid-node/logger"`, `"github.com/qwid-org/qwid-node/transactionsDefinition"`). Minimal reverting init code `0x60006000fd` (`PUSH1 0 PUSH1 0 REVERT`) reverts during contract construction, so a Create returns an execution error:
 
 ```go
 func TestEvaluateSCRevertingCreateIsExecutionError(t *testing.T) {

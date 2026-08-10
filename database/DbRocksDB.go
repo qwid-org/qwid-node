@@ -3,12 +3,12 @@ package database
 import (
 	"errors"
 	"fmt"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/logger"
 	"os"
 	"sync"
 
 	gorocksdb "github.com/linxGnu/grocksdb"
-	commoneth "github.com/wonabru/qwid-node/common"
+	commoneth "github.com/qwid-org/qwid-node/common"
 )
 
 type BlockchainDB struct {

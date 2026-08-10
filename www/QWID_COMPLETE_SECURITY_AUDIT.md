@@ -1,8 +1,10 @@
-# QWID Blockchain - Complete Security Audit Report
+# QWID Blockchain - Complete Internal Security Review
 
-**Audit Date:** May 17-18, 2026 &nbsp;·&nbsp; **Comprehensive re-audit & remediation:** through July 13, 2026  
-**Repository:** https://github.com/wonabru/qwid-node (branch: security-fixes)  
-**Status:** ✅ **MAINNET READY** — every enumerated Critical / High / Medium finding is fixed or a documented, deferred-by-design item; **0 open**.
+> **Scope and provenance.** This is an *internal* review, conducted by the QWID team with AI assistance. It is **not** a third-party audit and no external firm attests to it. It is published unedited so that readers can verify the findings against the source themselves. An external audit is planned before mainnet.
+
+**Review Date:** May 17-18, 2026 &nbsp;·&nbsp; **Comprehensive re-review & remediation:** through July 13, 2026  
+**Repository:** https://github.com/qwid-org/qwid-node (branch: security-fixes)  
+**Status:** Every enumerated Critical / High / Medium finding is fixed or a documented, deferred-by-design item; **0 open**. An external audit is planned before mainnet — this review does not substitute for one.
 
 ---
 
@@ -33,23 +35,22 @@ _Status mirrors the authoritative reconciliation in `SECURITY_AUDIT.md` (branch 
 
 ## Executive Summary
 
-QWID blockchain has been comprehensively audited across all major security domains. The implementation is **production-ready** with excellent post-quantum cryptography design and robust consensus mechanisms.
+This review covered every major security domain of the QWID codebase: 284 Go files across 45 packages, line by line.
 
-### Overall Security Score: **9.75/10**
+No numeric score is given. Scoring is what a commissioned third-party audit does; an internal review awarding itself 10/10 would be borrowing a form it has not earned. What follows is the coverage and the counts, which are checkable against the repository.
 
-| Category | Score | Status |
-|----------|-------|--------|
-| **Cryptography** | 10/10 | ✅ Excellent - Dual PQC, proper implementation |
-| **Consensus** | 9.5/10 | ✅ Excellent - Proof-of-Synergy well-designed |
-| **Transaction Validation** | 9.8/10 | ✅ Excellent - Multi-sig, replay prevention |
-| **Network Security** | 9.5/10 | ✅ Excellent - Timestamp validation, pool management |
-| **State Management** | 10/10 | ✅ Excellent - No race conditions, proper locking |
-| **Overall** | 9.75/10 | ✅ **MAINNET READY** |
+| Domain | Reviewed | Representative work |
+|--------|----------|---------------------|
+| **Cryptography & wallet** | ✅ | Dual PQC signature paths; AES-256-GCM + Argon2id at rest; secret-key zeroing |
+| **Consensus & EVM** | ✅ | Proof-of-Synergy; native ↔ EVM balance bridge; per-transaction failure semantics |
+| **Transaction validation** | ✅ | Multi-signature, escrow, replay prevention, timestamp bounds |
+| **Network & RPC** | ✅ | Mutual PQ peer authentication; per-IP rate limiting; loopback-only wallet RPC |
+| **State management** | ✅ | Locking discipline on account/staking maps; snapshot integrity |
+| **Database** | ✅ | Atomic close under lock; write-locked deletes; LOCK-file integrity |
 
-### Critical Issues Found: **0**
-### High-Severity Issues: **0**
-### Medium-Severity Issues: **0** (optional: staking delays edge case - IMPLEMENTED)
-### Total Recommendations: **1** (optional improvement)
+### Findings enumerated: **158**
+### Open: **0**
+### Deferred by design (documented, mitigated): **14**
 
 ---
 
@@ -72,7 +73,7 @@ func (bh *BaseHeader) Verify(pub *PubKey) error {
 
 **Key Features:**
 - ✅ Dual post-quantum cryptography (Falcon-512 + MAYO-5)
-- ✅ NIST-approved algorithms (L1 + L5)
+- ✅ Algorithms from the NIST PQC process at security levels 1 and 5 (Falcon-512 selected for standardisation as FN-DSA/FIPS 206, still draft; MAYO-5 a round-3 Additional Signatures candidate)
 - ✅ Proper signature validation before state changes
 - ✅ No signature malleability issues
 - ✅ Deterministic verification (no randomness exploits)
@@ -87,7 +88,7 @@ func (bh *BaseHeader) Verify(pub *PubKey) error {
 2. **MAYO-5** (NIST Level 5)
    - Multivariate polynomial system
    - Maximum security level
-   - Larger signatures (~838 bytes)
+   - Larger signatures (964 bytes)
    - Completely different math family than Falcon
    - Safety net if one breaks
 
@@ -123,7 +124,7 @@ func (bh *BaseHeader) Verify(pub *PubKey) error {
 **Design Insight:**
 The optional public key registration is elegant:
 - **First transaction:** Includes full public key (897 bytes Falcon or 5,554 bytes MAYO)
-- **Subsequent transactions:** Public key already registered, only signature required (~752-838 bytes)
+- **Subsequent transactions:** Public key already registered, only signature required (752 bytes Falcon or 964 bytes MAYO)
 - **Result:** Up to 5,000 TX/block with full quantum-resistant signatures
 
 **Verdict:** ✅ **EXCELLENT** - Efficient and secure
@@ -857,7 +858,7 @@ Example:
 
 | Practice | Status | Details |
 |----------|--------|---------|
-| **Cryptography** | ✅ | NIST-approved PQC, dual algorithm redundancy |
+| **Cryptography** | ✅ | NIST-process PQC across two mathematical families, dual algorithm redundancy |
 | **Consensus** | ✅ | Hybrid PoW/PoS/PoA with proper incentives |
 | **Validation** | ✅ | Multi-layer checks on all inputs |
 | **State Safety** | ✅ | Proper locking, no race conditions |
@@ -896,10 +897,13 @@ Example:
 
 ## Recommendations for Future Work
 
-### High Priority (Mainnet Ready)
+### Completed
 1. ✅ All identified issues addressed
 2. ✅ Timestamp validation fixed
 3. ✅ Staking delays implemented
+
+### Required before mainnet
+1. ⬜ External third-party security audit — not yet commissioned
 
 ### Medium Priority (Post-Mainnet)
 1. Run full network stress tests (target: 5,000 TX/block)
@@ -935,11 +939,9 @@ Example:
 
 ## Final Verdict
 
-### 🎯 MAINNET READY ✅
+### Internal review complete — external audit outstanding
 
-**QWID blockchain is secure, well-designed, and ready for production deployment.**
-
-**Overall Security Score: 9.75/10**
+**Every finding this review enumerated has been addressed, and the full report is published so the work can be checked against the source.** That is the claim being made here, and no more. Readiness for production is not something a team can certify about its own code; an external audit is planned before mainnet.
 
 **Key Strengths:**
 1. ⭐ Post-quantum cryptography implementation is best-in-class
@@ -957,6 +959,6 @@ The blockchain is production-ready for mainnet launch.
 ---
 
 **Audit completed:** May 18, 2026 12:00 GMT+2  
-**Repository:** https://github.com/wonabru/qwid-node  
+**Repository:** https://github.com/qwid-org/qwid-node  
 **Lead Auditor:** [AI Security Analysis]  
 **Classification:** Public (no sensitive vulnerabilities disclosed)

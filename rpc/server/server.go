@@ -5,27 +5,26 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net"
 	"net/rpc"
 	"os"
 	"strconv"
 	"sync/atomic"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/core/stateDB"
-	"github.com/wonabru/qwid-node/crypto/oqs"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/pubkeys"
-	nonceServices "github.com/wonabru/qwid-node/services/nonceService"
-	"github.com/wonabru/qwid-node/services/transactionServices"
-	"github.com/wonabru/qwid-node/statistics"
-	"github.com/wonabru/qwid-node/tcpip"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/transactionsPool"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/core/stateDB"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/pubkeys"
+	nonceServices "github.com/qwid-org/qwid-node/services/nonceService"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
+	"github.com/qwid-org/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 type Listener struct {
@@ -638,7 +637,15 @@ func handleSTAT(byt []byte, reply *[]byte) {
 }
 
 func handlePEND(byt []byte, reply *[]byte) {
-	// Get pending transactions from all pools
+	// Get pending transactions from all pools.
+	//
+	// MaturesAt is set for escrow only, where it is the height the transfer
+	// settles at. An escrow transaction is confirmed on-chain the moment its
+	// block is processed and only then enters the escrow pool
+	// (blocks/processTransaction.go), so it is legitimately both "in
+	// confirmed_db" and "waiting" until it matures. Reporting it as bare
+	// "pending", like a transaction still waiting to reach a block, reads as
+	// though it might never land.
 	type PendingTx struct {
 		Hash      string  `json:"hash"`
 		Sender    string  `json:"sender"`
@@ -646,6 +653,7 @@ func handlePEND(byt []byte, reply *[]byte) {
 		Amount    float64 `json:"amount"`
 		Height    int64   `json:"height"`
 		Pool      string  `json:"pool"`
+		MaturesAt int64   `json:"maturesAt,omitempty"`
 	}
 
 	pendingTxs := []PendingTx{}
@@ -663,9 +671,10 @@ func handlePEND(byt []byte, reply *[]byte) {
 		})
 	}
 
-	// Get from escrow pool (use max height to return all pending escrow txs)
-	escrowTxs := transactionsPool.PoolTxEscrow.PeekTransactions(50, math.MaxInt64)
-	for _, tx := range escrowTxs {
+	// Escrow: PeekEntries also yields the priority, which for this pool is the
+	// settlement height (tx.Height + EscrowTransactionsDelay).
+	for _, e := range transactionsPool.PoolTxEscrow.PeekEntries(50) {
+		tx := e.Transaction
 		pendingTxs = append(pendingTxs, PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),
@@ -673,12 +682,17 @@ func handlePEND(byt []byte, reply *[]byte) {
 			Amount:    float64(tx.TxData.Amount) / 1e8,
 			Height:    tx.Height,
 			Pool:      "escrow",
+			MaturesAt: e.Priority,
 		})
 	}
 
-	// Get from multi-sig pool
-	multiTxs := transactionsPool.PoolTxMultiSign.PeekTransactions(50, math.MaxInt64)
-	for _, tx := range multiTxs {
+	// Multisig: this used to call PeekTransactions(50, math.MaxInt64), but the
+	// multisig pool matches priority by equality against a key derived from
+	// the multi-signature hash, so that query could never match and the wallet
+	// showed no pending multi-signature transactions at all. No MaturesAt
+	// here: a multisig transaction waits for co-signers, not for a height.
+	for _, e := range transactionsPool.PoolTxMultiSign.PeekEntries(50) {
+		tx := e.Transaction
 		pendingTxs = append(pendingTxs, PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),

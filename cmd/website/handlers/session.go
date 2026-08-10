@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 const (

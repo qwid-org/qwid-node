@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/core/stateDB"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/core/stateDB"
+	"github.com/qwid-org/qwid-node/logger"
 	"github.com/stretchr/testify/assert"
 )
 

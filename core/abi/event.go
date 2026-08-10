@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto"
 )
 
 // Event is an event potentially triggered by the EVM's LOG mechanism. The Event

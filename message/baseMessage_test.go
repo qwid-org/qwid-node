@@ -2,7 +2,7 @@ package message
 
 import (
 	"bytes"
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 	"github.com/stretchr/testify/assert"
 	"testing"
 )

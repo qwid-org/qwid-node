@@ -1,7 +1,7 @@
 package stateDB
 
 import (
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 var BalanceOfFunc = common.Hex2Bytes("70a08231")

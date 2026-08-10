@@ -1,6 +1,6 @@
 package stateDB
 
-import "github.com/wonabru/qwid-node/common"
+import "github.com/qwid-org/qwid-node/common"
 
 type Code []byte
 

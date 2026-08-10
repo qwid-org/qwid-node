@@ -1,6 +1,6 @@
 package test
 
-import "github.com/wonabru/qwid-node/rlp"
+import "github.com/qwid-org/qwid-node/rlp"
 import "io"
 
 func (obj *Test) EncodeRLP(_w io.Writer) error {

@@ -22,7 +22,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // EVMLogger is used to collect execution traces from an EVM transaction

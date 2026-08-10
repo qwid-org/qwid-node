@@ -3,7 +3,7 @@ package transactionsDefinition
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // TestTxParamNonceRoundTrip verifies AC-H2: TxParam serializes and deserializes

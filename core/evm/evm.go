@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto"
-	"github.com/wonabru/qwid-node/params"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto"
+	"github.com/qwid-org/qwid-node/params"
 )
 
 // emptyCodeHash is used by create to ensure deployment is disallowed to already

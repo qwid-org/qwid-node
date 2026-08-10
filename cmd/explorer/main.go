@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wonabru/qwid-node/cmd/explorer/handlers"
-	clientrpc "github.com/wonabru/qwid-node/rpc/client"
-	"github.com/wonabru/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/cmd/explorer/handlers"
+	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/statistics"
 )
 
 //go:embed static/*

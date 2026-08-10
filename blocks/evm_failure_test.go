@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	vm "github.com/wonabru/qwid-node/core/evm"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	vm "github.com/qwid-org/qwid-node/core/evm"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
 func TestIsEVMExecutionError(t *testing.T) {

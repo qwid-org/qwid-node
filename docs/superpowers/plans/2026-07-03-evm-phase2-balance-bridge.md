@@ -41,7 +41,7 @@
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `core/stateDB/methods_test.go` (add imports `"math/big"` and `"github.com/wonabru/qwid-node/account"` if absent):
+Add to `core/stateDB/methods_test.go` (add imports `"math/big"` and `"github.com/qwid-org/qwid-node/account"` if absent):
 
 ```go
 // initNativeAccounts resets the native account map so balance bridging has a
@@ -186,13 +186,13 @@ Expected: FAIL — `AddBalance`/`SubBalance` are no-ops.
 - [ ] **Step 3: Add the balanceChange journal entry**
 
 In `core/stateDB/journal.go`, change the import line
-`import "github.com/wonabru/qwid-node/common"`
+`import "github.com/qwid-org/qwid-node/common"`
 to:
 
 ```go
 import (
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
 )
 ```
 
@@ -269,7 +269,7 @@ func (sa *StateAccount) SubBalance(a common.Address, amount *big.Int) {
 }
 ```
 
-Confirm `logger` is imported in methods.go; if not, add `"github.com/wonabru/qwid-node/logger"`. (`common.Address` has a `GetHex()` method used in the log lines.)
+Confirm `logger` is imported in methods.go; if not, add `"github.com/qwid-org/qwid-node/logger"`. (`common.Address` has a `GetHex()` method used in the log lines.)
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -311,9 +311,9 @@ package blocks
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
 )
 
 // TestSelfdestructConservesSupply exercises the balance sequence that

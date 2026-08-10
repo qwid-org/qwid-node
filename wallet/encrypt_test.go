@@ -6,7 +6,7 @@ import (
 	"crypto/cipher"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // newTestWallet builds a minimal Wallet with just the fields encrypt/decrypt use.

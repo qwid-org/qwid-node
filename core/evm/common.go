@@ -18,8 +18,8 @@ package vm
 
 import (
 	"github.com/holiman/uint256"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/common/math"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common/math"
 )
 
 // calcMemSize64 calculates the required memory size, and returns

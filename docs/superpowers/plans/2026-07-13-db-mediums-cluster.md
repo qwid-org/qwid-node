@@ -226,7 +226,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // modexpInput builds the MODEXP precompile input: three 32-byte big-endian

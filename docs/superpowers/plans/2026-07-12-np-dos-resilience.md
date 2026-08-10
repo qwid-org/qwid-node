@@ -47,7 +47,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func TestInboundCapReached(t *testing.T) {
@@ -149,7 +149,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common"
 )
 
 func TestRPCSlotAcquireReleaseBounded(t *testing.T) {
@@ -295,8 +295,8 @@ package transactionServices
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
 // mkTx builds a Transaction whose GetHash() returns a hash tagged by b.

@@ -3,10 +3,10 @@ package services
 import (
 	"testing"
 
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/core/stateDB"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/core/stateDB"
+	"github.com/qwid-org/qwid-node/logger"
 )
 
 // withFreshEVMState swaps blocks.State for an empty one and restores the

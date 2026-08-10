@@ -1,37 +1,32 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-BTPFKCG0HZ"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-  gtag('config', 'G-BTPFKCG0HZ');
-</script>
+<!-- No analytics, no cookies, no third-party requests. Google Analytics used to
+     load here unconditionally, which set _ga cookies before the visitor could
+     consent to anything. Removing it is what lets this site run without a
+     consent banner at all; if analytics are ever wanted back, use a cookieless
+     tool and update privacy.html to match. -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QWID Foundation — Blockchain Beyond Quantum</title>
-<meta name="description" content="QWID is a quantum-resistant blockchain — post-quantum cryptography, EVM compatibility, Proof-of-Synergy consensus, and built-in DEX and oracles.">
+<meta name="description" content="QWID is a quantum-resistant blockchain running two independent post-quantum signature families side by side — Falcon-512 (lattice) and MAYO-5 (multivariate) — with EVM compatibility, Proof-of-Synergy consensus, and built-in DEX and oracles.">
+<link rel="canonical" href="https://qwid.org/">
 <!-- Open Graph -->
 <meta property="og:title" content="QWID — Blockchain Beyond Quantum">
-<meta property="og:description" content="Post-quantum cryptography, EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
+<meta property="og:description" content="Two independent post-quantum signature families in production: Falcon-512 (lattice) and MAYO-5 (multivariate). EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
 <meta property="og:image" content="https://qwid.org/og-1200x630.png">
 <meta property="og:url" content="https://qwid.org">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@QWID_org">
 <meta name="twitter:title" content="QWID — Blockchain Beyond Quantum">
-<meta name="twitter:description" content="Post-quantum cryptography, EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
+<meta name="twitter:description" content="Two independent post-quantum signature families in production: Falcon-512 (lattice) and MAYO-5 (multivariate). EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
 <meta name="twitter:image" content="https://qwid.org/og-1200x630.png">
 <!-- Schema.org -->
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"Organization","name":"QWID Foundation","description":"Quantum-resistant blockchain with post-quantum cryptography, EVM smart contracts, and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/wonabru/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
+{"@context":"https://schema.org","@type":"Organization","name":"QWID Foundation","description":"Quantum-resistant blockchain running two independent post-quantum signature families — Falcon-512 (lattice) and MAYO-5 (multivariate) — with EVM smart contracts and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/qwid-org/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
 </script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="fonts/fonts.css">
 <style>
 /* ===================== RESET & ROOT ===================== */
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
@@ -1097,11 +1092,15 @@ img{max-width:100%}
 .audit-badge--green{background:rgba(46,213,115,.12);border:1px solid rgba(46,213,115,.3);color:var(--green)}
 .audit-badge--cyan{background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.2);color:var(--cyan)}
 .audit-badge--gold{background:rgba(240,180,41,.1);border:1px solid rgba(240,180,41,.3);color:var(--gold)}
-.audit-co-cats{display:flex;flex-direction:column;gap:.55rem}
-.audit-cat{display:flex;align-items:center;gap:.75rem}
+/* Areas covered, as plain labels. They used to carry per-area scores out of
+   10, which an internal review has no standing to award — the format read as
+   a third-party audit's verdict. The coverage itself is the honest claim. */
+.audit-co-cats{display:flex;flex-wrap:wrap;gap:.5rem}
+.audit-cat{display:flex;align-items:center}
 .audit-cat-name{
-  font-family:'Barlow Condensed',sans-serif;font-size:.8rem;font-weight:600;
-  letter-spacing:.04em;color:var(--muted);width:150px;flex-shrink:0;
+  font-family:'Barlow Condensed',sans-serif;font-size:.75rem;font-weight:600;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+  border:1px solid rgba(0,229,255,.15);border-radius:20px;padding:.3rem .8rem;
 }
 .audit-cat-bar{flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden}
 .audit-cat-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cyan),var(--blue))}
@@ -1134,8 +1133,8 @@ img{max-width:100%}
 .audit-ready{
   font-family:'Barlow Condensed',sans-serif;font-weight:700;
   font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;
-  background:rgba(46,213,115,.15);border:1px solid rgba(46,213,115,.35);
-  color:var(--green);padding:.4rem 1.1rem;border-radius:20px;
+  background:rgba(240,180,41,.12);border:1px solid rgba(240,180,41,.35);
+  color:var(--gold);padding:.4rem 1.1rem;border-radius:20px;
 }
 .audit-stats-row{display:flex;gap:1.5rem}
 .audit-s{text-align:center}
@@ -1155,7 +1154,6 @@ img{max-width:100%}
 @media(max-width:720px){
   .audit-callout-inner{grid-template-columns:1fr;gap:2rem}
   .audit-co-right{flex-direction:row;flex-wrap:wrap;justify-content:center}
-  .audit-cat-name{width:120px}
 }
 
 /* ===================== RESPONSIVE MISC ===================== */
@@ -1314,23 +1312,23 @@ a.htrust-item:hover{color:var(--cyan)}
   <div class="hero-radial"></div>
 
   <div class="hero-content">
-    <div class="hero-eyebrow">A Quantum-Resistant Blockchain Built for the Future</div>
+    <div class="hero-eyebrow">Two Post-Quantum Signature Families. Not One Bet.</div>
     <h1 class="hero-h1">
       BLOCKCHAIN
       <span class="line2">BEYOND QUANTUM</span>
     </h1>
-    <p class="hero-sub">QWID combines NIST-approved post-quantum cryptography, EVM smart contracts, and Proof-of-Synergy consensus — built to secure digital value long after quantum computers arrive.</p>
+    <p class="hero-sub">NIST selected three post-quantum signature schemes — two of them are lattice-based, and NIST opened a separate process specifically to diversify beyond lattices. QWID runs that diversification in production today: Falcon-512 (lattice) and MAYO-5 (multivariate) as two independent mathematical families, either one retireable by on-chain vote without a hard fork.</p>
     <div class="hero-actions">
       <a href="#get-started" class="btn btn-primary">Get Started</a>
       <a href="WhitePaper_1.0.pdf" target="_blank" rel="noopener" class="btn btn-outline">Read WhitePaper</a>
       <a href="https://explorer.qwid.org" target="_blank" rel="noopener" class="btn btn-ghost">Live Explorer ↗</a>
     </div>
     <div class="hero-trust">
-      <a href="audit.html" target="_blank" rel="noopener" class="htrust-item"><span class="htrust-check">✓</span> Security Audited</a>
+      <a href="audit.html" target="_blank" rel="noopener" class="htrust-item"><span class="htrust-check">✓</span> Security Review Published</a>
       <span class="htrust-sep">·</span>
-      <span class="htrust-item"><span class="htrust-check">✓</span> NIST-Approved PQC</span>
+      <span class="htrust-item"><span class="htrust-check">✓</span> Two PQC Families</span>
       <span class="htrust-sep">·</span>
-      <a href="https://github.com/wonabru/qwid-node" target="_blank" rel="noopener" class="htrust-item"><span class="htrust-check">✓</span> 100% Open Source</a>
+      <a href="https://github.com/qwid-org/qwid-node" target="_blank" rel="noopener" class="htrust-item"><span class="htrust-check">✓</span> 100% Open Source</a>
       <span class="htrust-sep">·</span>
       <span class="htrust-item"><span class="htrust-check">✓</span> Public Testnet Live</span>
     </div>
@@ -1373,7 +1371,7 @@ a.htrust-item:hover{color:var(--cyan)}
 <!-- ===================== TRUST BAR ===================== -->
 <div class="trust-bar">
   <div class="trust-bar-inner">
-    <span class="trust-item">NIST-Approved PQC</span>
+    <span class="trust-item">Lattice + Multivariate PQC</span>
     <span class="trust-item">EVM Compatible</span>
     <span class="trust-item">100% Open Source</span>
     <span class="trust-item">Built-in DEX &amp; Oracles</span>
@@ -1393,8 +1391,8 @@ a.htrust-item:hover{color:var(--cyan)}
           <li>QWID solves this elegantly: <strong style="color:#fff">public keys are included optionally inside transactions</strong> — only on a user's first interaction with the network. All subsequent transactions reference the already-registered key.</li>
           <li>Two <strong style="color:#00e5ff">independent</strong> post-quantum schemes, each from a different mathematical family:
             <span style="display:block;margin-top:.5rem;display:flex;flex-direction:column;gap:.3rem">
-              <span><strong style="color:#fff">Falcon-512</strong> &mdash; NIST Level 1 &middot; faster &middot; sig &lt;752 B</span>
-              <span><strong style="color:#a0c0ff">MAYO-5</strong> &mdash; NIST Level 5 &middot; maximum security &middot; sig &lt;838 B</span>
+              <span><strong style="color:#fff">Falcon-512</strong> &mdash; lattice &middot; NIST security level 1 &middot; sig &lt;752 B</span>
+              <span><strong style="color:#a0c0ff">MAYO-5</strong> &mdash; multivariate &middot; NIST security level 5 &middot; sig 964 B</span>
             </span>
           </li>
           <li>The second scheme is a <strong style="color:#f0b429">safety net</strong>: if one scheme is ever found to be broken, the network continues operating on the other while the community votes to replace the compromised one with a new, vetted algorithm — zero downtime, zero lost funds.</li>
@@ -1446,7 +1444,7 @@ a.htrust-item:hover{color:var(--cyan)}
           </div>
           <div class="arch-enc-legend">
             <div class="enc-item"><span class="enc-dot enc-dot--cyan"></span><span>Falcon&#8209;512 &mdash; NIST L1 &middot; faster &middot; sig &lt;752 B</span></div>
-            <div class="enc-item"><span class="enc-dot enc-dot--blue"></span><span>MAYO&#8209;5 &mdash; NIST L5 &middot; max security &middot; sig &lt;838 B</span></div>
+            <div class="enc-item"><span class="enc-dot enc-dot--blue"></span><span>MAYO&#8209;5 &mdash; multivariate &middot; NIST L5 &middot; sig 964 B</span></div>
             <div class="enc-item"><span class="enc-dot enc-dot--dim"></span><span>+ pubkey &mdash; included only on first TX (registration)</span></div>
             <div class="enc-item enc-item--full"><span class="enc-sig">&#10003; User chooses the scheme per transaction</span></div>
           </div>
@@ -1470,7 +1468,7 @@ a.htrust-item:hover{color:var(--cyan)}
           <polyline points="9 12 11 14 15 10"/>
         </svg>
         <h3>Cutting-Edge PQC Security</h3>
-        <p>Two independent post-quantum schemes: <strong>Falcon-512</strong> (NIST Level 1, faster, sig &lt;752 B) and <strong>MAYO-5</strong> (NIST Level 5, maximum security, sig &lt;838 B). Users choose which scheme signs each transaction — optimising for speed or security level.</p>
+        <p>Two post-quantum schemes from <strong>different mathematical families</strong>: <strong>Falcon-512</strong> (lattice-based, NIST security level 1, sig &lt;752 B) and <strong>MAYO-5</strong> (multivariate, NIST security level 5, sig 964 B). Users choose which scheme signs each transaction — and a break in one family leaves the other standing.</p>
       </div>
 
       <!-- 2 Consensus -->
@@ -1648,7 +1646,7 @@ a.htrust-item:hover{color:var(--cyan)}
           </tr>
           <tr>
             <td>Time to Finality</td>
-            <td class="td-qwid">~5s</td>
+            <td class="td-qwid">~10s (1 block)</td>
             <td>~15 min</td>
             <td>~60 min</td>
           </tr>
@@ -1674,58 +1672,39 @@ a.htrust-item:hover{color:var(--cyan)}
 <div class="audit-callout reveal">
   <div class="audit-callout-inner">
     <div class="audit-co-left">
-      <div class="audit-co-label">Independent Security Audit · May 2026</div>
-      <h2 class="audit-co-title">Zero Critical Issues.<br><span>Mainnet Ready.</span></h2>
-      <p class="audit-co-desc">QWID's codebase has been subjected to a comprehensive security audit covering cryptography, consensus, transaction validation, network security, and state management.</p>
+      <div class="audit-co-label">Internal Security Review · May–July 2026</div>
+      <h2 class="audit-co-title">Zero Open Findings.<br><span>Every Report Public.</span></h2>
+      <p class="audit-co-desc">A line-by-line review of 284 Go files across 45 packages, covering cryptography, consensus, transaction validation, network security, and state management. It enumerated 158 findings; all are remediated and code-verified, with 14 documented as deferred-by-design. This was an internal, AI-assisted review, not a third-party audit — the full report is published unedited so you can check the work yourself. An external audit is planned before mainnet.</p>
       <div class="audit-co-badges">
-        <span class="audit-badge audit-badge--green">✓ 0 Critical</span>
-        <span class="audit-badge audit-badge--green">✓ 0 High</span>
-        <span class="audit-badge audit-badge--green">✓ 0 Medium</span>
-        <span class="audit-badge audit-badge--cyan">NIST PQC Verified</span>
+        <span class="audit-badge audit-badge--green">✓ 0 Critical Open</span>
+        <span class="audit-badge audit-badge--green">✓ 0 High Open</span>
+        <span class="audit-badge audit-badge--green">✓ 0 Medium Open</span>
+        <span class="audit-badge audit-badge--cyan">Full Report Published</span>
         <span class="audit-badge audit-badge--gold">100% Open Source</span>
       </div>
       <div class="audit-co-cats">
-        <div class="audit-cat">
-          <span class="audit-cat-name">Cryptography</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:100%"></div></div>
-          <span class="audit-cat-score">10/10</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">State Management</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:100%"></div></div>
-          <span class="audit-cat-score">10/10</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Tx Validation</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:98%"></div></div>
-          <span class="audit-cat-score">9.8</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Consensus</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:95%"></div></div>
-          <span class="audit-cat-score">9.5</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Network Security</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:95%"></div></div>
-          <span class="audit-cat-score">9.5</span>
-        </div>
+        <div class="audit-cat"><span class="audit-cat-name">Cryptography</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">State Management</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Tx Validation</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Consensus &amp; EVM</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Network &amp; RPC</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Database</span></div>
       </div>
     </div>
     <div class="audit-co-right">
       <div class="audit-score-ring">
         <svg viewBox="0 0 160 160" width="160" height="160">
           <circle class="ring-bg" cx="80" cy="80" r="65"/>
-          <circle class="ring-val" cx="80" cy="80" r="65" stroke-dasharray="408" stroke-dashoffset="10"/>
+          <circle class="ring-val" cx="80" cy="80" r="65" stroke-dasharray="408" stroke-dashoffset="0"/>
         </svg>
-        <div class="audit-score-num">9.75</div>
-        <div class="audit-score-denom">out of 10</div>
+        <div class="audit-score-num">0</div>
+        <div class="audit-score-denom">open findings</div>
       </div>
-      <span class="audit-ready">✓ Mainnet Ready</span>
+      <span class="audit-ready">External audit pending</span>
       <div class="audit-stats-row">
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">Critical</span></div>
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">High</span></div>
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">Medium</span></div>
+        <div class="audit-s"><span class="audit-s-val">158</span><span class="audit-s-lbl">Enumerated</span></div>
+        <div class="audit-s"><span class="audit-s-val">14</span><span class="audit-s-lbl">Deferred</span></div>
+        <div class="audit-s"><span class="audit-s-val">284</span><span class="audit-s-lbl">Go files</span></div>
       </div>
       <a href="audit.html" target="_blank" rel="noopener" class="audit-co-cta">View Full Report →</a>
     </div>
@@ -1750,7 +1729,7 @@ a.htrust-item:hover{color:var(--cyan)}
           </svg>
         </div>
         <h3>Generate Wallet</h3>
-        <p>Create quantum-resistant dual keypairs using Falcon-512 and MAYO-5. Your private key is secured as 48 mnemonic words — compatible with BIP-39 standard for easy backup.</p>
+        <p>Create quantum-resistant keypairs for both Falcon-512 and MAYO-5. The CLI generator derives them from a 24-word BIP-39 recovery phrase, shown once at creation, so the wallet can be restored on any machine.</p>
       </div>
 
       <div class="step-card">
@@ -1909,18 +1888,18 @@ a.htrust-item:hover{color:var(--cyan)}
         <div class="timeline-item done">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">Q1 2023</span>
-            <span class="timeline-badge badge-done">Completed</span>
+            <span class="timeline-date">Delivered</span>
+            <a href="https://github.com/qwid-org/qwid-node/blob/main/common/types.go" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Source ↗</a>
           </div>
           <div class="timeline-title">Phase 0 — Research &amp; Foundations</div>
-          <p class="timeline-desc">Initial research into post-quantum cryptography standards. Selection of Falcon-512 and MAYO-5 as two independent signature schemes. Architecture design for optional in-transaction pubkey registration to address PQC key-size constraints.</p>
+          <p class="timeline-desc">Survey of the NIST post-quantum signature candidates. Selection of Falcon-512 (lattice) and MAYO-5 (multivariate) as two schemes from independent mathematical families. Architecture design for optional in-transaction pubkey registration to address PQC key-size constraints.</p>
         </div>
 
         <div class="timeline-item done">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">Q2 2023</span>
-            <span class="timeline-badge badge-done">Completed</span>
+            <span class="timeline-date">Delivered</span>
+            <a href="https://github.com/qwid-org/qwid-node/tree/main/blocks" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Source ↗</a>
           </div>
           <div class="timeline-title">Phase 1 — Core Protocol</div>
           <p class="timeline-desc">Implementation of the single-chain architecture with optional in-transaction pubkey registration. Proof-of-Synergy consensus engine. RocksDB-based state management with prefixed key schema. P2P networking layer with custom TCP/IP stack.</p>
@@ -1929,8 +1908,8 @@ a.htrust-item:hover{color:var(--cyan)}
         <div class="timeline-item done">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">Q2 2024</span>
-            <span class="timeline-badge badge-done">Completed</span>
+            <span class="timeline-date">Delivered</span>
+            <a href="https://github.com/qwid-org/qwid-node/tree/main/core/evm" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Source ↗</a>
           </div>
           <div class="timeline-title">Phase 2 — EVM &amp; Smart Contracts</div>
           <p class="timeline-desc">Integration of the Ethereum Virtual Machine. EVM compatibility layer enabling Solidity contract deployment. Gas metering at 13.7M gas per block. Contract state persistence via RocksDB state trie.</p>
@@ -1939,8 +1918,8 @@ a.htrust-item:hover{color:var(--cyan)}
         <div class="timeline-item done">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">Q4 2024</span>
-            <span class="timeline-badge badge-done">Completed</span>
+            <span class="timeline-date">Delivered</span>
+            <a href="https://explorer.qwid.org" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Live ↗</a>
           </div>
           <div class="timeline-title">Phase 3 — DeFi Primitives</div>
           <p class="timeline-desc">Protocol-level DEX with constant-product AMM. PRICE Oracle providing decentralized QWD/USD rates. RAND Oracle for verifiable on-chain randomness. Staking system with 256 delegated accounts and 128 active validators.</p>
@@ -1949,8 +1928,8 @@ a.htrust-item:hover{color:var(--cyan)}
         <div class="timeline-item done">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">Q1 2025</span>
-            <span class="timeline-badge badge-done">Completed</span>
+            <span class="timeline-date">Delivered</span>
+            <a href="https://github.com/qwid-org/qwid-node/tree/main/voting" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Source ↗</a>
           </div>
           <div class="timeline-title">Phase 4 — Security &amp; Governance</div>
           <p class="timeline-desc">On-chain governance voting system enabling cryptographic scheme upgrades without network downtime. Escrow account mechanism for delayed transactions. Multi-signature account support at the protocol level. No-slashing Proof-of-Synergy finalization.</p>
@@ -1959,11 +1938,11 @@ a.htrust-item:hover{color:var(--cyan)}
         <div class="timeline-item done">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">Q2 2025</span>
-            <span class="timeline-badge badge-done">Completed</span>
+            <span class="timeline-date">Delivered</span>
+            <a href="https://github.com/qwid-org/qwid-node/tree/main/cmd" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Source ↗</a>
           </div>
           <div class="timeline-title">Phase 5 — Tooling &amp; Developer Experience</div>
-          <p class="timeline-desc">Web UI wallet, Qt desktop wallet, and open-source blockchain explorer. JSON-RPC interface for wallet-node communication. Public repository released at github.com/wonabru/qwid-node. WhitePaper v1.0 published.</p>
+          <p class="timeline-desc">Web UI wallet, Qt desktop wallet, and open-source blockchain explorer. JSON-RPC interface for wallet-node communication. Public repository released at github.com/qwid-org/qwid-node. WhitePaper v1.0 published.</p>
         </div>
 
         <div class="timeline-item active">
@@ -2008,7 +1987,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What is the QWID?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">QWID is the world&#8217;s first truly post-quantum blockchain, resistant to quantum computer attacks. It uses Proof-of-Synergy consensus and two independent post-quantum signature schemes (Falcon-512 and MAYO-5) to deliver quantum-resistant security without sacrificing performance.</div>
+          <div class="faq-a">QWID is a quantum-resistant blockchain that does not bet on a single mathematical assumption. It runs two post-quantum signature schemes from different mathematical families side by side &#8212; <strong>Falcon-512</strong> (lattice-based) and <strong>MAYO-5</strong> (multivariate) &#8212; on a Proof-of-Synergy consensus. If one family is ever broken, the chain keeps running on the other while on-chain governance retires the compromised scheme.</div>
         </div>
 
         <div class="faq-item">
@@ -2066,7 +2045,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What does PQC mean?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">PQC means Post-Quantum Cryptography &#8212; cryptography that is resistant to quantum computer algorithms like Shor&#8217;s or Grover&#8217;s. QWID uses NIST-approved post-quantum standards to ensure long-term security.</div>
+          <div class="faq-a">PQC means Post-Quantum Cryptography &#8212; cryptography believed to resist attack by quantum algorithms such as Shor&#8217;s and Grover&#8217;s. QWID builds on schemes from the NIST post-quantum standardisation process: <strong>Falcon-512</strong>, selected by NIST for standardisation as FN-DSA (FIPS 206, still in draft), and <strong>MAYO-5</strong>, a round-3 candidate in the NIST Additional Signatures process.</div>
         </div>
 
         <div class="faq-item">
@@ -2074,7 +2053,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What is Shor&#8217;s algorithm and how does it break current encryption?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">Shor&#8217;s algorithm is a quantum computer algorithm for finding the prime factors of an integer, developed by mathematician Peter Shor. All standard non-PQC asymmetric cryptography used in Bitcoin and Ethereum can be broken by this algorithm with sufficient qubits.</div>
+          <div class="faq-a">Shor&#8217;s algorithm, published by Peter Shor in 1994, solves both integer factorisation and the discrete logarithm problem in polynomial time on a sufficiently large quantum computer. RSA rests on factorisation; the ECDSA signatures used by Bitcoin and Ethereum rest on the elliptic-curve discrete logarithm. Shor&#8217;s algorithm breaks <em>both</em> &#8212; which is why every non-PQC asymmetric scheme in production today needs replacing, not merely longer keys.</div>
         </div>
 
         <div class="faq-item">
@@ -2082,7 +2061,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What encryption standard does QWID use?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">QWID supports two independent post-quantum signature schemes. <strong>Falcon-512</strong> (NIST Level 1, 128-bit AES equivalent; public key 897 B, signature &lt;752 B) is faster and produces smaller signatures. <strong>MAYO-5</strong> (NIST Level 5, 256-bit AES equivalent; public key 5,554 B, signature &lt;838 B) offers the highest security level. Each transaction is signed by one of the two — the user chooses which scheme based on whether they prefer speed or maximum security. Both are fully quantum-resistant and NIST-approved.</div>
+          <div class="faq-a">QWID supports two post-quantum signature schemes drawn from <strong>different mathematical families</strong>, so that a break in one does not compromise the other.<br><br><strong>Falcon-512</strong> &#8212; lattice-based (NTRU). NIST security level 1, comparable to 128-bit AES; public key 897 B, signature &lt;752 B. Selected by NIST for standardisation as FN-DSA (FIPS 206), which is still in draft.<br><br><strong>MAYO-5</strong> &#8212; multivariate (Oil-and-Vinegar). NIST security level 5, comparable to 256-bit AES; public key 5,554 B, signature 964 B. A round-3 candidate in the NIST Additional Signatures process, which NIST opened in 2022 precisely to reduce reliance on lattice assumptions &#8212; two of its three selected signature schemes are lattice-based.<br><br>Neither scheme is a finalised standard yet, and parameter sets in the multivariate family are under active cryptanalysis. That is the argument for running two families rather than one: each transaction is signed under a scheme the user picks, and QWID&#8217;s on-chain governance can pause or replace either scheme without a hard fork.</div>
         </div>
 
       </div>
@@ -2181,7 +2160,7 @@ a.htrust-item:hover{color:var(--cyan)}
             How are private keys secured?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">Private keys are stored exclusively in the user&#8217;s wallet and never transmitted to the blockchain. They can be represented as 48 mnemonic words drawn from a 2,048-word list (BIP-39 compatible), making secure backup and recovery straightforward while maintaining full quantum-resistant protection.</div>
+          <div class="faq-a">Private keys are stored exclusively in the user&#8217;s wallet, encrypted with AES-256-GCM under an Argon2id-derived key, and are never transmitted to the blockchain. Only public keys and signatures ever reach the chain.<br><br>Wallets created with the CLI generator are derived from a <strong>24-word BIP-39 recovery phrase</strong> (2,048-word list), which regenerates the keys on a new machine. Note that the phrase is a <em>seed</em> the keys are derived from &#8212; a post-quantum secret key is far too large to be written out as words. Wallets created through the Web UI or the public website use random keys and have <strong>no</strong> recovery phrase by design, since a phrase must never cross an HTTP connection; for those, the encrypted wallet file plus its password is the backup.</div>
         </div>
 
         <div class="faq-item">
@@ -2406,7 +2385,7 @@ a.htrust-item:hover{color:var(--cyan)}
     <h2>Ready to Go Beyond Quantum?</h2>
     <p>Explore the open-source code, browse the live blockchain, or dive into the FAQ to learn how QWID is building the quantum-safe internet of value.</p>
     <div class="get-started-actions">
-      <a href="https://github.com/wonabru/qwid-node" target="_blank" rel="noopener" class="btn btn-primary">
+      <a href="https://github.com/qwid-org/qwid-node" target="_blank" rel="noopener" class="btn btn-primary">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
         View on GitHub
       </a>
@@ -2527,7 +2506,7 @@ a.htrust-item:hover{color:var(--cyan)}
         </a>
         <p>A quantum-resistant blockchain designed to outlast quantum computers. Dual post-quantum signatures, EVM compatibility, and Proof-of-Synergy consensus.</p>
         <div class="footer-social">
-          <a href="https://github.com/wonabru/qwid-node" target="_blank" rel="noopener" class="fsoc-link" title="GitHub">
+          <a href="https://github.com/qwid-org/qwid-node" target="_blank" rel="noopener" class="fsoc-link" title="GitHub">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
           </a>
           <a href="https://www.linkedin.com/company/86857701" target="_blank" rel="noopener" class="fsoc-link" title="LinkedIn">
@@ -2542,7 +2521,7 @@ a.htrust-item:hover{color:var(--cyan)}
         <h4>Explore</h4>
         <ul>
           <li><a href="https://explorer.qwid.org" target="_blank" rel="noopener">Block Explorer ↗</a></li>
-          <li><a href="https://github.com/wonabru/qwid-node" target="_blank" rel="noopener">GitHub ↗</a></li>
+          <li><a href="https://github.com/qwid-org/qwid-node" target="_blank" rel="noopener">GitHub ↗</a></li>
           <li><a href="WhitePaper_1.0.pdf" target="_blank" rel="noopener">WhitePaper v1.0</a></li>
         </ul>
       </div>
@@ -2551,7 +2530,7 @@ a.htrust-item:hover{color:var(--cyan)}
         <ul>
           <li><a href="WhitePaper_1.0.pdf" target="_blank" rel="noopener">Documentation</a></li>
           <li><a href="https://explorer.qwid.org" target="_blank" rel="noopener">Explorer API ↗</a></li>
-          <li><a href="https://github.com/wonabru/qwid-node" target="_blank" rel="noopener">Source Code ↗</a></li>
+          <li><a href="https://github.com/qwid-org/qwid-node" target="_blank" rel="noopener">Source Code ↗</a></li>
         </ul>
       </div>
       <div class="footer-col">
@@ -2579,8 +2558,8 @@ a.htrust-item:hover{color:var(--cyan)}
       </div>
     </div>
     <div class="footer-bottom">
-      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Foundation. Open-source software released under MIT License.</span>
-      <span class="footer-copy" style="color:var(--muted)">Chain ID 23 &middot; Falcon-512 &middot; MAYO-5</span>
+      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Foundation. Open-source software released under MIT License. &middot; <a href="privacy.html">Privacy</a></span>
+      <span class="footer-copy" style="color:var(--muted)">No cookies &middot; No trackers &middot; Chain ID 23</span>
     </div>
   </div>
 </footer>

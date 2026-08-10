@@ -3,11 +3,11 @@ package transactionsPool
 import (
 	"bytes"
 	"fmt"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/logger"
 	"sync"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/database"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
 )
 
 type MerkleTree struct {

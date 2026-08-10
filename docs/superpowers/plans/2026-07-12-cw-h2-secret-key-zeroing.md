@@ -19,7 +19,7 @@
 - Branch `security-fixes`. Commit `OB-121` (NOT `(CONSENSUS)` — node-local hygiene). End every commit message with a blank line then `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - `oqs.MemCleanse(v []byte)` dereferences `&v[0]` and PANICS on an empty slice — every call site must guard `len(v) > 0`.
 - `oqs.Signature.Clean()` already `MemCleanse`s the retained secret key and frees the C handle; it is nil-safe on a zero-value / uninitialized signer.
-- `oqs` is already imported in `wallet/wallet.go` as `"github.com/wonabru/qwid-node/crypto/oqs"`. Do NOT add a `common → oqs` import (`PrivKey.Cleanse()` uses a plain zero-loop).
+- `oqs` is already imported in `wallet/wallet.go` as `"github.com/qwid-org/qwid-node/crypto/oqs"`. Do NOT add a `common → oqs` import (`PrivKey.Cleanse()` uses a plain zero-loop).
 - Field types: `Account.secretKey` is `common.PrivKey` (value); `Account.signer` is `oqs.Signature` (value); both are addressable via `w.Account1.…`. `Wallet.encrypt`/`decrypt` are pure-Go AES-GCM (no CGO).
 
 ---

@@ -23,8 +23,8 @@ import (
 	"math/big"
 	"reflect"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto"
 )
 
 // MakeTopics converts a filter query argument list into a filter topic set.

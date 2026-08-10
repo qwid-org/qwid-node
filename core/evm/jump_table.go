@@ -19,7 +19,7 @@ package vm
 import (
 	"fmt"
 
-	"github.com/wonabru/qwid-node/params"
+	"github.com/qwid-org/qwid-node/params"
 )
 
 type (

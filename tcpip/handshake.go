@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto/oqs"
-	"github.com/wonabru/qwid-node/logger"
-	"github.com/wonabru/qwid-node/wallet"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/wallet"
 	"golang.org/x/crypto/hkdf"
 )
 

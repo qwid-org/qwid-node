@@ -5,8 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/wonabru/qwid-node/crypto/blake2b"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/crypto/blake2b"
+	"github.com/qwid-org/qwid-node/logger"
 	"time"
 )
 

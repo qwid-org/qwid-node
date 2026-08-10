@@ -3,9 +3,9 @@ package account
 import (
 	"bytes"
 	"fmt"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/common/hexutil"
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common/hexutil"
+	"github.com/qwid-org/qwid-node/logger"
 	"math"
 	"strconv"
 )

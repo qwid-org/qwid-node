@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wonabru/qwid-node/common/math"
+	"github.com/qwid-org/qwid-node/common/math"
 )
 
 func TestStreamKind(t *testing.T) {

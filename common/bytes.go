@@ -21,7 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 
-	"github.com/wonabru/qwid-node/common/hexutil"
+	"github.com/qwid-org/qwid-node/common/hexutil"
 )
 
 // FromHex returns the bytes represented by the hexadecimal string s.

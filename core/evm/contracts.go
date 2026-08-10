@@ -22,12 +22,12 @@ import (
 	"errors"
 	"math/big"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/common/math"
-	"github.com/wonabru/qwid-node/crypto/blake2b"
-	"github.com/wonabru/qwid-node/crypto/bls12381"
-	"github.com/wonabru/qwid-node/crypto/bn256"
-	"github.com/wonabru/qwid-node/params"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/common/math"
+	"github.com/qwid-org/qwid-node/crypto/blake2b"
+	"github.com/qwid-org/qwid-node/crypto/bls12381"
+	"github.com/qwid-org/qwid-node/crypto/bn256"
+	"github.com/qwid-org/qwid-node/params"
 	"golang.org/x/crypto/ripemd160"
 )
 

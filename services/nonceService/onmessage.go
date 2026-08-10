@@ -3,21 +3,21 @@ package nonceServices
 import (
 	"runtime/debug"
 
-	"github.com/wonabru/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/logger"
 
-	"github.com/wonabru/qwid-node/account"
-	"github.com/wonabru/qwid-node/blocks"
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/message"
-	"github.com/wonabru/qwid-node/oracles"
-	"github.com/wonabru/qwid-node/pubkeys"
-	"github.com/wonabru/qwid-node/services"
-	"github.com/wonabru/qwid-node/services/transactionServices"
-	"github.com/wonabru/qwid-node/statistics"
-	"github.com/wonabru/qwid-node/tcpip"
-	"github.com/wonabru/qwid-node/transactionsDefinition"
-	"github.com/wonabru/qwid-node/transactionsPool"
-	"github.com/wonabru/qwid-node/voting"
+	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/message"
+	"github.com/qwid-org/qwid-node/oracles"
+	"github.com/qwid-org/qwid-node/pubkeys"
+	"github.com/qwid-org/qwid-node/services"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
+	"github.com/qwid-org/qwid-node/statistics"
+	"github.com/qwid-org/qwid-node/tcpip"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
+	"github.com/qwid-org/qwid-node/voting"
 )
 
 func OnMessage(addr [4]byte, m []byte) {
@@ -172,6 +172,17 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 			txs = append(txs, tx)
 		}
+		// Drop escrow cancellations that this block's height would reject.
+		// Without this, one matured cancellation left in the pool fails
+		// CheckBlockTransfers below on every attempt and the node stops
+		// producing blocks entirely.
+		//
+		// nonceHeight, not h+1: it is the nonce transaction's height that
+		// becomes the block header height in CreateBlockFromNonceMessage, and
+		// therefore the height CheckBlockTransfers validates against. The two
+		// are equal here thanks to the guard above, but this must not silently
+		// diverge from validation if that guard ever changes.
+		txs = blocks.FilterUnbuildableCancellations(txs, nonceHeight)
 		txsBytes := make([][]byte, len(txs))
 		transactionsHashes := []common.Hash{}
 		for _, tx := range txs {

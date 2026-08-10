@@ -25,3 +25,6 @@ qtbox
 # Compiled node binaries
 /mining
 /webui
+/explorer
+/explorer.new
+/sending

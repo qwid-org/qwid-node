@@ -11,7 +11,7 @@
 ## Global Constraints
 - Build/test with `GOROOT=/home/wonabru/sdk/go1.24.0`. Example: `GOROOT=/home/wonabru/sdk/go1.24.0 /home/wonabru/sdk/go1.24.0/bin/go test ./wallet/ ./crypto/oqs/ ./rpc/...`.
 - Branch `security-fixes`. Commit `OB-xx` (NOT `(CONSENSUS)`). End messages with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-- `clientrpc.Call(msg []byte) []byte` already exists (`rpc/client/client.go:31-36`, serializes send+receive under `reqMu`); the package is imported as `clientrpc "github.com/wonabru/qwid-node/rpc/client"`.
+- `clientrpc.Call(msg []byte) []byte` already exists (`rpc/client/client.go:31-36`, serializes send+receive under `reqMu`); the package is imported as `clientrpc "github.com/qwid-org/qwid-node/rpc/client"`.
 - Do not change consensus, tx format, or the RPC channel design; WH-C6 only ADOPTS the existing `Call()` in the concurrent HTTP servers.
 
 ---

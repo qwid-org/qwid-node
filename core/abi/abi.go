@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/wonabru/qwid-node/common"
-	"github.com/wonabru/qwid-node/crypto"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto"
 )
 
 // The ABI holds information about a contract's context and available
