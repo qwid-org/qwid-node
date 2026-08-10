@@ -89,6 +89,24 @@ func GetTxHistoryReceived(address [common.AddressLength]byte, lastN int64) []com
 	return readTxHistory(common.TxHistoryReceivedDBPrefix, address, from, acc.ReceivedCount)
 }
 
+// WithTxHistory returns acc with its transport slices filled from the history
+// index: the most recent lastN sent and received hashes, oldest first.
+//
+// TransactionsSender/TransactionsRecipient are no longer part of the account
+// state, so an account read straight out of the state map always has them
+// empty. Every RPC handler that hands an account to a client has to fill them,
+// and doing that inline meant handleACCT got it and handleDETS did not — which
+// left the wallet's Details tab, the public explorer and the website all
+// showing accounts with no transactions. One helper, one behaviour.
+//
+// SentCount/ReceivedCount are left untouched, so a client can still tell a
+// capped list from a complete history.
+func WithTxHistory(acc Account, address [common.AddressLength]byte, lastN int64) Account {
+	acc.TransactionsSender = GetTxHistorySent(address, lastN)
+	acc.TransactionsRecipient = GetTxHistoryReceived(address, lastN)
+	return acc
+}
+
 // migrateTxHistoryLocked moves the in-state transaction-history lists of a
 // pre-index snapshot into the DB index and clears them, so the next snapshot
 // is slim. Callers hold AccountsRWMutex. Re-running on the same snapshot is

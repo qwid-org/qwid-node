@@ -490,8 +490,7 @@ func handleACCT(line []byte, reply *[]byte) {
 	// slices with the last 50 hashes from the DB index. SentCount and
 	// ReceivedCount travel alongside, so clients see the true totals even
 	// though the lists are capped.
-	acc.TransactionsSender = account.GetTxHistorySent(byt, 50)
-	acc.TransactionsRecipient = account.GetTxHistoryReceived(byt, 50)
+	acc = account.WithTxHistory(acc, byt, 50)
 	am := acc.Marshal()
 
 	*reply = am
