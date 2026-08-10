@@ -1,15 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-BTPFKCG0HZ"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-  gtag('config', 'G-BTPFKCG0HZ');
-</script>
+<!-- No analytics, no cookies, no third-party requests. Google Analytics used to
+     load here unconditionally, which set _ga cookies before the visitor could
+     consent to anything. Removing it is what lets this site run without a
+     consent banner at all; if analytics are ever wanted back, use a cookieless
+     tool and update privacy.html to match. -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QWID Foundation — Blockchain Beyond Quantum</title>
@@ -30,9 +26,7 @@
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Organization","name":"QWID Foundation","description":"Quantum-resistant blockchain running two independent post-quantum signature families — Falcon-512 (lattice) and MAYO-5 (multivariate) — with EVM smart contracts and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/qwid-org/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
 </script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="fonts/fonts.css">
 <style>
 /* ===================== RESET & ROOT ===================== */
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
@@ -2564,8 +2558,8 @@ a.htrust-item:hover{color:var(--cyan)}
       </div>
     </div>
     <div class="footer-bottom">
-      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Foundation. Open-source software released under MIT License.</span>
-      <span class="footer-copy" style="color:var(--muted)">Chain ID 23 &middot; Falcon-512 &middot; MAYO-5</span>
+      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Foundation. Open-source software released under MIT License. &middot; <a href="privacy.html">Privacy</a></span>
+      <span class="footer-copy" style="color:var(--muted)">No cookies &middot; No trackers &middot; Chain ID 23</span>
     </div>
   </div>
 </footer>
