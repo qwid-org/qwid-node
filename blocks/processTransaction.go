@@ -51,6 +51,47 @@ func validateEscrowCancellation(tx transactionsDefinition.Transaction, height in
 	return target, nil
 }
 
+// CountMultiSignApprovals reports how many valid approvals mainTx has within
+// group, and how many its sender account requires. group is the multisig pool
+// entries keyed by mainTx's hash — the main transaction plus every co-signature
+// aimed at it.
+//
+// It mirrors the rule ProcessTransactionsMultiSign applies: an entry counts
+// only when its sender is an authorised signer that has not already been
+// counted, its recipient equals the main transaction's, and its amount is
+// zero. The main transaction therefore never approves itself, which is the
+// part owners get wrong.
+//
+// This is a read-only query for the wallet. It copies the authorised-signer
+// slice rather than reslicing it in place; the settlement loop still aliases
+// that slice and corrupts the account's list for three or more signers.
+func CountMultiSignApprovals(mainTx transactionsDefinition.Transaction,
+	group []transactionsDefinition.Transaction) (approvals int, required int) {
+
+	acc, exists := account.GetAccountByAddressBytes(mainTx.TxParam.Sender.GetBytes())
+	if !exists {
+		return 0, 0
+	}
+	required = int(acc.MultiSignNumber)
+
+	notApprovedYet := append([][common.AddressLength]byte(nil), acc.MultiSignAddresses...)
+	for _, t := range group {
+		if t.TxData.Amount != 0 ||
+			!bytes.Equal(mainTx.TxData.Recipient.GetBytes(), t.TxData.Recipient.GetBytes()) {
+			continue
+		}
+		sender := t.TxParam.Sender.ByteValue
+		for i, appr := range notApprovedYet {
+			if sender == appr {
+				approvals++
+				notApprovedYet = append(notApprovedYet[:i], notApprovedYet[i+1:]...)
+				break
+			}
+		}
+	}
+	return approvals, required
+}
+
 // EscrowMaturityHeight reports the height at which a pooled escrow transaction
 // becomes settleable, or 0 when the sender is unknown or is not an escrow
 // account.

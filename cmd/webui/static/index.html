@@ -324,6 +324,12 @@
                 <div class="balance-display">
                     <div class="balance-amount" id="totalBalance">0.00000000</div>
                     <div class="balance-label">Total Holdings (QWD)</div>
+                    <!-- Escrow moves value at settlement, not when the transaction
+                         is confirmed, so the history list cannot show when the
+                         money actually left. Watching the balance change is the
+                         only direct evidence, and it was invisible because the
+                         figure was simply overwritten on every refresh. -->
+                    <div id="balanceDelta" style="font-size:13px;margin-top:6px;min-height:18px;color:#888;"></div>
                 </div>
             </div>
 
@@ -1117,6 +1123,35 @@ contract Coin {
             }
         }
 
+        // Remembers the last observed holdings so a change can be reported.
+        // Deliberately not a per-transaction running balance: historical
+        // balances are not stored, and deriving one from the transaction list
+        // would place an escrow debit at the transaction's own height rather
+        // than at settlement — misreporting the exact moment this is meant to
+        // reveal.
+        let lastHoldings = null;
+        let balanceDeltaTimer = null;
+
+        function showBalanceChange(holdings) {
+            const el = document.getElementById('balanceDelta');
+            if (lastHoldings === null) {
+                lastHoldings = holdings;
+                el.textContent = '';
+                return;
+            }
+            const diff = holdings - lastHoldings;
+            lastHoldings = holdings;
+            if (Math.abs(diff) < 1e-8) return;   // unchanged: keep the previous note
+
+            const up = diff > 0;
+            const now = new Date().toLocaleTimeString();
+            el.style.color = up ? '#2ed573' : '#ff6b6b';
+            el.textContent = (up ? '▲ +' : '▼ ') + diff.toFixed(8) + ' QWD  at ' + now;
+
+            clearTimeout(balanceDeltaTimer);
+            balanceDeltaTimer = setTimeout(() => { el.style.color = '#888'; }, 15000);
+        }
+
         // Update account
         async function updateAccount() {
             if (!walletLoaded) return;
@@ -1124,6 +1159,7 @@ contract Coin {
             try {
                 const res = await api('/api/account');
                 if (!res.error) {
+                    showBalanceChange(res.totalHoldings);
                     document.getElementById('totalBalance').textContent = res.totalHoldings.toFixed(8);
                     document.getElementById('availableBalance').textContent = res.balance.toFixed(8) + ' QWD';
                     document.getElementById('stakedAmount').textContent = res.stakedAmount.toFixed(8) + ' QWD';
@@ -1143,7 +1179,16 @@ contract Coin {
 
                     // Account details
                     document.getElementById('accountEscrowDelay').textContent = res.escrowDelay || '0';
-                    document.getElementById('accountMultiSig').textContent = res.multiSignNumber || '0';
+                    const msEl = document.getElementById('accountMultiSig');
+                    if (res.multiSignNumber && res.multiSignAddresses && res.multiSignAddresses.length) {
+                        // Show who may sign, not just how many are needed.
+                        msEl.innerHTML = res.multiSignNumber + ' of ' + res.multiSignAddresses.length +
+                            '<div style="font-size:11px;font-family:monospace;color:#777;margin-top:4px;">' +
+                            res.multiSignAddresses.map(a => a.substring(0, 20) + '&hellip;').join('<br>') +
+                            '</div>';
+                    } else {
+                        msEl.textContent = res.multiSignNumber || '0';
+                    }
                     document.getElementById('accountSentCount').textContent = res.sentCount || '0';
                     document.getElementById('accountRecvCount').textContent = res.receivedCount || '0';
                 }
@@ -1429,7 +1474,24 @@ contract Coin {
                             ? 'Confirmed &middot; settles at #' + tx.maturesAt
                             : 'Confirmed &middot; awaiting settlement';
                     }
-                    if (tx.pool === 'multisig') return 'Awaiting co-signers';
+                    if (tx.pool === 'multisig') {
+                        // A co-signature: say which transfer it approves, so an
+                        // owner with several pending transfers can tell whether
+                        // the signatures landed on the same one.
+                        if (tx.approves) {
+                            return 'Signature for ' + tx.approves.substring(0, 12) + '&hellip;';
+                        }
+                        // A main transaction: show the progress. The transfer
+                        // itself never counts as one of its own approvals, so
+                        // "0 of 2" on a transaction you submitted is correct.
+                        if (tx.required) {
+                            const done = tx.approvals || 0;
+                            const short = done >= tx.required ? '#2ed573' : '#ffc800';
+                            return '<span style="color:' + short + ';">' + done + ' of ' +
+                                tx.required + ' signatures</span>';
+                        }
+                        return 'Awaiting co-signers';
+                    }
                     return 'Awaiting block';
                 }
 
