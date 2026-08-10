@@ -86,7 +86,9 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
   <h2>Who is responsible</h2>
   <p>
     QWID Foundation operates the website at <strong>qwid.org</strong>. For any question about
-    this notice or about your data, write to <a href="mailto:support@qwid.org">support@qwid.org</a>.
+    this notice or about your data, write to
+    <span class="mail" data-u="support" data-d="qwid.org"><noscript>support (at) qwid.org</noscript></span>,
+    or use the <a href="/#contact">contact form</a>.
   </p>
 
   <h2>Cookies and local storage</h2>
@@ -108,9 +110,14 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
     discloses your IP address to another company.
   </p>
   <p>
-    Links that leave the site — GitHub, the block explorer, LinkedIn, X — are ordinary links.
-    Nothing is sent to those services unless you click through, at which point their own
-    privacy terms apply.
+    One request does leave the page: the live network figures in the header (block height,
+    supply, validators) are fetched from <strong>explorer.qwid.org</strong>. That is our own
+    server, not another company's, and it logs requests on the same terms as described below.
+    If you block scripts, the figures simply do not appear and nothing else changes.
+  </p>
+  <p>
+    Links that leave the site — GitHub, LinkedIn, X — are ordinary links. Nothing is sent to
+    those services unless you click through, at which point their own privacy terms apply.
   </p>
 
   <h2>Server logs</h2>
@@ -156,7 +163,9 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
   <p>
     Under the GDPR you may request access to the personal data held about you, its correction
     or erasure, restriction of processing, and you may object to processing based on
-    legitimate interest. Write to <a href="mailto:support@qwid.org">support@qwid.org</a>.
+    legitimate interest. Write to
+    <span class="mail" data-u="support" data-d="qwid.org"><noscript>support (at) qwid.org</noscript></span>
+    or use the <a href="/#contact">contact form</a>.
   </p>
   <p>
     In practice the only data held is the server log described above, which is identifiable
@@ -180,6 +189,24 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
 <footer>
   &copy; 2025&ndash;2026 QWID Foundation &middot; <a href="/">qwid.org</a>
 </footer>
+
+<script>
+// The contact address is assembled here rather than written into the markup,
+// so it never appears as a literal mailto: in the served HTML. This defeats
+// the crawlers that harvest addresses with a regex over page source, which is
+// most of them; it does not defeat a harvester that executes JavaScript, and
+// nothing short of dropping the address entirely would. Without scripting the
+// <noscript> fallback still shows a human-readable form, which matters because
+// a privacy notice has to leave a usable channel for data-subject requests.
+document.querySelectorAll('span.mail').forEach(function (el) {
+  var addr = el.dataset.u + String.fromCharCode(64) + el.dataset.d;
+  var a = document.createElement('a');
+  a.href = 'mailto:' + addr;
+  a.textContent = addr;
+  el.textContent = '';
+  el.appendChild(a);
+});
+</script>
 
 </body>
 </html>
