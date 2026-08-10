@@ -62,9 +62,14 @@ func validateEscrowCancellation(tx transactionsDefinition.Transaction, height in
 // zero. The main transaction therefore never approves itself, which is the
 // part owners get wrong.
 //
-// This is a read-only query for the wallet. It copies the authorised-signer
-// slice rather than reslicing it in place; the settlement loop still aliases
-// that slice and corrupts the account's list for three or more signers.
+// Used both by ProcessTransactionsMultiSign to decide settlement and by the
+// PEND RPC to report progress, so the wallet can never disagree with the node
+// about how many signatures are in.
+//
+// It copies the authorised-signer slice. Reslicing acc.MultiSignAddresses in
+// place — as the settlement loop once did — mutates the account held in the
+// global map, because a value copy of an Account shares the slice's backing
+// array.
 func CountMultiSignApprovals(mainTx transactionsDefinition.Transaction,
 	group []transactionsDefinition.Transaction) (approvals int, required int) {
 
@@ -556,24 +561,14 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 		logger.GetLogger().Println("not enough signatures for transactions to process ", tx.TxParam.MultiSignTx.GetHex())
 		return nil
 	}
-	numApprovals := 0
-	notApprovedYet := acc.MultiSignAddresses[:]
-	for _, t := range txs {
-		sender := t.TxParam.Sender.ByteValue
-		appi := -1
-		for i, appr := range notApprovedYet {
-			if sender == appr && bytes.Equal(mainTx.TxData.Recipient.GetBytes(), t.TxData.Recipient.GetBytes()) && t.TxData.Amount == 0 {
-				numApprovals++
-				appi = i
-				break
-			}
-		}
-		if appi > 0 {
-			notApprovedYet = append(notApprovedYet[:appi], notApprovedYet[appi+1:]...)
-		} else if appi == 0 {
-			notApprovedYet = notApprovedYet[1:]
-		}
-	}
+	// Counting lives in CountMultiSignApprovals so the rule exists once. The
+	// loop that used to be inlined here tracked outstanding signers with
+	// acc.MultiSignAddresses[:], which shares its backing array with the
+	// account in the global map; removing a matched signer shifted elements
+	// inside that array and rewrote the account's authorised-signer list.
+	// [A B C] became [A C C] — B could no longer approve anything and C
+	// occupied two slots, so one address could satisfy two approvals.
+	numApprovals, _ := CountMultiSignApprovals(mainTx, txs)
 	if numApprovals < int(acc.MultiSignNumber) {
 		logger.GetLogger().Println("not enough signatures for transactions to process ", tx.TxParam.MultiSignTx.GetHex())
 		return nil

@@ -400,6 +400,46 @@ func handleVIEW(line []byte, reply *[]byte) {
 	*reply, _ = hex.DecodeString(l)
 }
 
+// txLocation describes where a transaction currently is.
+//
+// Being on the chain and being outstanding are independent facts: an escrow
+// transfer is written to the confirmed DB by the block that carries it and
+// only then enters the escrow pool, where it waits until its settlement
+// height. The same holds for a transfer awaiting co-signatures. Reporting a
+// single first-match location put every such transaction under plain
+// "confirmed_db" and made the wallet show unsettled transfers as done.
+//
+// "confirmed_db" therefore still wins as the primary state — that is what most
+// callers ask about — and the outstanding state is appended as a qualifier:
+//
+//	confirmed_db            on chain, nothing outstanding
+//	confirmed_db+escrow     on chain, value not moved yet
+//	confirmed_db+multisig   on chain, awaiting signatures
+//
+// Transactions that never reached a block keep their previous single values.
+func txLocation(inConfirmed, inPoolDB, inMain, inEscrow, inMultisig bool) string {
+	if inConfirmed {
+		switch {
+		case inEscrow:
+			return "confirmed_db+escrow"
+		case inMultisig:
+			return "confirmed_db+multisig"
+		}
+		return "confirmed_db"
+	}
+	switch {
+	case inPoolDB:
+		return "pool_db"
+	case inMain:
+		return "memory_main"
+	case inEscrow:
+		return "memory_escrow"
+	case inMultisig:
+		return "memory_multisign"
+	}
+	return ""
+}
+
 func handleDETS(line []byte, reply *[]byte) {
 
 	switch len(line) {
@@ -418,34 +458,31 @@ func handleDETS(line []byte, reply *[]byte) {
 		*reply = append([]byte("AC"), am...)
 		break
 	case common.HashLength:
-		location := ""
 		var tx transactionsDefinition.Transaction
 		var err error
 
 		// Check confirmed DB (TT)
 		tx, err = transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], line)
-		if err == nil {
-			location = "confirmed_db"
-		}
+		inConfirmed := err == nil
 
-		// Check pool DB (D0)
-		if location == "" {
+		// Check pool DB (D0). Only needed for the transaction bytes when the
+		// confirmed DB did not have them.
+		inPoolDB := false
+		if !inConfirmed {
 			tx, err = transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], line)
-			if err == nil {
-				location = "pool_db"
-			}
+			inPoolDB = err == nil
 		}
 
-		// Check in-memory pools
-		if location == "" && transactionsPool.PoolsTx.HasTransaction(line) {
-			location = "memory_main"
-		}
-		if location == "" && transactionsPool.PoolTxEscrow.HasTransaction(line) {
-			location = "memory_escrow"
-		}
-		if location == "" && transactionsPool.PoolTxMultiSign.HasTransaction(line) {
-			location = "memory_multisign"
-		}
+		// Pool membership is checked unconditionally: a confirmed transaction
+		// can still be waiting in the escrow or multisig pool, and that is
+		// exactly the state the old first-match resolution hid.
+		location := txLocation(
+			inConfirmed,
+			inPoolDB,
+			transactionsPool.PoolsTx.HasTransaction(line),
+			transactionsPool.PoolTxEscrow.HasTransaction(line),
+			transactionsPool.PoolTxMultiSign.HasTransaction(line),
+		)
 
 		if location == "" {
 			logger.GetLogger().Println("transaction not found in any location:", hex.EncodeToString(line))

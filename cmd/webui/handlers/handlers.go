@@ -993,6 +993,10 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 						"amount":    account.Int64toFloat64(tx.TxData.Amount),
 						"height":    tx.Height,
 						"time":      tx.TxParam.SendingTime,
+						// DETS already reports where the transaction lives; the
+						// history discarded it and listed everything alike, so a
+						// transfer still sitting in escrow looked settled.
+						"location": string(reply[3 : 3+locLen]),
 					})
 				}
 			}
@@ -1014,12 +1018,13 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 				tx, _, err := tx.GetFromBytes(reply[3+locLen:])
 				if err == nil {
 					transactions = append(transactions, map[string]interface{}{
-						"type":   "received",
-						"hash":   tx.Hash.GetHex(),
-						"sender": tx.TxParam.Sender.GetHex(),
-						"amount": account.Int64toFloat64(tx.TxData.Amount),
-						"height": tx.Height,
-						"time":   tx.TxParam.SendingTime,
+						"type":     "received",
+						"hash":     tx.Hash.GetHex(),
+						"sender":   tx.TxParam.Sender.GetHex(),
+						"amount":   account.Int64toFloat64(tx.TxData.Amount),
+						"height":   tx.Height,
+						"time":     tx.TxParam.SendingTime,
+						"location": string(reply[3 : 3+locLen]),
 					})
 				}
 			}

@@ -1123,33 +1123,60 @@ contract Coin {
             }
         }
 
-        // Remembers the last observed holdings so a change can be reported.
-        // Deliberately not a per-transaction running balance: historical
-        // balances are not stored, and deriving one from the transaction list
-        // would place an escrow debit at the transaction's own height rather
-        // than at settlement — misreporting the exact moment this is meant to
-        // reveal.
-        let lastHoldings = null;
+        // Reports what changed, per component, because the components have
+        // different causes and mixing them hides the interesting one:
+        //
+        //   rewards   — block rewards, credited to StakingRewards roughly every
+        //               10 s on a validator. At the current supply that is about
+        //               41 QWD per block, which swamps everything else.
+        //   available — ordinary transfers AND the moment an escrow transaction
+        //               settles. This is the signal worth watching.
+        //   staked    — stake and unstake only.
+        //
+        // A single delta on total holdings reported "+80 QWD" for two blocks
+        // mined and said nothing about a 123 QWD escrow settling.
+        //
+        // Still not a per-transaction running balance: historical balances are
+        // not stored, and deriving one from the transaction list would place an
+        // escrow debit at the transaction's own height instead of at
+        // settlement — misreporting the very moment this is meant to reveal.
+        let lastAmounts = null;
         let balanceDeltaTimer = null;
 
-        function showBalanceChange(holdings) {
+        function showBalanceChange(res) {
             const el = document.getElementById('balanceDelta');
-            if (lastHoldings === null) {
-                lastHoldings = holdings;
+            const now = {
+                available: res.balance,
+                staked: res.stakedAmount,
+                rewards: res.rewardsAmount
+            };
+            if (lastAmounts === null) {
+                lastAmounts = now;
                 el.textContent = '';
                 return;
             }
-            const diff = holdings - lastHoldings;
-            lastHoldings = holdings;
-            if (Math.abs(diff) < 1e-8) return;   // unchanged: keep the previous note
 
-            const up = diff > 0;
-            const now = new Date().toLocaleTimeString();
-            el.style.color = up ? '#2ed573' : '#ff6b6b';
-            el.textContent = (up ? '▲ +' : '▼ ') + diff.toFixed(8) + ' QWD  at ' + now;
+            const parts = [];
+            let touchedAvailable = false;
+            for (const key of ['available', 'staked', 'rewards']) {
+                const diff = now[key] - lastAmounts[key];
+                if (Math.abs(diff) < 1e-8) continue;
+                if (key === 'available') touchedAvailable = true;
+                const up = diff > 0;
+                parts.push('<span style="color:' + (up ? '#2ed573' : '#ff6b6b') + ';">' +
+                    (up ? '▲ +' : '▼ ') + diff.toFixed(8) + ' ' + key + '</span>');
+            }
+            lastAmounts = now;
+            if (parts.length === 0) return;   // unchanged: keep the previous note
 
+            const stamp = new Date().toLocaleTimeString();
+            el.innerHTML = parts.join(' &nbsp; ') + ' <span style="color:#666;">at ' + stamp + '</span>';
+            // A change in "available" is the one that can mean an escrow just
+            // settled, so keep it emphasised for longer than reward noise.
             clearTimeout(balanceDeltaTimer);
-            balanceDeltaTimer = setTimeout(() => { el.style.color = '#888'; }, 15000);
+            balanceDeltaTimer = setTimeout(() => { el.style.opacity = '0.55'; },
+                touchedAvailable ? 60000 : 8000);
+            el.style.opacity = '1';
         }
 
         // Update account
@@ -1159,7 +1186,7 @@ contract Coin {
             try {
                 const res = await api('/api/account');
                 if (!res.error) {
-                    showBalanceChange(res.totalHoldings);
+                    showBalanceChange(res);
                     document.getElementById('totalBalance').textContent = res.totalHoldings.toFixed(8);
                     document.getElementById('availableBalance').textContent = res.balance.toFixed(8) + ' QWD';
                     document.getElementById('stakedAmount').textContent = res.stakedAmount.toFixed(8) + ' QWD';
@@ -1534,11 +1561,32 @@ contract Coin {
                 html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
                 html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.1);">';
                 html += '<th style="padding:8px;text-align:left;">Type</th>';
+                html += '<th style="padding:8px;text-align:left;">Status</th>';
                 html += '<th style="padding:8px;text-align:left;">Amount</th>';
                 html += '<th style="padding:8px;text-align:left;">Address</th>';
                 html += '<th style="padding:8px;text-align:left;">Height</th>';
                 html += '<th style="padding:8px;text-align:left;">Hash</th>';
                 html += '</tr>';
+
+                // The history lists everything the account was ever party to,
+                // which is NOT the same as everything that settled. "Confirmed"
+                // here means the transaction is recorded on the chain; for an
+                // escrow transfer the value moves later still, so that state
+                // gets its own label rather than being folded into confirmed.
+                const LOCATIONS = {
+                    confirmed_db:            ['Confirmed',                       '#00ff64'],
+                    'confirmed_db+escrow':   ['Confirmed &middot; not settled',  '#ff9f43'],
+                    'confirmed_db+multisig': ['Confirmed &middot; needs signatures', '#ff9f43'],
+                    pool_db:                 ['In pool',                         '#ffc800'],
+                    memory_main:             ['Pending',                         '#ffc800'],
+                    memory_escrow:           ['Escrow, not settled',             '#ff9f43'],
+                    memory_multisign:        ['Awaiting signatures',             '#ff9f43']
+                };
+                function historyStatus(tx) {
+                    const known = LOCATIONS[tx.location];
+                    if (known) return '<span style="color:' + known[1] + ';">' + known[0] + '</span>';
+                    return '<span style="color:#888;">' + (tx.location || 'unknown') + '</span>';
+                }
 
                 for (const tx of res.transactions) {
                     const typeColor = tx.type === 'sent' ? '#ff4757' : '#00ff64';
@@ -1546,6 +1594,7 @@ contract Coin {
                     const addr = tx.type === 'sent' ? tx.recipient : tx.sender;
                     html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">';
                     html += '<td style="padding:8px;color:' + typeColor + ';">' + tx.type.toUpperCase() + '</td>';
+                    html += '<td style="padding:8px;">' + historyStatus(tx) + '</td>';
                     html += '<td style="padding:8px;color:' + typeColor + ';">' + typeSign + tx.amount.toFixed(8) + ' QWD</td>';
                     html += '<td style="padding:8px;font-family:monospace;font-size:10px;">' + (addr ? addr.substring(0, 16) + '...' : '-') + '</td>';
                     html += '<td style="padding:8px;">' + tx.height + '</td>';
