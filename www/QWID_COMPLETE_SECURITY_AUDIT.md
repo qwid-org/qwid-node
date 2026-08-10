@@ -4,7 +4,7 @@
 
 **Review Date:** May 17-18, 2026 &nbsp;·&nbsp; **Comprehensive re-review & remediation:** through July 13, 2026  
 **Repository:** https://github.com/qwid-org/qwid-node (branch: security-fixes)  
-**Status:** ✅ **MAINNET READY** — every enumerated Critical / High / Medium finding is fixed or a documented, deferred-by-design item; **0 open**.
+**Status:** Every enumerated Critical / High / Medium finding is fixed or a documented, deferred-by-design item; **0 open**. An external audit is planned before mainnet — this review does not substitute for one.
 
 ---
 
@@ -35,23 +35,22 @@ _Status mirrors the authoritative reconciliation in `SECURITY_AUDIT.md` (branch 
 
 ## Executive Summary
 
-QWID blockchain has been comprehensively audited across all major security domains. The implementation is **production-ready** with excellent post-quantum cryptography design and robust consensus mechanisms.
+This review covered every major security domain of the QWID codebase: 284 Go files across 45 packages, line by line.
 
-### Overall Security Score: **9.75/10**
+No numeric score is given. Scoring is what a commissioned third-party audit does; an internal review awarding itself 10/10 would be borrowing a form it has not earned. What follows is the coverage and the counts, which are checkable against the repository.
 
-| Category | Score | Status |
-|----------|-------|--------|
-| **Cryptography** | 10/10 | ✅ Excellent - Dual PQC, proper implementation |
-| **Consensus** | 9.5/10 | ✅ Excellent - Proof-of-Synergy well-designed |
-| **Transaction Validation** | 9.8/10 | ✅ Excellent - Multi-sig, replay prevention |
-| **Network Security** | 9.5/10 | ✅ Excellent - Timestamp validation, pool management |
-| **State Management** | 10/10 | ✅ Excellent - No race conditions, proper locking |
-| **Overall** | 9.75/10 | ✅ **MAINNET READY** |
+| Domain | Reviewed | Representative work |
+|--------|----------|---------------------|
+| **Cryptography & wallet** | ✅ | Dual PQC signature paths; AES-256-GCM + Argon2id at rest; secret-key zeroing |
+| **Consensus & EVM** | ✅ | Proof-of-Synergy; native ↔ EVM balance bridge; per-transaction failure semantics |
+| **Transaction validation** | ✅ | Multi-signature, escrow, replay prevention, timestamp bounds |
+| **Network & RPC** | ✅ | Mutual PQ peer authentication; per-IP rate limiting; loopback-only wallet RPC |
+| **State management** | ✅ | Locking discipline on account/staking maps; snapshot integrity |
+| **Database** | ✅ | Atomic close under lock; write-locked deletes; LOCK-file integrity |
 
-### Critical Issues Found: **0**
-### High-Severity Issues: **0**
-### Medium-Severity Issues: **0** (optional: staking delays edge case - IMPLEMENTED)
-### Total Recommendations: **1** (optional improvement)
+### Findings enumerated: **158**
+### Open: **0**
+### Deferred by design (documented, mitigated): **14**
 
 ---
 
@@ -898,10 +897,13 @@ Example:
 
 ## Recommendations for Future Work
 
-### High Priority (Mainnet Ready)
+### Completed
 1. ✅ All identified issues addressed
 2. ✅ Timestamp validation fixed
 3. ✅ Staking delays implemented
+
+### Required before mainnet
+1. ⬜ External third-party security audit — not yet commissioned
 
 ### Medium Priority (Post-Mainnet)
 1. Run full network stress tests (target: 5,000 TX/block)
@@ -937,11 +939,9 @@ Example:
 
 ## Final Verdict
 
-### 🎯 MAINNET READY ✅
+### Internal review complete — external audit outstanding
 
-**QWID blockchain is secure, well-designed, and ready for production deployment.**
-
-**Overall Security Score: 9.75/10**
+**Every finding this review enumerated has been addressed, and the full report is published so the work can be checked against the source.** That is the claim being made here, and no more. Readiness for production is not something a team can certify about its own code; an external audit is planned before mainnet.
 
 **Key Strengths:**
 1. ⭐ Post-quantum cryptography implementation is best-in-class
