@@ -1098,11 +1098,15 @@ img{max-width:100%}
 .audit-badge--green{background:rgba(46,213,115,.12);border:1px solid rgba(46,213,115,.3);color:var(--green)}
 .audit-badge--cyan{background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.2);color:var(--cyan)}
 .audit-badge--gold{background:rgba(240,180,41,.1);border:1px solid rgba(240,180,41,.3);color:var(--gold)}
-.audit-co-cats{display:flex;flex-direction:column;gap:.55rem}
-.audit-cat{display:flex;align-items:center;gap:.75rem}
+/* Areas covered, as plain labels. They used to carry per-area scores out of
+   10, which an internal review has no standing to award — the format read as
+   a third-party audit's verdict. The coverage itself is the honest claim. */
+.audit-co-cats{display:flex;flex-wrap:wrap;gap:.5rem}
+.audit-cat{display:flex;align-items:center}
 .audit-cat-name{
-  font-family:'Barlow Condensed',sans-serif;font-size:.8rem;font-weight:600;
-  letter-spacing:.04em;color:var(--muted);width:150px;flex-shrink:0;
+  font-family:'Barlow Condensed',sans-serif;font-size:.75rem;font-weight:600;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+  border:1px solid rgba(0,229,255,.15);border-radius:20px;padding:.3rem .8rem;
 }
 .audit-cat-bar{flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden}
 .audit-cat-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cyan),var(--blue))}
@@ -1135,8 +1139,8 @@ img{max-width:100%}
 .audit-ready{
   font-family:'Barlow Condensed',sans-serif;font-weight:700;
   font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;
-  background:rgba(46,213,115,.15);border:1px solid rgba(46,213,115,.35);
-  color:var(--green);padding:.4rem 1.1rem;border-radius:20px;
+  background:rgba(240,180,41,.12);border:1px solid rgba(240,180,41,.35);
+  color:var(--gold);padding:.4rem 1.1rem;border-radius:20px;
 }
 .audit-stats-row{display:flex;gap:1.5rem}
 .audit-s{text-align:center}
@@ -1156,7 +1160,6 @@ img{max-width:100%}
 @media(max-width:720px){
   .audit-callout-inner{grid-template-columns:1fr;gap:2rem}
   .audit-co-right{flex-direction:row;flex-wrap:wrap;justify-content:center}
-  .audit-cat-name{width:120px}
 }
 
 /* ===================== RESPONSIVE MISC ===================== */
@@ -1649,7 +1652,7 @@ a.htrust-item:hover{color:var(--cyan)}
           </tr>
           <tr>
             <td>Time to Finality</td>
-            <td class="td-qwid">~5s</td>
+            <td class="td-qwid">~10s (1 block)</td>
             <td>~15 min</td>
             <td>~60 min</td>
           </tr>
@@ -1686,47 +1689,28 @@ a.htrust-item:hover{color:var(--cyan)}
         <span class="audit-badge audit-badge--gold">100% Open Source</span>
       </div>
       <div class="audit-co-cats">
-        <div class="audit-cat">
-          <span class="audit-cat-name">Cryptography</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:100%"></div></div>
-          <span class="audit-cat-score">10/10</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">State Management</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:100%"></div></div>
-          <span class="audit-cat-score">10/10</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Tx Validation</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:98%"></div></div>
-          <span class="audit-cat-score">9.8</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Consensus</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:95%"></div></div>
-          <span class="audit-cat-score">9.5</span>
-        </div>
-        <div class="audit-cat">
-          <span class="audit-cat-name">Network Security</span>
-          <div class="audit-cat-bar"><div class="audit-cat-fill" style="width:95%"></div></div>
-          <span class="audit-cat-score">9.5</span>
-        </div>
+        <div class="audit-cat"><span class="audit-cat-name">Cryptography</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">State Management</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Tx Validation</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Consensus &amp; EVM</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Network &amp; RPC</span></div>
+        <div class="audit-cat"><span class="audit-cat-name">Database</span></div>
       </div>
     </div>
     <div class="audit-co-right">
       <div class="audit-score-ring">
         <svg viewBox="0 0 160 160" width="160" height="160">
           <circle class="ring-bg" cx="80" cy="80" r="65"/>
-          <circle class="ring-val" cx="80" cy="80" r="65" stroke-dasharray="408" stroke-dashoffset="10"/>
+          <circle class="ring-val" cx="80" cy="80" r="65" stroke-dasharray="408" stroke-dashoffset="0"/>
         </svg>
-        <div class="audit-score-num">9.75</div>
-        <div class="audit-score-denom">out of 10</div>
+        <div class="audit-score-num">0</div>
+        <div class="audit-score-denom">open findings</div>
       </div>
-      <span class="audit-ready">✓ Mainnet Ready</span>
+      <span class="audit-ready">External audit pending</span>
       <div class="audit-stats-row">
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">Critical</span></div>
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">High</span></div>
-        <div class="audit-s"><span class="audit-s-val">0</span><span class="audit-s-lbl">Medium</span></div>
+        <div class="audit-s"><span class="audit-s-val">158</span><span class="audit-s-lbl">Enumerated</span></div>
+        <div class="audit-s"><span class="audit-s-val">14</span><span class="audit-s-lbl">Deferred</span></div>
+        <div class="audit-s"><span class="audit-s-val">284</span><span class="audit-s-lbl">Go files</span></div>
       </div>
       <a href="audit.html" target="_blank" rel="noopener" class="audit-co-cta">View Full Report →</a>
     </div>
