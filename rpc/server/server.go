@@ -671,8 +671,12 @@ func handlePEND(byt []byte, reply *[]byte) {
 		})
 	}
 
-	// Escrow: PeekEntries also yields the priority, which for this pool is the
-	// settlement height (tx.Height + EscrowTransactionsDelay).
+	// Escrow. MaturesAt comes from blocks.EscrowMaturityHeight, which reads the
+	// sender account's delay — the value settlement actually gates on. The
+	// escrow pool's own ordering key must NOT be used here: it is
+	// tx.Height + tx.TxData.EscrowTransactionsDelay, and that field is set only
+	// on a ModifyEscrow configuration transaction, so for an ordinary transfer
+	// it is zero and the key equals the transaction's own height.
 	for _, e := range transactionsPool.PoolTxEscrow.PeekEntries(50) {
 		tx := e.Transaction
 		pendingTxs = append(pendingTxs, PendingTx{
@@ -682,7 +686,7 @@ func handlePEND(byt []byte, reply *[]byte) {
 			Amount:    float64(tx.TxData.Amount) / 1e8,
 			Height:    tx.Height,
 			Pool:      "escrow",
-			MaturesAt: e.Priority,
+			MaturesAt: blocks.EscrowMaturityHeight(tx),
 		})
 	}
 

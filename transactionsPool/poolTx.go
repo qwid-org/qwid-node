@@ -158,8 +158,14 @@ func (tp *TransactionPool) PeekTransactions(n int, heightOrHash int64) []transac
 
 // PoolEntry is a pooled transaction together with the priority the pool sorts
 // it by. What the priority means depends on the pool: gas price for the main
-// pool, the height the transaction settles at for escrow, and a key derived
-// from the multi-signature hash for multisig.
+// pool, tx.Height+tx.TxData.EscrowTransactionsDelay for escrow, and a key
+// derived from the multi-signature hash for multisig.
+//
+// The escrow priority is an ordering key, NOT a settlement height. That field
+// is only set on a ModifyEscrow configuration transaction, so on an ordinary
+// transfer it is zero and the key is just the transaction's own height.
+// Settlement gates on the sender account's TransactionDelay instead — see
+// blocks.EscrowMaturityHeight.
 type PoolEntry struct {
 	Transaction transactionsDefinition.Transaction
 	Priority    int64
