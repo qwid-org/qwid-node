@@ -118,9 +118,55 @@ func EscrowMaturityHeight(tx transactionsDefinition.Transaction) int64 {
 	return tx.GetHeight() + acc.TransactionDelay
 }
 
-// FilterUnbuildableCancellations returns txs without the escrow cancellations
-// that would make a block at the given height fail validation, and evicts the
-// permanently dead ones from the main pool.
+// ErrDeployFromRestrictedAccount marks a contract deployment whose sender
+// cannot execute one.
+var ErrDeployFromRestrictedAccount = errors.New(
+	"escrow and multi-signature accounts cannot deploy smart contracts")
+
+// isContractDeployment reports whether tx creates a contract: no recipient,
+// and code in OptData. This is the same shape EvaluateSC routes to VM.Create.
+func isContractDeployment(tx transactionsDefinition.Transaction) bool {
+	return tx.TxData.Recipient == common.EmptyAddress() && len(tx.TxData.OptData) > 0
+}
+
+// ValidateContractDeployment rejects a deployment from an account that cannot
+// run one.
+//
+// EvaluateSCForBlock skips contract execution entirely when the sender is an
+// escrow or multi-signature account — two TODOs in evaluate.go. Such a
+// transaction was nonetheless validated, included in a block and charged for,
+// and then did nothing at all: no contract, no address, no logs, no error. The
+// only evidence was a zero contract address on a confirmed transaction, which
+// nobody can read as a diagnosis (seen at height 145530).
+//
+// Rejecting it up front turns a silent loss of the fee into an error the wallet
+// can show. Both conversions are one-way — ModifyAccountToEscrow and
+// ModifyAccountToMultiSign each refuse to convert an account that is already
+// the other — so a rejected deployment can never become valid later.
+//
+// Only deployments are restricted; these accounts keep sending coin and calling
+// existing contracts, because the restriction follows the execution gap, not a
+// wish to freeze the account.
+func ValidateContractDeployment(tx transactionsDefinition.Transaction) error {
+	if !isContractDeployment(tx) {
+		return nil
+	}
+	sender := tx.GetSenderAddress()
+	senderAcc, exists := account.GetAccountByAddressBytes(sender.GetBytes())
+	if !exists {
+		// Not this rule's business: the balance checks report a missing account
+		// far more clearly than a deployment error would.
+		return nil
+	}
+	if senderAcc.TransactionDelay > 0 || senderAcc.MultiSignNumber > 0 {
+		return fmt.Errorf("%w (sender %s)", ErrDeployFromRestrictedAccount, sender.GetHex())
+	}
+	return nil
+}
+
+// FilterUnbuildableTransactions returns txs without the ones that would make a
+// block at the given height fail validation, and evicts the permanently dead
+// ones from the main pool.
 //
 // Block assembly used to hand every pooled transaction to the block and let
 // CheckBlockTransfers judge the result. That is fine when a rejection is
@@ -131,9 +177,18 @@ func EscrowMaturityHeight(tx transactionsDefinition.Transaction) int64 {
 //
 // The validation rule itself is unchanged — a block containing such a
 // transaction is still invalid. This only stops the node from proposing one.
-func FilterUnbuildableCancellations(txs []transactionsDefinition.Transaction, height int64) []transactionsDefinition.Transaction {
+func FilterUnbuildableTransactions(txs []transactionsDefinition.Transaction, height int64) []transactionsDefinition.Transaction {
 	kept := txs[:0]
 	for _, tx := range txs {
+		// A deployment from an escrow or multisig account can never execute and
+		// the account cannot be converted back, so this is permanent: drop it
+		// rather than let it fail validation on every block attempt.
+		if err := ValidateContractDeployment(tx); err != nil {
+			logger.GetLogger().Printf("dropping deployment %s from pool: %v",
+				tx.Hash.GetHex(), err)
+			transactionsPool.PoolsTx.RemoveTransactionByHash(tx.Hash.GetBytes())
+			continue
+		}
 		if _, isCancellation := tx.CancellationTarget(); !isCancellation {
 			kept = append(kept, tx)
 			continue

@@ -182,7 +182,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		// therefore the height CheckBlockTransfers validates against. The two
 		// are equal here thanks to the guard above, but this must not silently
 		// diverge from validation if that guard ever changes.
-		txs = blocks.FilterUnbuildableCancellations(txs, nonceHeight)
+		txs = blocks.FilterUnbuildableTransactions(txs, nonceHeight)
 		txsBytes := make([][]byte, len(txs))
 		transactionsHashes := []common.Hash{}
 		for _, tx := range txs {

@@ -17,6 +17,7 @@ import (
 	"github.com/qwid-org/qwid-node/core/stateDB"
 	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/pubkeys"
 	nonceServices "github.com/qwid-org/qwid-node/services/nonceService"
 	"github.com/qwid-org/qwid-node/services/transactionServices"
@@ -599,7 +600,60 @@ func handleACCS(line []byte, reply *[]byte) {
 	*reply = out
 }
 
+// rejectUnacceptableTransactions returns the first reason a submitted batch
+// must not be broadcast. It covers the cases the chain will refuse outright, so
+// the wallet learns why instead of watching a transaction never confirm.
+//
+// The whole payload is broadcast or not, so one bad transaction refuses the
+// batch — accepting part of it is not something the caller can act on.
+func rejectUnacceptableTransactions(txs []transactionsDefinition.Transaction) error {
+	for _, tx := range txs {
+		if err := blocks.ValidateContractDeployment(tx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handleTRAN accepts a transaction batch from the local wallet.
+//
+// It used to answer "transaction sent" before looking at the payload and then
+// hand it to the network unconditionally. A submission the chain refuses — a
+// contract deployment from an escrow or multi-signature account, which cannot
+// execute — was therefore reported as accepted, and the only evidence of
+// failure was that it never confirmed. Decoding and checking first costs one
+// parse and turns that silence into a message.
+//
+// Only locally-submitted transactions take this path; peer traffic still goes
+// straight to transactionServices.OnMessage, which is deliberately untouched.
 func handleTRAN(byt []byte, reply *[]byte) {
+
+	isValid, amsg := message.CheckValidMessage(byt)
+	if !isValid {
+		*reply = []byte("transaction rejected: malformed message")
+		return
+	}
+	txMsg, ok := amsg.(message.TransactionsMessage)
+	if !ok {
+		*reply = []byte("transaction rejected: not a transaction message")
+		return
+	}
+	// Transactions arrive grouped by topic; the check applies to all of them.
+	byTopic, err := txMsg.GetTransactionsFromBytes(common.SigName(), common.SigName2(),
+		common.IsPaused(), common.IsPaused2())
+	if err != nil {
+		*reply = []byte("transaction rejected: " + err.Error())
+		return
+	}
+	txs := make([]transactionsDefinition.Transaction, 0, len(byTopic))
+	for _, group := range byTopic {
+		txs = append(txs, group...)
+	}
+	if err := rejectUnacceptableTransactions(txs); err != nil {
+		logger.GetLogger().Println("refusing local submission:", err)
+		*reply = []byte("transaction rejected: " + err.Error())
+		return
+	}
 
 	*reply = []byte("transaction sent")
 	transactionServices.OnMessage([4]byte{0, 0, 0, 0}, byt)
