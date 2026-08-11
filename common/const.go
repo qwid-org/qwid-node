@@ -22,7 +22,7 @@ var (
 	DifficultyMultiplier           int32   = 10
 	BlockTimeInterval              float32 = 10 // 10 sec.
 	MaxBlockTimeInterval           int64   = 2000
-	MinNumberOfBlocksInStake       int64   = 6 // should be 36 but for testnet is released this number
+	MinNumberOfBlocksInStake       int64   = 36 // should be 36 but for testnet is released this number
 	MaxBlockForwardInTime          int64   = 15
 	DifficultyChange               float32 = 10
 	MaxGasUsage                    int64   = 13700000 // circa 6.5k transactions in block
