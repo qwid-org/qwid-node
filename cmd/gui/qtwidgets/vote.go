@@ -125,7 +125,10 @@ func ShowVotingPage() *widgets.QTabWidget {
 			return
 		}
 
-		clientrpc.InRPC <- SignMessage(append([]byte("VOTE"), enb...))
+		// Name the voting account; the node casts its single vote only for the
+		// wallet it mines with.
+		vote := append([]byte("VOTE"), MainWallet.MainAddress.GetBytes()...)
+		clientrpc.InRPC <- SignMessage(append(vote, enb...))
 		reply := <-clientrpc.OutRPC
 		v = string(reply)
 		info = &v

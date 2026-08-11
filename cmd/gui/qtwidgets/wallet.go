@@ -6,17 +6,24 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/therecipe/qt/core"
-	"github.com/therecipe/qt/widgets"
 	"github.com/qwid-org/qwid-node/common"
 	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
 	"github.com/qwid-org/qwid-node/wallet"
+	"github.com/therecipe/qt/core"
+	"github.com/therecipe/qt/widgets"
 )
 
 var err error
 
 func isRegisteredPubKeyInBlockchain() {
-	clientrpc.InRPC <- SignMessage([]byte("CHCK"))
+	if MainWallet == nil {
+		return
+	}
+	// Ask about THIS wallet's two scheme addresses. Unnamed, the node reported
+	// on the wallet it mines with, so a different wallet was warned about keys
+	// that were not its own — and never about its own missing ones.
+	check := append([]byte("CHCK"), MainWallet.Account1.Address.GetBytes()...)
+	clientrpc.InRPC <- SignMessage(append(check, MainWallet.Account2.Address.GetBytes()...))
 	var reply []byte
 	reply = <-clientrpc.OutRPC
 	if len(reply) > 0 {

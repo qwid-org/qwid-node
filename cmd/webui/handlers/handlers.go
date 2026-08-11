@@ -674,7 +674,11 @@ func CancelTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reply := clientrpc.Call(SignMessage(append([]byte("CNCL"), tmm...)))
+	// Name the account the cancellation is for. Without it the node checks
+	// ownership against the wallet it mines with, so any other wallet was told
+	// "you are not the owner" about its own transaction.
+	cancel := append([]byte("CNCL"), MainWallet.MainAddress.GetBytes()...)
+	reply := clientrpc.Call(SignMessage(append(cancel, tmm...)))
 	if string(reply) != "escrow cancellation transaction required" {
 		jsonResponse(w, map[string]string{"message": string(reply)})
 		return
@@ -919,8 +923,14 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetPendingTransactions(w http.ResponseWriter, r *http.Request) {
-	// Get pending transactions from pool
-	reply := clientrpc.Call(SignMessage([]byte("PEND")))
+	if !walletReady() {
+		jsonError(w, "Load wallet first", http.StatusBadRequest)
+		return
+	}
+	// Ask for THIS wallet's pending transactions. The pools hold the whole
+	// network's traffic, so an unnamed request answered with a list the wallet
+	// could not attribute to itself.
+	reply := clientrpc.Call(SignMessage(append([]byte("PEND"), MainWallet.MainAddress.GetBytes()...)))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		jsonError(w, "Timeout", http.StatusGatewayTimeout)
 		return
@@ -1315,7 +1325,11 @@ func Vote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reply := clientrpc.Call(SignMessage(append([]byte("VOTE"), enb...)))
+	// Name the voting account. The node has one vote, belonging to the account
+	// it stakes with, and casts it only for that wallet — so a webui unlocked
+	// with a different wallet is told so instead of silently overwriting it.
+	vote := append([]byte("VOTE"), MainWallet.MainAddress.GetBytes()...)
+	reply := clientrpc.Call(SignMessage(append(vote, enb...)))
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
