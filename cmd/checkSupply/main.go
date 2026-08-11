@@ -53,6 +53,18 @@ func at(height int64) (snapshot, error) {
 	if err != nil {
 		return s, fmt.Errorf("cannot load block %d: %w", height, err)
 	}
+	// The supply invariant compares the state AT a height against the block AT
+	// that height, so a nearby snapshot is not a substitute — it would compare
+	// mismatched data and report a bogus delta. Snapshot retention means an
+	// arbitrary height may no longer have one, so say which height does.
+	if !account.AccountsStoredAtHeight(height) || !account.StakingAccountsStoredAtHeight(height) {
+		nearest, nerr := account.ClosestStoredSnapshotHeight(common.AccountsDBPrefix, height)
+		if nerr != nil || nearest < 0 {
+			return s, fmt.Errorf("no state snapshot at or below height %d", height)
+		}
+		return s, fmt.Errorf("height %d has no state snapshot (pruned); "+
+			"the nearest one at or below is %d — re-run against that height", height, nearest)
+	}
 	if err := account.LoadAccounts(height); err != nil {
 		return s, fmt.Errorf("cannot load accounts %d: %w", height, err)
 	}

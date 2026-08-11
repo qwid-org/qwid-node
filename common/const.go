@@ -130,6 +130,23 @@ var (
 	TxHistoryReceivedDBPrefix = [2]byte{'H', 'R'}
 )
 
+// SnapshotRetentionBlocks is how far back a dense run of account/staking/DEX
+// snapshots is kept. Every rewind the node performs on its own — the startup
+// consistency check bounded by MaxStartupRewind, and the sync fork recovery —
+// stays inside this window, so keeping it dense costs nothing in capability.
+var SnapshotRetentionBlocks int64 = 4320 // ~12 hours at a 10 s block interval
+
+// SnapshotPruneInterval is how often the live path applies snapshot retention.
+// Pruning scans the snapshot keyspace, so running it every block to delete a
+// handful of keys would cost more than it reclaims.
+var SnapshotPruneInterval int64 = 720 // ~2 hours
+
+// SnapshotCheckpointInterval is the spacing of the sparse snapshots kept below
+// the retention window. It bounds how far a deep rewind has to walk down to
+// find restorable state, and with it the worst-case gap between two surviving
+// snapshots.
+var SnapshotCheckpointInterval int64 = 8640 // ~1 day
+
 // StakingDetailsRetentionBlocks is how many recent blocks of per-event staking
 // detail (stakes, unstakes, per-block rewards) a staking account keeps in the
 // state. Rewards append an entry EVERY block, so an unbounded map made the

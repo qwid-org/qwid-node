@@ -314,6 +314,12 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 				return 0, 0, fmt.Errorf("invalid escrow cancellation: %w", err)
 			}
 		}
+		// EvaluateSCForBlock cannot execute a deployment from an escrow or
+		// multisig account, so accepting one would charge the fee for a
+		// transaction that provably does nothing.
+		if err := ValidateContractDeployment(poolTx); err != nil {
+			return 0, 0, err
+		}
 		var n int
 		if poolTx.GetLockedAmount() > 0 {
 			n, err = account.IntDelegatedAccountFromAddress(poolTx.TxData.DelegatedAccountForLocking)

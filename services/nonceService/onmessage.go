@@ -182,7 +182,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		// therefore the height CheckBlockTransfers validates against. The two
 		// are equal here thanks to the guard above, but this must not silently
 		// diverge from validation if that guard ever changes.
-		txs = blocks.FilterUnbuildableCancellations(txs, nonceHeight)
+		txs = blocks.FilterUnbuildableTransactions(txs, nonceHeight)
 		txsBytes := make([][]byte, len(txs))
 		transactionsHashes := []common.Hash{}
 		for _, tx := range txs {
@@ -298,6 +298,18 @@ func OnMessage(addr [4]byte, m []byte) {
 				err = account.StoreStakingAccounts(newBlock.GetHeader().Height)
 				if err != nil {
 					logger.GetLogger().Println(err)
+				}
+				// Each of the two stores above writes a full copy of its state
+				// under this height, every block, and nothing used to remove the
+				// old ones — database size was state-size x block-count with no
+				// ceiling (a node running since early August reached 1.2 TB where
+				// a freshly synced one held 4 GB). Retention keeps a dense recent
+				// window plus sparse checkpoints; see account/snapshotRetention.go.
+				//
+				// Throttled: pruning scans the snapshot keyspace, which is not
+				// worth doing every 10 seconds to delete a handful of keys.
+				if bh := newBlock.GetHeader().Height; bh%common.SnapshotPruneInterval == 0 {
+					account.PruneStateSnapshots(bh)
 				}
 				common.SetHeight(h + 1)
 				sm := statistics.GetStatsManager()

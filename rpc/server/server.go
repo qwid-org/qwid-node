@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 
 	"github.com/qwid-org/qwid-node/account"
@@ -17,6 +18,7 @@ import (
 	"github.com/qwid-org/qwid-node/core/stateDB"
 	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/pubkeys"
 	nonceServices "github.com/qwid-org/qwid-node/services/nonceService"
 	"github.com/qwid-org/qwid-node/services/transactionServices"
@@ -91,6 +93,194 @@ func ListenRPC() {
 	}
 }
 
+// lookupRegisteredPubKey resolves an account's on-chain registered key.
+// Indirected so tests do not need a populated key trie.
+var lookupRegisteredPubKey = pubkeys.LoadPubKeyWithPrimary
+
+// requestAccountAddress returns the account a request is about, taken from the
+// first AddressLength bytes of its payload, when the operation carries one.
+//
+// The lengths are checked per operation rather than "at least an address":
+// CNCL's older form is a bare 32-byte hash, and reading its leading bytes as an
+// address would authenticate the request against whatever account they happen
+// to spell. A payload that does not match is treated as carrying no account,
+// which is what keeps wallets built before this change working.
+//
+// GTBL carries a CONTRACT address, which is not the caller's identity and must
+// never be used to authenticate them.
+func requestAccountAddress(operation string, payload []byte) (common.Address, bool) {
+	carries := false
+	switch operation {
+	case "ACCT":
+		// The payload is the address being queried.
+		carries = len(payload) >= common.AddressLength
+	case "CNCL":
+		// The caller's address followed by the hash to cancel.
+		carries = len(payload) == common.AddressLength+common.HashLength
+	case "PEND":
+		// Optional: an address narrows the pools to that account's traffic.
+		carries = len(payload) == common.AddressLength
+	case "CHCK":
+		// The wallet's two account addresses, primary first. The first is the
+		// main address, which is the identity to authenticate against.
+		carries = len(payload) == 2*common.AddressLength
+	case "VOTE":
+		// The voter, followed by the two encryption blobs. Unlike the others
+		// this is not optional — see handleVOTE.
+		carries = len(payload) > common.AddressLength
+	}
+	if !carries {
+		return common.Address{}, false
+	}
+	addr := common.Address{}
+	if err := addr.Init(payload[:common.AddressLength]); err != nil {
+		return common.Address{}, false
+	}
+	return addr, true
+}
+
+// loadLocalWalletKeys reads the public keys of every wallet generated on this
+// machine. Indirected for tests.
+var loadLocalWalletKeys = wallet.LocalWalletPublicKeys
+
+var (
+	localWalletKeyMutex  sync.Mutex
+	localWalletKeyCache  []wallet.WalletPublicKeys
+	localWalletKeyLoaded bool
+)
+
+func invalidateLocalWalletKeyCache() {
+	localWalletKeyMutex.Lock()
+	defer localWalletKeyMutex.Unlock()
+	localWalletKeyCache, localWalletKeyLoaded = nil, false
+}
+
+// localWalletKeys returns the cached local wallet keys, scanning the wallet
+// directory on first use. Cached because the scan touches the filesystem and
+// runs on the RPC path; a wallet generated while the node is up is picked up
+// after a restart, which is when it becomes usable anyway.
+func localWalletKeys() []wallet.WalletPublicKeys {
+	localWalletKeyMutex.Lock()
+	defer localWalletKeyMutex.Unlock()
+	if localWalletKeyLoaded {
+		return localWalletKeyCache
+	}
+	keys, err := loadLocalWalletKeys()
+	if err != nil {
+		logger.GetLogger().Println("cannot read local wallet public keys:", err)
+	}
+	localWalletKeyCache, localWalletKeyLoaded = keys, true
+	return localWalletKeyCache
+}
+
+// schemeHalf picks the half of a key pair matching the scheme the signature
+// selected. Verifying a secondary signature against a primary key can only ever
+// fail, so getting this wrong locks out every wallet on the second scheme.
+func schemeHalf(w wallet.WalletPublicKeys, primary bool) []byte {
+	if primary {
+		return w.Primary
+	}
+	return w.Secondary
+}
+
+// activeWalletKeys returns the node's own wallet as one entry, or nothing when
+// no wallet has been loaded yet. GetActiveWallet returns nil until then, and
+// dereferencing it inside an RPC handler would answer an unauthenticated
+// request with a panic; an empty result fails cleanly as "Invalid signature".
+func activeWalletKeys() []wallet.WalletPublicKeys {
+	aw := wallet.GetActiveWallet()
+	if aw == nil {
+		return nil
+	}
+	return []wallet.WalletPublicKeys{{
+		Number:      aw.WalletNumber,
+		MainAddress: aw.MainAddress,
+		Primary:     aw.Account1.PublicKey.GetBytes(),
+		Secondary:   aw.Account2.PublicKey.GetBytes(),
+	}}
+}
+
+// candidateVerificationKeys returns every public key a signed request may
+// legitimately be signed with.
+//
+// A request that NAMES an account is authenticated by that account alone: its
+// key as registered on-chain. Accepting anything else would let anyone holding
+// a local wallet sign requests about other people's accounts.
+//
+// An account with no on-chain key has never had a transaction processed, so
+// there is nothing to check it against. Rather than lock it out — a wallet's
+// very first request would otherwise be refused — the node accepts the wallet
+// on this machine that HOLDS that address, and only that one. This is what
+// makes it safe for a privileged operation such as cancelling to name an
+// address instead of implicitly meaning the mining wallet.
+//
+// A request that names no account (WALL, MINE, VOTE, PEER, ...) carries no
+// identity to check, so any wallet the operator generated on this machine is
+// accepted — not just the mining one. Their public halves are stored
+// unencrypted in the wallet files, so the node needs no password to know them.
+func candidateVerificationKeys(operation string, payload []byte, primary bool) [][]byte {
+	if addr, named := requestAccountAddress(operation, payload); named {
+		if pk, err := lookupRegisteredPubKey(addr, primary); err == nil {
+			if b := pk.GetBytes(); len(b) > 0 {
+				return [][]byte{b}
+			}
+		}
+		return walletKeysHoldingAddress(addr, primary)
+	}
+	if nodeLevelOperations[operation] {
+		return schemeHalves(activeWalletKeys(), primary)
+	}
+	return everyLocalWalletKey(primary)
+}
+
+// nodeLevelOperations change how the NODE behaves rather than reporting on an
+// account, so only the wallet the node runs as may ask for them. They name no
+// account, and without this they would fall through to "any wallet on this
+// machine" — which would let a second wallet start the node's mining services.
+//
+// VOTE belongs to the same class but is not listed here: it carries the voter's
+// address, so it takes the stricter account path above and is checked against
+// that account's registered key.
+var nodeLevelOperations = map[string]bool{"MINE": true}
+
+// walletKeysHoldingAddress returns the keys of the local wallets whose own main
+// address is addr — normally exactly one, and none when the address belongs to
+// somebody else. An empty result means the request cannot be authenticated and
+// is refused, which is the intended answer for a stranger's account.
+func walletKeysHoldingAddress(addr common.Address, primary bool) [][]byte {
+	want := addr.GetBytes()
+	keys := [][]byte{}
+	for _, w := range append(activeWalletKeys(), localWalletKeys()...) {
+		owner := w.MainAddress
+		if !bytes.Equal(owner.GetBytes(), want) {
+			continue
+		}
+		if k := schemeHalf(w, primary); len(k) > 0 {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// schemeHalves collects the matching half of each wallet's key pair, dropping
+// wallets that have none.
+func schemeHalves(wallets []wallet.WalletPublicKeys, primary bool) [][]byte {
+	keys := [][]byte{}
+	for _, w := range wallets {
+		if k := schemeHalf(w, primary); len(k) > 0 {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// everyLocalWalletKey returns the key of every wallet on this machine, the
+// active one first: it is the common case, so a valid request usually verifies
+// on the first attempt instead of after a walk through the others.
+func everyLocalWalletKey(primary bool) [][]byte {
+	return schemeHalves(append(activeWalletKeys(), localWalletKeys()...), primary)
+}
+
 func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 	if len(lineBeg) < 4 {
 		*reply = []byte("Error with message. Too small length calling server")
@@ -131,14 +321,18 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 			*reply = []byte("Invalid signature with length 0")
 			return nil
 		}
-		activeWallet := wallet.GetActiveWallet()
-
-		pubKey := activeWallet.Account1.PublicKey
-		if signatureBytes[0] != 0 {
-			pubKey = activeWallet.Account2.PublicKey
+		primary := signatureBytes[0] == 0
+		signed := false
+		for _, pubKey := range candidateVerificationKeys(operation, byt, primary) {
+			if len(pubKey) == 0 {
+				continue
+			}
+			if wallet.Verify(common.BytesToLenAndBytes(line), signatureBytes, pubKey, common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+				signed = true
+				break
+			}
 		}
-
-		if !wallet.Verify(common.BytesToLenAndBytes(line), signatureBytes, pubKey.GetBytes(), common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+		if !signed {
 			*reply = []byte("Invalid signature")
 			return nil
 		}
@@ -177,10 +371,6 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 		handleLTKN(byt, reply)
 	case "GTBL":
 		handleGTBL(byt, reply)
-	case "ESCR":
-		handleESCR(byt, reply)
-	case "MULT":
-		handleMULT(byt, reply)
 	case "PEND":
 		handlePEND(byt, reply)
 	case "PEER":
@@ -210,33 +400,47 @@ func handleWALL(line []byte, reply *[]byte) {
 	*reply = r
 }
 
+// handleCHECK reports whether an account's two scheme keys are registered
+// on-chain. The addresses come from the request — primary first, then secondary
+// — so a wallet other than the mining one learns about ITS OWN registration
+// rather than the node's. An empty payload still means the node's own wallet.
 func handleCHECK(line []byte, reply *[]byte) {
 	logger.GetLogger().Println(string(line))
-	w := wallet.GetActiveWallet()
 	*reply = nil
-	_, err := pubkeys.LoadPubKey(w.Account1.Address.GetBytes())
-	if err != nil {
-		*reply = []byte("Primary pubkey is not registered in blockchain. Please send transaction including primary PubKey to blockchain")
 
+	var primaryAddr, secondaryAddr []byte
+	if len(line) == 2*common.AddressLength {
+		primaryAddr = line[:common.AddressLength]
+		secondaryAddr = line[common.AddressLength:]
+	} else {
+		w := wallet.GetActiveWallet()
+		if w == nil {
+			*reply = []byte("no wallet loaded on this node; send the addresses to check")
+			return
+		}
+		primaryAddr = w.Account1.Address.GetBytes()
+		secondaryAddr = w.Account2.Address.GetBytes()
 	}
-	_, err = pubkeys.LoadPubKey(w.Account2.Address.GetBytes())
-	if err != nil {
+
+	if _, err := pubkeys.LoadPubKey(primaryAddr); err != nil {
+		*reply = []byte("Primary pubkey is not registered in blockchain. Please send transaction including primary PubKey to blockchain")
+	}
+	if _, err := pubkeys.LoadPubKey(secondaryAddr); err != nil {
 		*reply = []byte("Secondary pubkey is not registered in blockchain. Please send transaction including secondary PubKey to blockchain")
 	}
 }
 
-func handleESCR(line []byte, reply *[]byte) {
-	logger.GetLogger().Println(string(line))
-	*reply = nil
-	//primary := line[0] == 0
-	//delay := common.GetInt64FromByte(line[1:9])
-
-}
-
-func handleMULT(line []byte, reply *[]byte) {
-	logger.GetLogger().Println(string(line))
-	*reply = nil
-}
+// ESCR and MULT used to sit here. Both only logged their payload and returned
+// nothing — handleESCR's intended body was commented out — and nothing in the
+// tree ever called either of them.
+//
+// Escrow and multi-signature are configured by TRANSACTION, not by RPC: the
+// wallet builds a TxData carrying EscrowTransactionsDelay, MultiSignNumber and
+// MultiSignAddresses, signs it with its own key and submits it through TRAN
+// (cmd/webui ModifyEscrow, cmd/gui escrow). Consensus then applies it to the
+// sender's account. That path is already bound to the caller's account, so
+// there was nothing for these two to answer for and nothing to make them carry
+// an address for — only an authenticated RPC operation that did nothing.
 
 func handleENCR(line []byte, reply *[]byte) {
 	logger.GetLogger().Println(string(line))
@@ -287,7 +491,39 @@ func handleMINE(line []byte, reply *[]byte) {
 
 }
 
+// handleVOTE records the node's vote on a signature-scheme change.
+//
+// The node has exactly ONE vote: it is cast by its delegated account, weighted
+// by that account's stake (voting.SaveVotesEncryption1), and it travels inside
+// the nonce transaction the mining wallet signs. There is no per-account vote
+// to keep, so unlike CNCL, PEND and CHCK the address in the request is not a
+// question to answer — it is the claim of who is voting, and the node casts the
+// vote only for the wallet it actually mines with.
+//
+// This is deliberately fail-closed: a payload naming nobody is refused rather
+// than treated as the node's own. Falling back would leave the vote castable by
+// any wallet that can reach the RPC socket, which is exactly what accepting a
+// signature from every locally-generated wallet made possible.
 func handleVOTE(line []byte, reply *[]byte) {
+	voter, named := requestAccountAddress("VOTE", line)
+	if !named {
+		*reply = []byte("vote must name the voting account")
+		return
+	}
+	line = line[common.AddressLength:]
+
+	miner := wallet.GetActiveWallet()
+	if miner == nil {
+		*reply = []byte("this node has no wallet loaded and cannot vote")
+		return
+	}
+	if !bytes.Equal(voter.GetBytes(), miner.MainAddress.GetBytes()) {
+		// The vote belongs to the account the node stakes with. Another wallet
+		// on the same machine is a different owner, not a co-owner.
+		*reply = []byte("only the wallet this node mines with can cast its vote")
+		return
+	}
+
 	enb1, line, err := common.BytesWithLenToBytes(line)
 	if err != nil {
 		*reply = []byte("cannot decode bytes 1")
@@ -599,59 +835,147 @@ func handleACCS(line []byte, reply *[]byte) {
 	*reply = out
 }
 
+// rejectUnacceptableTransactions returns the first reason a submitted batch
+// must not be broadcast. It covers the cases the chain will refuse outright, so
+// the wallet learns why instead of watching a transaction never confirm.
+//
+// The whole payload is broadcast or not, so one bad transaction refuses the
+// batch — accepting part of it is not something the caller can act on.
+func rejectUnacceptableTransactions(txs []transactionsDefinition.Transaction) error {
+	for _, tx := range txs {
+		if err := blocks.ValidateContractDeployment(tx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handleTRAN accepts a transaction batch from the local wallet.
+//
+// It used to answer "transaction sent" before looking at the payload and then
+// hand it to the network unconditionally. A submission the chain refuses — a
+// contract deployment from an escrow or multi-signature account, which cannot
+// execute — was therefore reported as accepted, and the only evidence of
+// failure was that it never confirmed. Decoding and checking first costs one
+// parse and turns that silence into a message.
+//
+// Only locally-submitted transactions take this path; peer traffic still goes
+// straight to transactionServices.OnMessage, which is deliberately untouched.
 func handleTRAN(byt []byte, reply *[]byte) {
+
+	isValid, amsg := message.CheckValidMessage(byt)
+	if !isValid {
+		*reply = []byte("transaction rejected: malformed message")
+		return
+	}
+	txMsg, ok := amsg.(message.TransactionsMessage)
+	if !ok {
+		*reply = []byte("transaction rejected: not a transaction message")
+		return
+	}
+	// Transactions arrive grouped by topic; the check applies to all of them.
+	byTopic, err := txMsg.GetTransactionsFromBytes(common.SigName(), common.SigName2(),
+		common.IsPaused(), common.IsPaused2())
+	if err != nil {
+		*reply = []byte("transaction rejected: " + err.Error())
+		return
+	}
+	txs := make([]transactionsDefinition.Transaction, 0, len(byTopic))
+	for _, group := range byTopic {
+		txs = append(txs, group...)
+	}
+	if err := rejectUnacceptableTransactions(txs); err != nil {
+		logger.GetLogger().Println("refusing local submission:", err)
+		*reply = []byte("transaction rejected: " + err.Error())
+		return
+	}
 
 	*reply = []byte("transaction sent")
 	transactionServices.OnMessage([4]byte{0, 0, 0, 0}, byt)
 
 }
 
+// callerAddress resolves the account a request acts for: the one it names, or
+// the node's own wallet when it names none. The second result is false when
+// neither is available — no address in the payload and no wallet loaded — which
+// the caller must treat as "cannot act", not as "the empty account".
+//
+// The old handlers read wallet.GetActiveWallet().MainAddress directly. That is
+// nil until a wallet is loaded, so a request arriving first panicked inside the
+// RPC server instead of answering.
+func callerAddress(operation string, payload []byte) (common.Address, bool) {
+	if addr, named := requestAccountAddress(operation, payload); named {
+		return addr, true
+	}
+	if aw := wallet.GetActiveWallet(); aw != nil {
+		return aw.MainAddress, true
+	}
+	return common.Address{}, false
+}
+
+// handleCNCL cancels a pooled transaction on behalf of the account named in the
+// request — the address, then the 32-byte hash. Ownership is still checked
+// against the pooled sender, so naming an address is not a way to cancel
+// somebody else's transaction; the signature check has already established that
+// the caller controls the address it named.
+//
+// The older payload is the bare hash and still means the node's own wallet.
 func handleCNCL(byt []byte, reply *[]byte) {
 
 	*reply = []byte("hash is not 32 bytes")
 
-	if len(byt) == common.HashLength {
-		w := wallet.GetActiveWallet()
-		if transactionsPool.PoolsTx.TransactionExists(byt) {
-			tx := transactionsPool.PoolsTx.PopTransactionByHash(byt)
-			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
-				transactionsPool.PoolsTx.AddTransaction(tx, tx.Hash)
-				*reply = []byte("you are not the owner of transaction")
-				return
-			}
-			transactionsPool.PoolsTx.BanTransactionByHash(byt)
-			*reply = []byte("transaction cancelled locally")
-			return
-		}
-		if transactionsPool.PoolTxEscrow.TransactionExists(byt) {
-			tx, _ := transactionsPool.PoolTxEscrow.GetTransactionByHash(byt)
-			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
-				*reply = []byte("you are not the owner of transaction")
-				return
-			}
-			// Escrow has already been accepted by consensus. Do not remove only
-			// this node's copy; the WebUI must submit a signed cancellation tx.
-			*reply = []byte("escrow cancellation transaction required")
-			return
-		}
-		if transactionsPool.PoolTxMultiSign.TransactionExists(byt) {
-			tx := transactionsPool.PoolTxMultiSign.PopTransactionByHash(byt)
-			if bytes.Equal(tx.TxParam.Sender.GetBytes(), w.MainAddress.GetBytes()) == false {
-				transactionsPool.AddMultiSignTransaction(tx)
-				*reply = []byte("you are not the owner of transaction")
-				return
-			}
-			// Drop the persisted copy too, or the restart would resurrect the
-			// cancelled transaction into the pool.
-			transactionsPool.RemoveMultiSignTransaction(byt)
-			transactionsPool.PoolTxMultiSign.BanTransactionByHash(byt)
-			*reply = []byte("transaction cancelled locally")
-			return
-		}
-		*reply = []byte("transaction not found in a cancellable pool")
+	hash := byt
+	if len(byt) == common.AddressLength+common.HashLength {
+		hash = byt[common.AddressLength:]
+	}
+	if len(hash) != common.HashLength {
 		return
 	}
 
+	owner, ok := callerAddress("CNCL", byt)
+	if !ok {
+		*reply = []byte("no wallet to cancel on behalf of")
+		return
+	}
+	ownerBytes := owner.GetBytes()
+
+	if transactionsPool.PoolsTx.TransactionExists(hash) {
+		tx := transactionsPool.PoolsTx.PopTransactionByHash(hash)
+		if bytes.Equal(tx.TxParam.Sender.GetBytes(), ownerBytes) == false {
+			transactionsPool.PoolsTx.AddTransaction(tx, tx.Hash)
+			*reply = []byte("you are not the owner of transaction")
+			return
+		}
+		transactionsPool.PoolsTx.BanTransactionByHash(hash)
+		*reply = []byte("transaction cancelled locally")
+		return
+	}
+	if transactionsPool.PoolTxEscrow.TransactionExists(hash) {
+		tx, _ := transactionsPool.PoolTxEscrow.GetTransactionByHash(hash)
+		if bytes.Equal(tx.TxParam.Sender.GetBytes(), ownerBytes) == false {
+			*reply = []byte("you are not the owner of transaction")
+			return
+		}
+		// Escrow has already been accepted by consensus. Do not remove only
+		// this node's copy; the WebUI must submit a signed cancellation tx.
+		*reply = []byte("escrow cancellation transaction required")
+		return
+	}
+	if transactionsPool.PoolTxMultiSign.TransactionExists(hash) {
+		tx := transactionsPool.PoolTxMultiSign.PopTransactionByHash(hash)
+		if bytes.Equal(tx.TxParam.Sender.GetBytes(), ownerBytes) == false {
+			transactionsPool.AddMultiSignTransaction(tx)
+			*reply = []byte("you are not the owner of transaction")
+			return
+		}
+		// Drop the persisted copy too, or the restart would resurrect the
+		// cancelled transaction into the pool.
+		transactionsPool.RemoveMultiSignTransaction(hash)
+		transactionsPool.PoolTxMultiSign.BanTransactionByHash(hash)
+		*reply = []byte("transaction cancelled locally")
+		return
+	}
+	*reply = []byte("transaction not found in a cancellable pool")
 }
 
 func handleSTAT(byt []byte, reply *[]byte) {
@@ -702,11 +1026,29 @@ func handlePEND(byt []byte, reply *[]byte) {
 		Required  int    `json:"required,omitempty"`
 	}
 
+	// A request naming an account gets that account's traffic — what it sent and
+	// what is coming to it — instead of the whole pool. The pools hold every
+	// node's transactions, so an unfiltered answer showed a wallet a list it
+	// could not attribute. A bare PEND still returns everything: wallets built
+	// before this change send one, and an empty list would read as "nothing
+	// pending".
+	concerns := func(transactionsDefinition.Transaction) bool { return true }
+	if addr, named := requestAccountAddress("PEND", byt); named {
+		want := addr.GetBytes()
+		concerns = func(tx transactionsDefinition.Transaction) bool {
+			return bytes.Equal(tx.TxParam.Sender.GetBytes(), want) ||
+				bytes.Equal(tx.TxData.Recipient.GetBytes(), want)
+		}
+	}
+
 	pendingTxs := []PendingTx{}
 
 	// Get from main pool
 	txs := transactionsPool.PoolsTx.PeekTransactions(50, 0)
 	for _, tx := range txs {
+		if !concerns(tx) {
+			continue
+		}
 		pendingTxs = append(pendingTxs, PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),
@@ -725,6 +1067,9 @@ func handlePEND(byt []byte, reply *[]byte) {
 	// it is zero and the key equals the transaction's own height.
 	for _, e := range transactionsPool.PoolTxEscrow.PeekEntries(50) {
 		tx := e.Transaction
+		if !concerns(tx) {
+			continue
+		}
 		pendingTxs = append(pendingTxs, PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),
@@ -743,6 +1088,9 @@ func handlePEND(byt []byte, reply *[]byte) {
 	// here: a multisig transaction waits for co-signers, not for a height.
 	for _, e := range transactionsPool.PoolTxMultiSign.PeekEntries(50) {
 		tx := e.Transaction
+		if !concerns(tx) {
+			continue
+		}
 		entry := PendingTx{
 			Hash:      tx.Hash.GetHex(),
 			Sender:    tx.TxParam.Sender.GetHex(),

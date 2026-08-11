@@ -336,7 +336,10 @@ func ShowSendPage() *widgets.QTabWidget {
 			return
 		}
 
-		clientrpc.InRPC <- SignMessage(append([]byte("CNCL"), tmm...))
+		// Name the account being cancelled for; without it the node checks
+		// ownership against the wallet it mines with.
+		cancel := append([]byte("CNCL"), MainWallet.MainAddress.GetBytes()...)
+		clientrpc.InRPC <- SignMessage(append(cancel, tmm...))
 		reply := <-clientrpc.OutRPC
 		v = string(reply)
 		info = &v

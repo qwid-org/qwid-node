@@ -63,10 +63,10 @@ func cancellationFixture(t *testing.T, targetHeight, delay int64) (transactionsD
 	return cancel, owner
 }
 
-func TestFilterUnbuildableCancellationsKeepsValidOne(t *testing.T) {
+func TestFilterUnbuildableKeepsValidOne(t *testing.T) {
 	cancel, _ := cancellationFixture(t, 100, 20) // matures at 120
 
-	kept := FilterUnbuildableCancellations([]transactionsDefinition.Transaction{cancel}, 119)
+	kept := FilterUnbuildableTransactions([]transactionsDefinition.Transaction{cancel}, 119)
 
 	if len(kept) != 1 {
 		t.Fatalf("a cancellation one block before maturity was dropped: got %d", len(kept))
@@ -76,10 +76,10 @@ func TestFilterUnbuildableCancellationsKeepsValidOne(t *testing.T) {
 	}
 }
 
-func TestFilterUnbuildableCancellationsEvictsMaturedOne(t *testing.T) {
+func TestFilterUnbuildableEvictsMaturedOne(t *testing.T) {
 	cancel, _ := cancellationFixture(t, 100, 20) // matures at 120
 
-	kept := FilterUnbuildableCancellations([]transactionsDefinition.Transaction{cancel}, 120)
+	kept := FilterUnbuildableTransactions([]transactionsDefinition.Transaction{cancel}, 120)
 
 	if len(kept) != 0 {
 		t.Fatalf("a matured cancellation was still offered to the block: got %d", len(kept))
@@ -94,11 +94,11 @@ func TestFilterUnbuildableCancellationsEvictsMaturedOne(t *testing.T) {
 // A cancellation whose target is not in the escrow pool yet is a different
 // case: the target's block may simply not have been processed here yet, so the
 // transaction must be held back from this block WITHOUT being destroyed.
-func TestFilterUnbuildableCancellationsKeepsUnknownTargetInPool(t *testing.T) {
+func TestFilterUnbuildableKeepsUnknownTargetInPool(t *testing.T) {
 	cancel, _ := cancellationFixture(t, 100, 20)
 	transactionsPool.PoolTxEscrow = transactionsPool.NewTransactionPool(common.MaxTransactionInPool, 1)
 
-	kept := FilterUnbuildableCancellations([]transactionsDefinition.Transaction{cancel}, 110)
+	kept := FilterUnbuildableTransactions([]transactionsDefinition.Transaction{cancel}, 110)
 
 	if len(kept) != 0 {
 		t.Fatalf("an unverifiable cancellation was offered to the block: got %d", len(kept))
@@ -109,7 +109,7 @@ func TestFilterUnbuildableCancellationsKeepsUnknownTargetInPool(t *testing.T) {
 }
 
 // Ordinary transactions must pass through untouched.
-func TestFilterUnbuildableCancellationsIgnoresNonCancellations(t *testing.T) {
+func TestFilterUnbuildableIgnoresNonCancellations(t *testing.T) {
 	_, owner := cancellationFixture(t, 100, 20)
 
 	plain := transactionsDefinition.Transaction{
@@ -117,7 +117,7 @@ func TestFilterUnbuildableCancellationsIgnoresNonCancellations(t *testing.T) {
 		TxData:  transactionsDefinition.TxData{Recipient: owner, Amount: 5},
 	}
 
-	kept := FilterUnbuildableCancellations([]transactionsDefinition.Transaction{plain}, 500)
+	kept := FilterUnbuildableTransactions([]transactionsDefinition.Transaction{plain}, 500)
 
 	if len(kept) != 1 {
 		t.Fatalf("a plain transaction was dropped: got %d", len(kept))
