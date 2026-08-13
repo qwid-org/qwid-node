@@ -57,6 +57,14 @@ func main() {
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
+	// Security headers wrap every route, static and API alike. They live here
+	// rather than in the nginx vhost because WAN port 80 is forwarded straight
+	// to this process (see deploy/TLS-explorer.md) and so never passes through
+	// nginx at all — headers configured there would silently miss that path.
+	// Rate limiting sits outside the header middleware so that a throttled 429
+	// still carries them.
+	handler := securityHeaders(rateLimit(mux))
+
 	fmt.Printf("\n===========================================\n")
 	fmt.Printf("  QWID Blockchain Explorer\n")
 	fmt.Printf("===========================================\n")
@@ -73,7 +81,7 @@ func main() {
 	}
 	server := &http.Server{
 		Addr:    bindHost + ":" + port,
-		Handler: mux,
+		Handler: handler,
 		// WH-M5: connection timeouts to mitigate Slowloris.
 		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -100,8 +108,85 @@ func main() {
 	fmt.Println("Server stopped")
 }
 
+// securityHeaders sets the response headers that are missing by default from
+// net/http. Applied to every route; the API handlers below deliberately relax
+// one of them.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+
+		// HSTS. Browsers ignore this header when it arrives over plaintext, so
+		// sending it unconditionally is safe even though port 80 reaches this
+		// process directly.
+		//
+		// max-age is deliberately short for now. HSTS turns an expired
+		// certificate from a warning the visitor can click through into a hard
+		// block with no way past it, and this domain's certificate did expire
+		// on 2026-08-12 because renewal had been failing unnoticed for a month.
+		// Raise this to 31536000 (one year) once automatic renewal has been
+		// observed to succeed on its own at least twice; do not add "preload"
+		// before that, as preload entries are slow and painful to undo.
+		h.Set("Strict-Transport-Security", "max-age=86400; includeSubDomains")
+
+		// CSP. Note what is absent: 'unsafe-inline' appears nowhere.
+		//
+		// That is only possible because static/index.html carries no inline
+		// <script>, no inline <style> and no onclick="" attributes — they were
+		// moved into app.js and app.css precisely so this header could be
+		// strict. Reintroducing any of them silently breaks the page rather
+		// than weakening the policy, which is the intended failure direction.
+		//
+		// default-src 'none' means every fetch type not named below is denied
+		// outright, so a directive missed here fails closed. connect-src 'self'
+		// is enough because the page calls its own API on the same origin.
+		h.Set("Content-Security-Policy",
+			"default-src 'none'; "+
+				"script-src 'self'; "+
+				"style-src 'self'; "+
+				"font-src 'self'; "+
+				"img-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"base-uri 'none'; "+
+				"form-action 'none'; "+
+				"frame-ancestors 'none'")
+
+		// Never let the browser second-guess a declared Content-Type.
+		h.Set("X-Content-Type-Options", "nosniff")
+
+		// Clickjacking: nothing here is meant to be framed anywhere. Superseded
+		// by CSP frame-ancestors once a policy is in place, but kept for older
+		// browsers that do not implement it.
+		h.Set("X-Frame-Options", "DENY")
+
+		// Send the origin, never the full path, to other sites.
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		// The explorer uses none of these capabilities; deny them outright so an
+		// injected script cannot ask for them either.
+		h.Set("Permissions-Policy",
+			"accelerometer=(), autoplay=(), camera=(), display-capture=(), "+
+				"encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), "+
+				"magnetometer=(), microphone=(), midi=(), payment=(), "+
+				"picture-in-picture=(), usb=(), xr-spatial-tracking=()")
+
+		// Detach this browsing context from any window that opened it.
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+
+		// Pages and assets are for this origin only. /api/* overrides this —
+		// see corsMiddleware.
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The API is deliberately public — qwid.org fetches live network
+		// figures from it — so it must override the same-origin resource
+		// policy that securityHeaders applies to the rest of the site.
+		w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
+
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")

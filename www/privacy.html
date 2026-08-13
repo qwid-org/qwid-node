@@ -75,7 +75,7 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
 
 <main>
   <h1>Privacy</h1>
-  <div class="updated">Last updated: 10 August 2026</div>
+  <div class="updated">Last updated: 13 August 2026</div>
 
   <div class="callout">
     <strong>Short version.</strong> This website sets no cookies, runs no analytics, and makes
@@ -113,9 +113,10 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
   </p>
   <ul>
     <li>
-      <strong>Fonts and scripts</strong> are served from <strong>qwid.org</strong>, not from a
+      <strong>Fonts and scripts</strong> are served from our own servers —
+      <strong>qwid.org</strong> and <strong>explorer.qwid.org</strong> — not from a
       content-delivery network. Sites that pull fonts from an external CDN hand your IP
-      address to that provider on every visit; this one does not.
+      address to that provider on every visit; these do not.
     </li>
     <li>
       <strong>Live network figures</strong> on the home page — block height, supply,
@@ -227,23 +228,7 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
   &copy; 2025&ndash;2026 QWID Foundation &middot; <a href="/">qwid.org</a>
 </footer>
 
-<script>
-// The contact address is assembled here rather than written into the markup,
-// so it never appears as a literal mailto: in the served HTML. This defeats
-// the crawlers that harvest addresses with a regex over page source, which is
-// most of them; it does not defeat a harvester that executes JavaScript, and
-// nothing short of dropping the address entirely would. Without scripting the
-// <noscript> fallback still shows a human-readable form, which matters because
-// a privacy notice has to leave a usable channel for data-subject requests.
-document.querySelectorAll('span.mail').forEach(function (el) {
-  var addr = el.dataset.u + String.fromCharCode(64) + el.dataset.d;
-  var a = document.createElement('a');
-  a.href = 'mailto:' + addr;
-  a.textContent = addr;
-  el.textContent = '';
-  el.appendChild(a);
-});
-</script>
+<script src="privacy.js" defer></script>
 
 </body>
 </html>
