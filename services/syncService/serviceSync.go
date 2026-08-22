@@ -79,6 +79,10 @@ func generateSyncMsgHeight() []byte {
 	}
 	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{lastBlockHash}
 
+	// GB names the chain we are on. ChainID (int16) only says "some QWID chain";
+	// two networks started from different genesis configs share it.
+	n.TransactionsBytes[[2]byte{'G', 'B'}] = [][]byte{localGenesisHash}
+
 	// NP-M14: share only a bounded random subset of connected peers, so no single
 	// 'hi' message discloses the full topology, while peer discovery still works.
 	peers := sampleIPs(tcpip.GetIPsConnected(), common.MaxPeersSharedInHi)
