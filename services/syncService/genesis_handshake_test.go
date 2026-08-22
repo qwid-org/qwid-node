@@ -2,7 +2,6 @@ package syncServices
 
 import (
 	"bytes"
-	"net"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -43,44 +42,50 @@ func withGenesisHash(t *testing.T, h []byte) {
 // ppAddrCounter backs freshPPAddr - see its doc comment.
 var ppAddrCounter uint32
 
-// freshPPAddr returns a PP-advertised address that is guaranteed distinct
-// from every previous call in this test binary, including earlier
-// repetitions of the same test under `go test -count=N`: connectingPeers and
-// tcpip's own dial-dedup map (dialing, guarded by beginDial/endDial) are
-// package-level state that persists across repetitions in the same process.
-// Reusing a fixed address risks tcpip's "already active or pending" fast
-// path on a second dial for the same (topic, ip): that path clears the
-// connectingPeers flag from a background goroutine almost immediately,
-// racing the test's synchronous read of it (observed directly: 5 probes of
-// a fixed address gave true,true,true,FALSE,true). A never-before-dialled
-// address instead takes the real dial/connect-refused/retry path, which is
-// bounded below by several seconds of explicit retry backoff in
-// tcpip.StartNewConnection - ample, non-flaky headroom for a check that
-// happens in nanoseconds right after OnMessage returns.
+// maxFreshPPAddrs bounds ppAddrCounter. Kept far below the ~16.7M addresses
+// actually available (see freshPPAddr) purely so a runaway caller fails
+// loudly long before exhaustion, not because the space is expected to fill.
+const maxFreshPPAddrs = 1 << 24
+
+// freshPPAddr returns a PP-advertised address that has never been returned
+// before anywhere in this test binary, including earlier repetitions of the
+// same test under `go test -count=N`: connectingPeers and tcpip's own
+// dial-dedup map (dialing, guarded by beginDial/endDial) are package-level
+// state that persists across repetitions in the same process, so a reused
+// address risks tcpip's "already active or pending" fast path on a second
+// dial for the same (topic, ip). That path clears the connectingPeers flag
+// from a background goroutine almost immediately, racing the test's
+// synchronous read of it - reproduced deterministically at -count=200 with
+// an earlier version of this function that recycled addresses every 150
+// calls (3/3 runs failed, 7 occurrences, each logging "connection already
+// active or pending" right before the read caught a false negative).
+//
+// To make that recycling structurally impossible rather than just less
+// likely, every call draws a genuinely fresh address from a 2^24-address
+// space (drawn from 240.0.0.0/8, IANA "reserved for future use" - unused on
+// any real network, so nothing here risks probing a real host either): the
+// three low octets vary with a monotonically increasing counter, and the
+// counter is guarded so this function fails the test loudly, rather than
+// silently wrapping and reintroducing the exact race described above, if it
+// is ever pushed anywhere near that limit - which no realistic test count
+// does; -count=200 over the tests that call this consumes a few hundred.
 func freshPPAddr(t *testing.T) []byte {
 	t.Helper()
 	n := atomic.AddUint32(&ppAddrCounter, 1)
-	// Offset away from the low literal addresses (.9, .10, .20 and similar)
-	// already hardcoded elsewhere in this file, and stay inside the
-	// TEST-NET-3 block (RFC 5737) used throughout these tests.
-	return []byte{203, 0, 113, byte(100 + n%150)}
-}
-
-// topicIPKey builds the [2]byte-topic + [4]byte-ip key used both by
-// connectingPeers (the "hi" handler's own dial bookkeeping) and by
-// tcpip.GetPeersConnected.
-func topicIPKey(topic [2]byte, ip []byte) [6]byte {
-	var key [6]byte
-	copy(key[:2], topic[:])
-	copy(key[2:], ip)
-	return key
+	if n >= maxFreshPPAddrs {
+		t.Fatalf("freshPPAddr: exhausted its %d-address space at call %d - widen it further before trusting its uniqueness guarantee", maxFreshPPAddrs, n)
+	}
+	return []byte{240, byte(n >> 16), byte(n >> 8), byte(n)}
 }
 
 // ppDialKey is the connectingPeers bookkeeping key the "hi" handler sets
 // synchronously, before spawning the dial goroutine, the instant it decides
 // to connect to an address advertised in PP for the nonce topic.
 func ppDialKey(ip []byte) [6]byte {
-	return topicIPKey(tcpip.NonceTopic, ip)
+	var key [6]byte
+	copy(key[:2], tcpip.NonceTopic[:])
+	copy(key[2:], ip)
+	return key
 }
 
 func TestWithGenesisHashRestores(t *testing.T) {
@@ -237,15 +242,22 @@ func TestHiWithOurGenesisRecordsHeightClaim(t *testing.T) {
 //  2. no dial attempted for an address the peer advertised in PP - or the
 //     foreign network gets seeded into our peer table even while its own
 //     height claim is rejected;
-//  3. the existing sync connection to the peer is actually closed and
-//     unregistered (DropTopicConnection ran, not a no-op);
-//  4. no reconnection was queued for it - the distinguishing behaviour
-//     between DropTopicConnection and RecycleTopicConnection. Points 3 and 4
-//     together are what catch a future refactor that swaps back to
-//     RecycleTopicConnection: 3 alone would not, since both functions close
-//     and unregister the connection identically - only the absence of a
-//     requeued reconnect (4) proves Drop, not Recycle, ran;
-//  5. the peer is not added to any ban list - genesis mismatch is a refusal
+//  3. no reconnection was queued for it. This is what catches a future
+//     refactor that swaps DropTopicConnection back for RecycleTopicConnection
+//     (precisely the mistake this feature was designed to avoid): only
+//     RecycleTopicConnection pushes onto tcpip.ChanPeer to request a re-dial,
+//     so this alone distinguishes the two - confirmed by mutation (see
+//     task-4-report.md). The complementary claim, that the connection is
+//     actually torn down, is covered independently by tcpip's own
+//     TestDropTopicConnectionClosesAndUnregisters
+//     (tcpip/drop_topic_test.go) and is deliberately not re-proven here: doing
+//     so from this package previously required an exported test-only seam
+//     into tcpip's unauthenticated-connection bookkeeping
+//     (tcpConnections/peersConnected) that let any importer register an
+//     unauthenticated net.Conn as a live peer, bypassing the NP-C3 handshake
+//     gate (tcpip/listenerTcpService.go:283-288) - not a trade worth making
+//     for a claim already covered elsewhere;
+//  4. the peer is not added to any ban list - genesis mismatch is a refusal
 //     to sync, not misbehaviour serious enough to ban for.
 func TestHiFromForeignGenesisRejectsPeerEntirely(t *testing.T) {
 	withMyIP(t, [4]byte{10, 0, 0, 7})
@@ -254,15 +266,6 @@ func TestHiFromForeignGenesisRejectsPeerEntirely(t *testing.T) {
 	peer := [4]byte{203, 0, 113, 9}
 	ppAddr := freshPPAddr(t)
 	dialKey := ppDialKey(ppAddr)
-
-	// Seed an existing sync connection for the peer, as if a "hi" handshake
-	// had already brought one up earlier, so the test can prove
-	// DropTopicConnection actually tears it down rather than merely reading
-	// as a no-op that happens to leave no height claim behind either way.
-	conn, peerConn := net.Pipe()
-	t.Cleanup(func() { peerConn.Close() })
-	tcpip.SeedConnectionForTest(tcpip.SyncTopic, peer, conn)
-	t.Cleanup(func() { tcpip.DropTopicConnection(tcpip.SyncTopic, peer) })
 
 	// Swap in a fresh ChanPeer so a queued reconnection - which is exactly
 	// what RecycleTopicConnection, and only RecycleTopicConnection, would
@@ -310,21 +313,7 @@ func TestHiFromForeignGenesisRejectsPeerEntirely(t *testing.T) {
 			t.Fatal("a peer on a different genesis had a PP-advertised address dialled")
 		}
 
-		// 3. the seeded connection is gone - closed and unregistered. Closing
-		// one end of a net.Pipe makes deadline calls on the OTHER end fail too
-		// (io.ErrClosedPipe), so - exactly as tcpip's own
-		// TestDropTopicConnectionClosesAndUnregisters does - the deadline
-		// error is ignored and only the registration and the write outcome
-		// are asserted.
-		if _, stillRegistered := tcpip.GetPeersConnected(tcpip.SyncTopic)[topicIPKey(tcpip.SyncTopic, peer[:])]; stillRegistered {
-			t.Fatal("a peer on a different genesis kept its sync connection registered")
-		}
-		_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
-		if _, err := conn.Write([]byte{1}); err == nil {
-			t.Fatal("a peer on a different genesis kept its sync connection open")
-		}
-
-		// 4. no reconnection queued - proves DropTopicConnection ran, not
+		// 3. no reconnection queued - proves DropTopicConnection ran, not
 		// RecycleTopicConnection.
 		select {
 		case msg := <-tcpip.ChanPeer:
@@ -332,7 +321,7 @@ func TestHiFromForeignGenesisRejectsPeerEntirely(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 
-		// 5. not banned - a genesis mismatch is a refusal to sync, not
+		// 4. not banned - a genesis mismatch is a refusal to sync, not
 		// misbehaviour worth banning for.
 		if tcpip.IsIPBanned(peer) {
 			t.Fatal("a peer on a different genesis was banned; genesis mismatch should refuse sync, not ban")
