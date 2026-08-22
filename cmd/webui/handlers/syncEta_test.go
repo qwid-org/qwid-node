@@ -15,25 +15,25 @@ func TestSyncEtaTracker(t *testing.T) {
 	// First sample: window too fresh for any estimate.
 	rate, eta := tr.observe(t0, 100000, 10000)
 	if eta != -1 {
-		t.Fatalf("ETA po pierwszej próbce = %d, oczekiwano -1", eta)
+		t.Fatalf("ETA after the first sample = %d, expected -1", eta)
 	}
 
 	// Import 100 blocks/s while the network produces 0.1/s: after 10s the
 	// height moved 1000 up and the distance shrank by 999.
 	rate, eta = tr.observe(t0.Add(10*time.Second), 101000, 9001)
 	if rate < 99 || rate > 101 {
-		t.Fatalf("tempo importu = %.1f blk/s, oczekiwano ~100", rate)
+		t.Fatalf("import rate = %.1f blk/s, expected ~100", rate)
 	}
 	// Closing speed 99.9/s over 9001 blocks -> ~90s.
 	if eta < 88 || eta > 93 {
-		t.Fatalf("ETA = %ds, oczekiwano ~90s", eta)
+		t.Fatalf("ETA = %ds, expected ~90s", eta)
 	}
 
 	// A stalled sync (no progress) must not report a finite ETA forever.
 	tr2 := &syncEtaTracker{}
 	tr2.observe(t0, 100000, 10000)
 	if _, eta = tr2.observe(t0.Add(10*time.Second), 100000, 10001); eta != -1 {
-		t.Fatalf("ETA przy zastoju = %d, oczekiwano -1", eta)
+		t.Fatalf("ETA while stalled = %d, expected -1", eta)
 	}
 
 	// A rewind (remaining jumps up) discards the poisoned window: the next
@@ -41,17 +41,17 @@ func TestSyncEtaTracker(t *testing.T) {
 	tr3 := &syncEtaTracker{}
 	tr3.observe(t0, 100000, 100)
 	if _, eta = tr3.observe(t0.Add(time.Second), 99000, 1100); eta != -1 {
-		t.Fatalf("ETA tuż po rewindzie = %d, oczekiwano -1 (okno wyczyszczone)", eta)
+		t.Fatalf("ETA right after a rewind = %d, expected -1 (window cleared)", eta)
 	}
 	if _, eta = tr3.observe(t0.Add(11*time.Second), 99500, 600); eta < 10 || eta > 15 {
-		t.Fatalf("ETA po odbudowie okna = %ds, oczekiwano ~12s", eta)
+		t.Fatalf("ETA after the window refilled = %ds, expected ~12s", eta)
 	}
 
 	// Synced node: remaining 0 -> no ETA row.
 	tr4 := &syncEtaTracker{}
 	tr4.observe(t0, 100000, 2)
 	if _, eta = tr4.observe(t0.Add(10*time.Second), 100001, 0); eta != -1 {
-		t.Fatalf("ETA przy zsynchronizowanym węźle = %d, oczekiwano -1", eta)
+		t.Fatalf("ETA on a synced node = %d, expected -1", eta)
 	}
 }
 
@@ -71,6 +71,6 @@ func TestSyncEtaTrackerWindowSlides(t *testing.T) {
 			100000+base+100*i, 50000-base-100*i)
 	}
 	if rate < 95 {
-		t.Fatalf("tempo po zmianie prędkości = %.1f blk/s, oczekiwano ~100 (stare próbki poza oknem)", rate)
+		t.Fatalf("rate after a speed change = %.1f blk/s, expected ~100 (old samples outside the window)", rate)
 	}
 }

@@ -34,13 +34,13 @@ const hkdfSalt = "qwid-wallet-v1"
 func NewMnemonic24() ([]byte, error) {
 	entropy := make([]byte, mnemonicEntropyBytes)
 	if _, err := rand.Read(entropy); err != nil {
-		return nil, fmt.Errorf("nie można pobrać entropii z systemowego CSPRNG: %w", err)
+		return nil, fmt.Errorf("cannot read entropy from the system CSPRNG: %w", err)
 	}
 	defer ZeroBytes(entropy)
 
 	m, err := bip39.NewMnemonic(entropy)
 	if err != nil {
-		return nil, fmt.Errorf("nie można zbudować frazy: %w", err)
+		return nil, fmt.Errorf("cannot build the recovery phrase: %w", err)
 	}
 	return []byte(m), nil
 }
@@ -50,14 +50,14 @@ func NewMnemonic24() ([]byte, error) {
 func SeedFromMnemonic(mnemonic []byte) ([]byte, error) {
 	phrase := strings.Join(strings.Fields(string(mnemonic)), " ")
 	if n := len(strings.Fields(phrase)); n != MnemonicWordCount {
-		return nil, fmt.Errorf("fraza musi mieć dokładnie %d słów, podano %d", MnemonicWordCount, n)
+		return nil, fmt.Errorf("recovery phrase must have exactly %d words, got %d", MnemonicWordCount, n)
 	}
 	// bip39.IsMnemonicValid only checks word count and wordlist membership; it
 	// does not verify the checksum bits. bip39.MnemonicToByteArray calls
 	// IsMnemonicValid internally and then verifies the checksum, so it is the
 	// only one of the two that actually rejects a mnemonic with a bad checksum.
 	if _, err := bip39.MnemonicToByteArray(phrase); err != nil {
-		return nil, fmt.Errorf("nieprawidłowa fraza: słowo spoza listy BIP39 albo błędna suma kontrolna")
+		return nil, fmt.Errorf("invalid recovery phrase: word outside the BIP39 list, or bad checksum")
 	}
 	return bip39.NewSeed(phrase, ""), nil
 }

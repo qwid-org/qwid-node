@@ -32,21 +32,21 @@ func TestPruneStakingDetails(t *testing.T) {
 	pruneStakingDetails(&acc, height)
 
 	if len(acc.StakingDetails) != 3 { // aggregate + two recent heights
-		t.Fatalf("po przycięciu mapa ma %d wpisów, oczekiwano 3", len(acc.StakingDetails))
+		t.Fatalf("after pruning the map has %d entries, expected 3", len(acc.StakingDetails))
 	}
 	agg, ok := acc.StakingDetails[0]
 	if !ok || len(agg) != 1 {
-		t.Fatalf("brak pojedynczego agregatu pod kluczem 0: %v", agg)
+		t.Fatalf("no single aggregate under key 0: %v", agg)
 	}
 	if agg[0].Amount != totalAmount || agg[0].Reward != totalReward {
-		t.Fatalf("agregat = %d/%d, oczekiwano %d/%d - suma nie może się zgubić",
+		t.Fatalf("aggregate = %d/%d, expected %d/%d - the total must not be lost",
 			agg[0].Amount, agg[0].Reward, totalAmount, totalReward)
 	}
 	if agg[0].LastUpdated != 99 {
-		t.Fatalf("LastUpdated agregatu = %d, oczekiwano 99 (najnowszy złożony wpis)", agg[0].LastUpdated)
+		t.Fatalf("aggregate LastUpdated = %d, expected 99 (the newest folded entry)", agg[0].LastUpdated)
 	}
 	if _, ok := acc.StakingDetails[height-1]; !ok {
-		t.Fatal("wpis w oknie retencji został usunięty")
+		t.Fatal("an entry inside the retention window was deleted")
 	}
 
 	// Second prune folds a previous aggregate together with newly-aged entries.
@@ -54,7 +54,7 @@ func TestPruneStakingDetails(t *testing.T) {
 	pruneStakingDetails(&acc, height+150)
 	agg = acc.StakingDetails[0]
 	if len(agg) != 1 || agg[0].Amount != totalAmount+10 || agg[0].Reward != totalReward+20 {
-		t.Fatalf("agregat po drugim przycięciu = %v, oczekiwano %d/%d",
+		t.Fatalf("aggregate after the second prune = %v, expected %d/%d",
 			agg, totalAmount+10, totalReward+20)
 	}
 }
@@ -67,6 +67,6 @@ func TestPruneStakingDetailsEarlyChain(t *testing.T) {
 	}}
 	pruneStakingDetails(&acc, common.StakingDetailsRetentionBlocks-1)
 	if len(acc.StakingDetails) != 1 || len(acc.StakingDetails[5]) != 1 {
-		t.Fatalf("przycięcie zaszło przed upływem okna retencji: %v", acc.StakingDetails)
+		t.Fatalf("pruning happened before the retention window elapsed: %v", acc.StakingDetails)
 	}
 }

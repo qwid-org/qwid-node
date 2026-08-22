@@ -41,13 +41,13 @@ func TestGenerateKeyPairFromSeedIsDeterministic(t *testing.T) {
 	}
 
 	if !bytes.Equal(pubA, pubB) {
-		t.Fatal("to samo ziarno dało różne klucze publiczne")
+		t.Fatal("the same seed produced different public keys")
 	}
 	if !bytes.Equal(a.ExportSecretKey(), b.ExportSecretKey()) {
-		t.Fatal("to samo ziarno dało różne klucze prywatne")
+		t.Fatal("the same seed produced different private keys")
 	}
 	if drawnA != drawnB {
-		t.Fatalf("różna liczba pobranych bajtów: %d vs %d", drawnA, drawnB)
+		t.Fatalf("different number of bytes drawn: %d vs %d", drawnA, drawnB)
 	}
 }
 
@@ -67,7 +67,7 @@ func TestFalconDrawsExactlyFortyEightBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if drawn != 48 {
-		t.Fatalf("Falcon-512 pobrał %d bajtów z RNG, oczekiwano 48 — zachowanie liboqs się zmieniło", drawn)
+		t.Fatalf("Falcon-512 drew %d bytes from the RNG, expected 48 — liboqs behaviour has changed", drawn)
 	}
 }
 
@@ -91,10 +91,10 @@ func TestMayoDrawsFixedByteCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	if drawnA != drawnB {
-		t.Fatalf("MAYO-5 pobrał różną liczbę bajtów dla różnych ziaren: %d vs %d", drawnA, drawnB)
+		t.Fatalf("MAYO-5 drew a different number of bytes for different seeds: %d vs %d", drawnA, drawnB)
 	}
 	if drawnA == 0 {
-		t.Fatal("MAYO-5 nie pobrał żadnych bajtów — shim nie został zainstalowany")
+		t.Fatal("MAYO-5 drew no bytes at all — the shim was not installed")
 	}
 }
 
@@ -118,7 +118,7 @@ func TestDifferentSeedsGiveDifferentKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bytes.Equal(pubA, pubB) {
-		t.Fatal("różne ziarna dały ten sam klucz")
+		t.Fatal("different seeds produced the same key")
 	}
 }
 
@@ -155,7 +155,7 @@ func TestGenerateKeyPairFromSeedRejectsShortSeed(t *testing.T) {
 	defer sig.Clean()
 
 	if _, _, err := sig.GenerateKeyPairFromSeed(make([]byte, 16)); err == nil {
-		t.Fatal("oczekiwano błędu dla ziarna krótszego niż 32 bajty")
+		t.Fatal("expected an error for a seed shorter than 32 bytes")
 	}
 }
 
@@ -201,11 +201,11 @@ func TestSigningStaysRandomAfterSeededKeygen(t *testing.T) {
 
 	got := oqsrand.RandomBytes(48)
 	if bytes.Equal(got, streamTail) {
-		t.Fatal("bajty pobrane po zakończeniu keygenu odpowiadają kolejnym bajtom " +
-			"deterministycznego strumienia ziarna — RNG nie został przywrócony do " +
-			"systemowego CSPRNG; każdy kolejny odczyt byłby odtwarzalny z frazy " +
+		t.Fatal("bytes drawn after keygen finished match the next bytes of the " +
+			"deterministic seed stream — the RNG was not restored to the " +
+			"system CSPRNG; every later read would be reproducible from the phrase " +
 			"odzyskiwania po restarcie procesu, co ujawnia sole, nonce i ostatecznie " +
-			"klucz prywatny")
+			"private key")
 	}
 }
 

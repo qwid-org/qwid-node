@@ -720,13 +720,13 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	State.ResetTransient()
 
 	ret, leftOverGas, err = VM.StaticCall(vm.AccountRef(origin), contractAddr, input, uint64(common.MaxGasUsage))
-	// Konwersja hex do bajtów
+	// Convert hex to bytes
 	dataBytes, err := hex.DecodeString(logger.Output)
 	if err != nil {
 		loggerMain.GetLogger().Fatal(err)
 	}
 
-	// Konwersja bajtów do UTF-8
+	// Convert bytes to UTF-8
 	decodedString := string(dataBytes)
 	if err != nil {
 		return logger.Output, decodedString, ret, address, leftOverGas, err

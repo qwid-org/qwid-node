@@ -17,7 +17,7 @@ func TestConfirmOverwriteAllowsFreeWalletNumber(t *testing.T) {
 		t.Fatalf("wolny numer portfela odrzucony: %v", err)
 	}
 	if confirmed {
-		t.Fatal("zgłoszono potwierdzenie nadpisania dla nieistniejącego pliku")
+		t.Fatal("an overwrite confirmation was reported for a file that does not exist")
 	}
 }
 
@@ -27,7 +27,7 @@ func TestConfirmOverwriteAllowsFreeWalletNumber(t *testing.T) {
 // "yes" and a bare Enter, which are what a panicking operator running the
 // restore mode types by reflex.
 func TestConfirmOverwriteRefusesOccupiedWalletNumber(t *testing.T) {
-	for _, answer := range []string{"\n", "y\n", "yes\n", "tak\n", "nadpisz\n", "nadpisz portfel 1\n", ""} {
+	for _, answer := range []string{"\n", "y\n", "yes\n", "tak\n", "overwrite\n", "overwrite wallet 1\n", ""} {
 		dir := t.TempDir()
 		file := walletFilePath(dir, 0)
 		if err := os.WriteFile(file, []byte(`{"wallet_number":0}`), 0600); err != nil {
@@ -35,15 +35,15 @@ func TestConfirmOverwriteRefusesOccupiedWalletNumber(t *testing.T) {
 		}
 		confirmed, err := confirmOverwriteIfExists(bufio.NewReader(strings.NewReader(answer)), file, 0)
 		if err == nil {
-			t.Fatalf("odpowiedź %q nadpisała istniejący portfel 0", answer)
+			t.Fatalf("answer %q overwrote the existing wallet 0", answer)
 		}
 		if confirmed {
-			t.Fatalf("odpowiedź %q zgłoszona jako potwierdzenie", answer)
+			t.Fatalf("answer %q was reported as a confirmation", answer)
 		}
 		// The file must still be there, untouched: refusing is only useful if
 		// nothing was written on the way to the refusal.
 		if data, rerr := os.ReadFile(file); rerr != nil || string(data) != `{"wallet_number":0}` {
-			t.Fatalf("istniejący plik portfela został naruszony (%v, %q)", rerr, string(data))
+			t.Fatalf("the existing wallet file was damaged (%v, %q)", rerr, string(data))
 		}
 	}
 }
@@ -56,13 +56,13 @@ func TestConfirmOverwriteAcceptsExactPhrase(t *testing.T) {
 	if err := os.WriteFile(file, []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, answer := range []string{"nadpisz portfel 12\n", "  NADPISZ   Portfel 12  \n"} {
+	for _, answer := range []string{"overwrite wallet 12\n", "  OVERWRITE   Wallet 12  \n"} {
 		confirmed, err := confirmOverwriteIfExists(bufio.NewReader(strings.NewReader(answer)), file, 12)
 		if err != nil {
-			t.Fatalf("odrzucono poprawne potwierdzenie %q: %v", answer, err)
+			t.Fatalf("a valid confirmation %q was rejected: %v", answer, err)
 		}
 		if !confirmed {
-			t.Fatalf("potwierdzenie %q nie zostało zgłoszone jako potwierdzone", answer)
+			t.Fatalf("confirmation %q was not reported as confirmed", answer)
 		}
 	}
 }
@@ -70,11 +70,11 @@ func TestConfirmOverwriteAcceptsExactPhrase(t *testing.T) {
 // TestCheckOverwriteConfirmationNamesWalletNumber guards the "names what will be
 // destroyed" requirement: the phrase for wallet 0 must not confirm wallet 1.
 func TestCheckOverwriteConfirmationNamesWalletNumber(t *testing.T) {
-	if err := checkOverwriteConfirmation("nadpisz portfel 0", 1); err == nil {
-		t.Fatal("potwierdzenie dla portfela 0 zaakceptowane dla portfela 1")
+	if err := checkOverwriteConfirmation("overwrite wallet 0", 1); err == nil {
+		t.Fatal("a confirmation for wallet 0 was accepted for wallet 1")
 	}
-	if err := checkOverwriteConfirmation("nadpisz portfel 1", 1); err != nil {
-		t.Fatalf("odrzucono własne potwierdzenie: %v", err)
+	if err := checkOverwriteConfirmation("overwrite wallet 1", 1); err != nil {
+		t.Fatalf("the tool rejected its own confirmation phrase: %v", err)
 	}
 }
 
@@ -85,14 +85,14 @@ func TestWalletFilePathMatchesStoreJSON(t *testing.T) {
 	got := walletFilePath("/home/op/.qwid/wallet/3", 3)
 	want := filepath.Join("/home/op/.qwid/wallet/3", "wallet3.json")
 	if got != want {
-		t.Fatalf("walletFilePath = %q, oczekiwano %q", got, want)
+		t.Fatalf("walletFilePath = %q, expected %q", got, want)
 	}
 }
 
 func TestConfirmPositionsAreDistinctAndInRange(t *testing.T) {
 	pos := confirmPositions([8]byte{1, 2, 3, 4, 5, 6, 7, 8}, 24)
 	if len(pos) != 3 {
-		t.Fatalf("liczba pozycji = %d, oczekiwano 3", len(pos))
+		t.Fatalf("number of positions = %d, expected 3", len(pos))
 	}
 	seen := map[int]bool{}
 	for _, p := range pos {
@@ -100,7 +100,7 @@ func TestConfirmPositionsAreDistinctAndInRange(t *testing.T) {
 			t.Fatalf("pozycja %d poza zakresem 1..24", p)
 		}
 		if seen[p] {
-			t.Fatalf("pozycja %d powtórzona", p)
+			t.Fatalf("position %d repeated", p)
 		}
 		seen[p] = true
 	}
@@ -128,10 +128,10 @@ func TestConfirmPositionsTerminates(t *testing.T) {
 		select {
 		case pos := <-done:
 			if len(pos) != 3 {
-				t.Fatalf("seed %v: liczba pozycji = %d, oczekiwano 3", seed, len(pos))
+				t.Fatalf("seed %v: number of positions = %d, expected 3", seed, len(pos))
 			}
 		case <-time.After(2 * time.Second):
-			t.Fatalf("confirmPositions(%v, 24) nie zakończyło się w 2s (zawieszenie)", seed)
+			t.Fatalf("confirmPositions(%v, 24) did not finish within 2s (hang)", seed)
 		}
 	}
 }
@@ -157,7 +157,7 @@ func TestConfirmPositionsVariesWithSeed(t *testing.T) {
 		}
 	}
 	if allSame {
-		t.Fatalf("confirmPositions zwróciło te same pozycje %v dla wszystkich testowanych ziaren; funkcja wygląda na to, że ignoruje ziarno", first)
+		t.Fatalf("confirmPositions returned the same positions %v for every seed tested; it appears to ignore the seed", first)
 	}
 }
 
@@ -180,7 +180,7 @@ func TestCheckConfirmationAcceptsCorrectWords(t *testing.T) {
 	answers := []string{words[0], words[11], words[23]}
 
 	if err := checkConfirmation(mnemonic, positions, answers); err != nil {
-		t.Fatalf("poprawne słowa odrzucone: %v", err)
+		t.Fatalf("correct words were rejected: %v", err)
 	}
 }
 
@@ -191,16 +191,16 @@ func TestCheckConfirmationRejectsWrongWord(t *testing.T) {
 
 	err := checkConfirmation(mnemonic, positions, answers)
 	if err == nil {
-		t.Fatal("oczekiwano błędu dla błędnego słowa")
+		t.Fatal("expected an error for a wrong word")
 	}
 	if !strings.Contains(err.Error(), "24") {
-		t.Fatalf("komunikat %q nie wskazuje błędnej pozycji", err.Error())
+		t.Fatalf("message %q does not name the wrong position", err.Error())
 	}
 }
 
 func TestCheckConfirmationIsCaseAndSpaceInsensitive(t *testing.T) {
 	mnemonic := strings.Join(strings.Fields(strings.Repeat("abandon ", 23)+"art"), " ")
 	if err := checkConfirmation(mnemonic, []int{24}, []string{"  ART "}); err != nil {
-		t.Fatalf("odrzucono poprawne słowo z inną wielkością liter i spacjami: %v", err)
+		t.Fatalf("a correct word was rejected because of letter case and surrounding spaces: %v", err)
 	}
 }

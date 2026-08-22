@@ -69,10 +69,10 @@ func TestRevertVMToBlockHeightUsesClosestSnapshot(t *testing.T) {
 
 	// Rewind to 5: no snapshot at 5, closest is 3.
 	if !RevertVMToBlockHeight(5) {
-		t.Fatal("RevertVMToBlockHeight(5) zwrócił false")
+		t.Fatal("RevertVMToBlockHeight(5) returned false")
 	}
 	if got := evmNonceAt(0xAA); got != 3 {
-		t.Fatalf("stan EVM po rewindzie: nonce = %d, oczekiwano 3 (snapshot z wysokości 3)", got)
+		t.Fatalf("EVM state after the rewind: nonce = %d, expected 3 (the snapshot from height 3)", got)
 	}
 
 	// The snapshot at 7 belongs to the abandoned branch and must be gone.
@@ -80,7 +80,7 @@ func TestRevertVMToBlockHeightUsesClosestSnapshot(t *testing.T) {
 	last, err := blocks.State.LastStoredHeight()
 	blocks.StateMutex.RUnlock()
 	if err != nil || last != 3 {
-		t.Fatalf("LastStoredHeight po rewindzie = %d, %v; oczekiwano 3 (snapshot 7 usunięty)", last, err)
+		t.Fatalf("LastStoredHeight after the rewind = %d, %v; expected 3 (snapshot 7 deleted)", last, err)
 	}
 }
 
@@ -97,16 +97,16 @@ func TestRevertVMToBlockHeightWithoutAnySnapshot(t *testing.T) {
 	setEVMNonce(0xBB, 42)
 
 	if !RevertVMToBlockHeight(5) {
-		t.Fatal("RevertVMToBlockHeight(5) zwrócił false")
+		t.Fatal("RevertVMToBlockHeight(5) returned false")
 	}
 	if got := evmNonceAt(0xBB); got != 42 {
-		t.Fatalf("stan EVM w pamięci został wyczyszczony mimo braku snapshotu: nonce = %d", got)
+		t.Fatalf("the in-memory EVM state was cleared even though no snapshot existed: nonce = %d", got)
 	}
 	blocks.StateMutex.RLock()
 	changed := blocks.State.ChangedSinceStore()
 	blocks.StateMutex.RUnlock()
 	if !changed {
-		t.Fatal("po nieudanym wczytaniu stan musi być oznaczony jako zmieniony, " +
-			"żeby następny blok zapisał pełny snapshot")
+		t.Fatal("after a failed load the state must be marked changed, " +
+			"so that the next block writes a full snapshot")
 	}
 }

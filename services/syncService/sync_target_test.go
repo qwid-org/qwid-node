@@ -252,14 +252,14 @@ func TestShouldSyncToHeightTrustsOperatorHint(t *testing.T) {
 	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
 		ok, target := shouldSyncToHeight(105000, 500)
 		if !ok || target != 105000 {
-			t.Fatalf("shouldSyncToHeight = %v, %d; oczekiwano pełnej wysokości 105000 "+
+			t.Fatalf("shouldSyncToHeight = %v, %d; expected the full height 105000 "+
 				"(deklaracja w granicach HEIGHT_OF_NETWORK)", ok, target)
 		}
 		// Beyond the operator hint the throttle still applies.
 		ok, target = shouldSyncToHeight(120000, 500)
 		if !ok || target != 500+common.NumberOfHashesInBucket {
-			t.Fatalf("shouldSyncToHeight powyżej HEIGHT_OF_NETWORK = %v, %d; "+
-				"oczekiwano dławienia do %d", ok, target, 500+common.NumberOfHashesInBucket)
+			t.Fatalf("shouldSyncToHeight above HEIGHT_OF_NETWORK = %v, %d; "+
+				"expected throttling to %d", ok, target, 500+common.NumberOfHashesInBucket)
 		}
 	})
 }

@@ -94,14 +94,14 @@ func TestProcessTransactionsMultiSignRecoversMainFromDB(t *testing.T) {
 
 	conf := msTestTx(t, 2, main.GetHash())
 	if err := ProcessTransactionsMultiSign(conf, 120, nil); err != nil {
-		t.Fatalf("ProcessTransactionsMultiSign = %v; blok z potwierdzeniem multisig "+
-			"musi się aplikować po odzyskaniu main tx z bazy", err)
+		t.Fatalf("ProcessTransactionsMultiSign = %v; a block carrying a multisig confirmation "+
+			"must apply once the main tx is recovered from the database", err)
 	}
 
 	// The recovered main tx is back in the pool (and persisted), so the next
 	// confirmations can count toward settlement.
 	if !transactionsPool.PoolTxMultiSign.HasTransaction(main.GetHash().GetBytes()) {
-		t.Fatal("odzyskany main tx nie trafił z powrotem do puli multisig")
+		t.Fatal("the recovered main tx did not go back into the multisig pool")
 	}
 }
 
@@ -132,6 +132,6 @@ func TestProcessTransactionsMultiSignStillFailsWhenTrulyAbsent(t *testing.T) {
 	missing[0] = 0xFF
 	conf := msTestTx(t, 3, missing)
 	if err := ProcessTransactionsMultiSign(conf, 120, nil); err == nil {
-		t.Fatal("brak main tx we wszystkich źródłach musi pozostać błędem")
+		t.Fatal("a main tx missing from every source must stay an error")
 	}
 }

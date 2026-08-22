@@ -27,29 +27,29 @@ func TestNextBatchTarget(t *testing.T) {
 		wantTarget int64
 	}{
 		{
-			name:   "brak deklaracji od tego peera",
+			name:   "no claim from this peer",
 			claims: map[[4]byte]peerHeightClaim{},
 			height: 100200,
 		},
 		{
-			name:   "deklaracja wygasła",
+			name:   "the claim expired",
 			claims: map[[4]byte]peerHeightClaim{peer: claim(105000, 2*ClaimExpiryDuration)},
 			height: 100200,
 		},
 		{
-			name:   "peer już nie jest wyżej - koniec pipeline'u",
+			name:   "the peer is no longer ahead - end of the pipeline",
 			claims: map[[4]byte]peerHeightClaim{peer: claim(100200, time.Second)},
 			height: 100200,
 		},
 		{
-			name:       "peer wyżej w granicach HEIGHT_OF_NETWORK - pełny cel",
+			name:       "peer ahead within HEIGHT_OF_NETWORK - full target",
 			claims:     map[[4]byte]peerHeightClaim{peer: claim(105000, time.Second)},
 			height:     100200,
 			wantOK:     true,
 			wantTarget: 105000,
 		},
 		{
-			name:       "peer wyżej ponad HEIGHT_OF_NETWORK - cel dławiony do kubełka",
+			name:       "peer ahead beyond HEIGHT_OF_NETWORK - target throttled to one bucket",
 			claims:     map[[4]byte]peerHeightClaim{peer: claim(120000, time.Second)},
 			height:     100200,
 			wantOK:     true,
@@ -62,10 +62,10 @@ func TestNextBatchTarget(t *testing.T) {
 			withClaims(t, tc.claims, func() {
 				target, ok := nextBatchTarget(peer, tc.height)
 				if ok != tc.wantOK {
-					t.Fatalf("nextBatchTarget ok = %v, oczekiwano %v", ok, tc.wantOK)
+					t.Fatalf("nextBatchTarget ok = %v, expected %v", ok, tc.wantOK)
 				}
 				if ok && target != tc.wantTarget {
-					t.Fatalf("nextBatchTarget = %d, oczekiwano %d", target, tc.wantTarget)
+					t.Fatalf("nextBatchTarget = %d, expected %d", target, tc.wantTarget)
 				}
 			})
 		})

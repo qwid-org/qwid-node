@@ -119,7 +119,7 @@ func CopySymLink(source, dest string) error {
 
 func CountNonZeroBytes(b []byte) int {
 	var i int
-	// Znajdź pierwszy zero od końca
+	// Find the first zero byte scanning backwards
 	for i = len(b) - 1; i >= 0; i-- {
 		if b[i] != 0 {
 			break

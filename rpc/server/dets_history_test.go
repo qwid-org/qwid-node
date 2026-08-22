@@ -54,20 +54,20 @@ func TestHandleDETSFillsTxHistory(t *testing.T) {
 	handleDETS(addr[:], &reply)
 
 	if len(reply) < 2 || string(reply[:2]) != "AC" {
-		t.Fatalf("odpowiedź DETS = %q, oczekiwano prefiksu AC", reply[:2])
+		t.Fatalf("DETS reply = %q, expected the AC prefix", reply[:2])
 	}
 	acc := account.Account{}
 	if err := acc.Unmarshal(reply[2:]); err != nil {
 		t.Fatalf("Unmarshal odpowiedzi DETS: %v", err)
 	}
 	if len(acc.TransactionsSender) != 1 || acc.TransactionsSender[0] != sent {
-		t.Fatalf("wysłane w odpowiedzi DETS = %v, oczekiwano [%x] - widok szczegółów adresu "+
-			"pokazywałby tylko liczniki bez transakcji", acc.TransactionsSender, sent[:4])
+		t.Fatalf("sent list in the DETS reply = %v, expected [%x] - the address detail view "+
+			"would show only counters and no transactions", acc.TransactionsSender, sent[:4])
 	}
 	if len(acc.TransactionsRecipient) != 1 || acc.TransactionsRecipient[0] != recv {
-		t.Fatalf("odebrane w odpowiedzi DETS = %v, oczekiwano [%x]", acc.TransactionsRecipient, recv[:4])
+		t.Fatalf("received list in the DETS reply = %v, expected [%x]", acc.TransactionsRecipient, recv[:4])
 	}
 	if acc.SentCount != 1 || acc.ReceivedCount != 1 {
-		t.Fatalf("liczniki = %d/%d, oczekiwano 1/1", acc.SentCount, acc.ReceivedCount)
+		t.Fatalf("counters = %d/%d, expected 1/1", acc.SentCount, acc.ReceivedCount)
 	}
 }

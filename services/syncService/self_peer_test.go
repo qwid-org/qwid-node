@@ -34,13 +34,13 @@ func TestRecordPeerHeightClaimIgnoresSelf(t *testing.T) {
 		peerHeightClaimsMutex.RLock()
 		defer peerHeightClaimsMutex.RUnlock()
 		if _, ok := peerHeightClaims[loopback]; ok {
-			t.Fatal("deklaracja wysokości z 127.0.0.1 została zapisana jako peer")
+			t.Fatal("a height claim from 127.0.0.1 was recorded as a peer")
 		}
 		if _, ok := peerHeightClaims[tcpip.MyIP]; ok {
-			t.Fatal("deklaracja wysokości z własnego adresu została zapisana jako peer")
+			t.Fatal("a height claim from our own address was recorded as a peer")
 		}
 		if len(peerHeightClaims) != 1 {
-			t.Fatalf("zapisanych deklaracji = %d, oczekiwano 1 (tylko prawdziwy peer)", len(peerHeightClaims))
+			t.Fatalf("recorded claims = %d, expected 1 (the real peer only)", len(peerHeightClaims))
 		}
 	})
 }
@@ -62,10 +62,10 @@ func TestRequestHeadersFromPeersAheadIgnoresSelfClaim(t *testing.T) {
 	}, func() {
 		sent, live := requestHeadersFromPeersAhead(common.GetHeight())
 		if sent != 0 {
-			t.Fatalf("wysłanych zapytań = %d, oczekiwano 0 - węzeł pyta sam siebie", sent)
+			t.Fatalf("requests sent = %d, expected 0 - the node is querying itself", sent)
 		}
 		if live != 1 {
-			t.Fatalf("żywych deklaracji = %d, oczekiwano 1 (własne adresy się nie liczą)", live)
+			t.Fatalf("live claims = %d, expected 1 (our own addresses do not count)", live)
 		}
 	})
 }
@@ -84,7 +84,7 @@ func TestNetworkHeightIgnoresSelfClaim(t *testing.T) {
 		tcpip.MyIP: claim(100180, time.Second),
 	}, func() {
 		if got := networkHeight(); got != 23 {
-			t.Fatalf("networkHeight() = %d, oczekiwano 23 - same własne deklaracje to brak peerów", got)
+			t.Fatalf("networkHeight() = %d, expected 23 - only our own claims means no peers", got)
 		}
 	})
 }
@@ -104,28 +104,28 @@ func TestStallRewindUseful(t *testing.T) {
 		wantLive   int
 	}{
 		{
-			name:   "brak deklaracji",
+			name:   "no claims",
 			claims: map[[4]byte]peerHeightClaim{},
 		},
 		{
-			name:   "tylko własna deklaracja z pętli zwrotnej",
+			name:   "only our own loopback claim",
 			claims: map[[4]byte]peerHeightClaim{loopback: claim(100180, time.Second)},
 		},
 		{
-			name:   "tylko własna deklaracja z NODE_IP",
+			name:   "only our own claim from NODE_IP",
 			claims: map[[4]byte]peerHeightClaim{{10, 0, 0, 7}: claim(100180, time.Second)},
 		},
 		{
-			name:     "peer żywy, ale nie wyżej",
+			name:     "peer alive but not ahead",
 			claims:   map[[4]byte]peerHeightClaim{{1, 2, 3, 4}: claim(100178, time.Second)},
 			wantLive: 1,
 		},
 		{
-			name:   "peer wyżej, ale wygasły",
+			name:   "peer ahead but expired",
 			claims: map[[4]byte]peerHeightClaim{{1, 2, 3, 4}: claim(110000, 2*ClaimExpiryDuration)},
 		},
 		{
-			name:       "prawdziwy peer wyżej",
+			name:       "a real peer ahead",
 			claims:     map[[4]byte]peerHeightClaim{{1, 2, 3, 4}: claim(110000, time.Second)},
 			wantUseful: true,
 			wantLive:   1,
@@ -137,10 +137,10 @@ func TestStallRewindUseful(t *testing.T) {
 			withClaims(t, tc.claims, func() {
 				useful, live := stallRewindUseful(100178)
 				if useful != tc.wantUseful {
-					t.Fatalf("stallRewindUseful() = %v, oczekiwano %v", useful, tc.wantUseful)
+					t.Fatalf("stallRewindUseful() = %v, expected %v", useful, tc.wantUseful)
 				}
 				if live != tc.wantLive {
-					t.Fatalf("żywych deklaracji = %d, oczekiwano %d", live, tc.wantLive)
+					t.Fatalf("live claims = %d, expected %d", live, tc.wantLive)
 				}
 			})
 		})
@@ -163,11 +163,11 @@ func TestStallWatchdogDoesNotRewindWithSelfClaimOnly(t *testing.T) {
 	})
 
 	if got := common.GetHeight(); got != 100178 {
-		t.Fatalf("height = %d, oczekiwano 100178 - cofnięto łańcuch bez peera, który mógłby odesłać batch", got)
+		t.Fatalf("height = %d, expected 100178 - the chain was rewound with no peer able to send the batch back", got)
 	}
 	// The clock must be re-armed, or the "nothing to ask" message would repeat on
 	// every pass of the send loop instead of once per timeout.
 	if !progress.since.Equal(now.Add(2 * SyncStallTimeout)) {
-		t.Fatalf("zegar zastoju = %v, oczekiwano przestawienia na %v", progress.since, now.Add(2*SyncStallTimeout))
+		t.Fatalf("stall clock = %v, expected it to be reset to %v", progress.since, now.Add(2*SyncStallTimeout))
 	}
 }

@@ -22,7 +22,7 @@ func TestRequestHeadersFromPeersAheadCountsLiveClaims(t *testing.T) {
 		wantLive int
 	}{
 		{
-			name:     "brak deklaracji",
+			name:     "no claims",
 			claims:   map[[4]byte]peerHeightClaim{},
 			wantSent: 0,
 			wantLive: 0,
@@ -34,13 +34,13 @@ func TestRequestHeadersFromPeersAheadCountsLiveClaims(t *testing.T) {
 			wantLive: 0,
 		},
 		{
-			name:     "jeden peer wyżej",
+			name:     "one peer ahead",
 			claims:   map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)},
 			wantSent: 1,
 			wantLive: 1,
 		},
 		{
-			name: "dwóch peerów wyżej",
+			name: "two peers ahead",
 			claims: map[[4]byte]peerHeightClaim{
 				{1}: claim(105000, time.Second),
 				{2}: claim(105001, time.Second),
@@ -49,13 +49,13 @@ func TestRequestHeadersFromPeersAheadCountsLiveClaims(t *testing.T) {
 			wantLive: 2,
 		},
 		{
-			name:     "peer żywy, ale nie wyżej od nas",
+			name:     "peer alive but not ahead of us",
 			claims:   map[[4]byte]peerHeightClaim{{1}: claim(400, time.Second)},
 			wantSent: 0,
 			wantLive: 1,
 		},
 		{
-			name: "tylko peer wyżej dostaje zapytanie",
+			name: "only a peer that is ahead is queried",
 			claims: map[[4]byte]peerHeightClaim{
 				{1}: claim(400, time.Second),
 				{2}: claim(105000, time.Second),
@@ -70,10 +70,10 @@ func TestRequestHeadersFromPeersAheadCountsLiveClaims(t *testing.T) {
 			withClaims(t, tc.claims, func() {
 				sent, live := requestHeadersFromPeersAhead(common.GetHeight())
 				if sent != tc.wantSent {
-					t.Fatalf("wysłanych zapytań = %d, oczekiwano %d", sent, tc.wantSent)
+					t.Fatalf("requests sent = %d, expected %d", sent, tc.wantSent)
 				}
 				if live != tc.wantLive {
-					t.Fatalf("żywych deklaracji = %d, oczekiwano %d", live, tc.wantLive)
+					t.Fatalf("live claims = %d, expected %d", live, tc.wantLive)
 				}
 			})
 		})
@@ -103,6 +103,6 @@ func TestRequestHeadersFromPeersAheadDoesNotDeadlock(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("requestHeadersFromPeersAhead zakleszczyło się na peerHeightClaimsMutex")
+		t.Fatal("requestHeadersFromPeersAhead deadlocked on peerHeightClaimsMutex")
 	}
 }

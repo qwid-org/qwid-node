@@ -57,25 +57,25 @@ func TestSnapshotHeightsWithGaps(t *testing.T) {
 
 	sa := CreateStateDB()
 	if got, err := sa.LastStoredHeight(); err != nil || got != 12 {
-		t.Fatalf("LastStoredHeight() = %d, %v; oczekiwano 12 mimo dziur 1-4 i 6-11", got, err)
+		t.Fatalf("LastStoredHeight() = %d, %v; expected 12 despite the gaps 1-4 and 6-11", got, err)
 	}
 	if got, err := sa.ClosestStoredHeight(11); err != nil || got != 5 {
-		t.Fatalf("ClosestStoredHeight(11) = %d, %v; oczekiwano 5", got, err)
+		t.Fatalf("ClosestStoredHeight(11) = %d, %v; expected 5", got, err)
 	}
 	if got, err := sa.ClosestStoredHeight(4); err != nil || got != 0 {
-		t.Fatalf("ClosestStoredHeight(4) = %d, %v; oczekiwano 0", got, err)
+		t.Fatalf("ClosestStoredHeight(4) = %d, %v; expected 0", got, err)
 	}
 	if got, err := sa.ClosestStoredHeight(12); err != nil || got != 12 {
-		t.Fatalf("ClosestStoredHeight(12) = %d, %v; oczekiwano 12 (dokładne trafienie)", got, err)
+		t.Fatalf("ClosestStoredHeight(12) = %d, %v; expected 12 (exact hit)", got, err)
 	}
 
 	loaded := CreateStateDB()
 	h, err := loaded.LoadAtOrBelow(11)
 	if err != nil || h != 5 {
-		t.Fatalf("LoadAtOrBelow(11) = %d, %v; oczekiwano 5", h, err)
+		t.Fatalf("LoadAtOrBelow(11) = %d, %v; expected 5", h, err)
 	}
 	if nonceOf(&loaded) != 105 {
-		t.Fatalf("LoadAtOrBelow(11) wczytał zawartość innego snapshotu: nonce=%d, oczekiwano 105", nonceOf(&loaded))
+		t.Fatalf("LoadAtOrBelow(11) loaded the contents of a different snapshot: nonce=%d, expected 105", nonceOf(&loaded))
 	}
 }
 
@@ -85,10 +85,10 @@ func TestLoadAtOrBelowNothingStored(t *testing.T) {
 	withTempDB(t)
 	sa := CreateStateDB()
 	if _, err := sa.LoadAtOrBelow(100); err == nil {
-		t.Fatal("LoadAtOrBelow bez żadnego snapshotu musi zwrócić błąd")
+		t.Fatal("LoadAtOrBelow with no snapshot at all must return an error")
 	}
 	if got, err := sa.LastStoredHeight(); err != nil || got != -1 {
-		t.Fatalf("LastStoredHeight() = %d, %v; oczekiwano -1", got, err)
+		t.Fatalf("LastStoredHeight() = %d, %v; expected -1", got, err)
 	}
 }
 
@@ -108,12 +108,12 @@ func TestRemoveStoredAbove(t *testing.T) {
 		t.Fatalf("RemoveStoredAbove(5): %v", err)
 	}
 	if got, err := sa.LastStoredHeight(); err != nil || got != 5 {
-		t.Fatalf("po RemoveStoredAbove(5) LastStoredHeight() = %d, %v; oczekiwano 5", got, err)
+		t.Fatalf("after RemoveStoredAbove(5), LastStoredHeight() = %d, %v; expected 5", got, err)
 	}
 	// The kept snapshots must still load.
 	loaded := CreateStateDB()
 	if h, err := loaded.LoadAtOrBelow(100); err != nil || h != 5 {
-		t.Fatalf("LoadAtOrBelow(100) po pruningu = %d, %v; oczekiwano 5", h, err)
+		t.Fatalf("LoadAtOrBelow(100) after pruning = %d, %v; expected 5", h, err)
 	}
 }
 
@@ -125,17 +125,17 @@ func TestChangedSinceStoreLifecycle(t *testing.T) {
 
 	sa := stateWithNonce(1)
 	if sa.ChangedSinceStore() {
-		t.Fatal("świeży stan nie może być oznaczony jako zmieniony")
+		t.Fatal("a fresh state must not be marked changed")
 	}
 	sa.MarkChanged()
 	if !sa.ChangedSinceStore() {
-		t.Fatal("MarkChanged nie ustawił flagi")
+		t.Fatal("MarkChanged did not set the flag")
 	}
 	if err := sa.Store(3); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
 	if sa.ChangedSinceStore() {
-		t.Fatal("udany Store musi wyzerować flagę - inaczej każdy blok zapisywałby snapshot")
+		t.Fatal("a successful Store must clear the flag - otherwise every block would write a snapshot")
 	}
 
 	sa.MarkChanged()
@@ -143,6 +143,6 @@ func TestChangedSinceStoreLifecycle(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if sa.ChangedSinceStore() {
-		t.Fatal("udany Load musi wyzerować flagę - pamięć jest wtedy równa dyskowi")
+		t.Fatal("a successful Load must clear the flag - memory then equals disk")
 	}
 }

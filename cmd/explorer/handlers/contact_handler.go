@@ -9,6 +9,17 @@ import (
 	"strings"
 )
 
+// Size limits for the contact form. The rate limit in cmd/explorer/ratelimit.go
+// bounds how often a client may submit; these bound how large one submission
+// may be.
+const (
+	maxContactBody    = 64 * 1024
+	maxContactName    = 200
+	maxContactEmail   = 320 // RFC 5321 maximum path length
+	maxContactSubject = 300
+	maxContactMessage = 10000
+)
+
 // mailConfig is where the contact form posts. Amazon SES rather than Gmail:
 // the domain already sends through SES (its SPF record is
 // "v=spf1 include:amazonses.com ~all"), and relaying visitor messages through
@@ -76,6 +87,11 @@ func SendContact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap the request body before decoding it. Without this the decoder will
+	// read whatever is sent, so a single POST could allocate arbitrary memory
+	// and, if it got past validation, hand SES a message of that size.
+	r.Body = http.MaxBytesReader(w, r.Body, maxContactBody)
+
 	var req struct {
 		Name    string `json:"name"`
 		Email   string `json:"email"`
@@ -105,6 +121,14 @@ func SendContact(w http.ResponseWriter, r *http.Request) {
 	if strings.ContainsAny(req.Email, "\r\n") || strings.ContainsAny(req.Subject, "\r\n") ||
 		strings.ContainsAny(req.Name, "\r\n") {
 		jsonError(w, "Invalid characters in input", http.StatusBadRequest)
+		return
+	}
+	// Bound each field independently of the body cap. A message within the
+	// size limit can still carry a header line long enough to be mangled or
+	// rejected downstream, and there is no legitimate 60 KB subject line.
+	if len(req.Name) > maxContactName || len(req.Email) > maxContactEmail ||
+		len(req.Subject) > maxContactSubject || len(req.Message) > maxContactMessage {
+		jsonError(w, "Input too long", http.StatusBadRequest)
 		return
 	}
 

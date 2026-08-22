@@ -14,7 +14,7 @@ import (
 func TestMatchesOverwriteConfirmationRejectsCasualAnswers(t *testing.T) {
 	for _, answer := range []string{"", "y", "yes", "Yes", "ok", "overwrite", "overwrite wallet", "overwrite wallet 1"} {
 		if matchesOverwriteConfirmation(answer, 0) {
-			t.Fatalf("odpowiedź %q potwierdziła nadpisanie portfela 0", answer)
+			t.Fatalf("answer %q confirmed overwriting wallet 0", answer)
 		}
 	}
 }
@@ -22,14 +22,14 @@ func TestMatchesOverwriteConfirmationRejectsCasualAnswers(t *testing.T) {
 func TestMatchesOverwriteConfirmationAcceptsExactPhrase(t *testing.T) {
 	for _, answer := range []string{"overwrite wallet 0", "  OVERWRITE   Wallet 0 "} {
 		if !matchesOverwriteConfirmation(answer, 0) {
-			t.Fatalf("odrzucono poprawne potwierdzenie %q", answer)
+			t.Fatalf("a valid confirmation %q was rejected", answer)
 		}
 	}
 	if !matchesOverwriteConfirmation("overwrite wallet 7", 7) {
-		t.Fatal("odrzucono poprawne potwierdzenie dla portfela 7")
+		t.Fatal("a valid confirmation for wallet 7 was rejected")
 	}
 	if matchesOverwriteConfirmation("overwrite wallet 7", 70) {
-		t.Fatal("potwierdzenie dla portfela 7 zaakceptowane dla portfela 70")
+		t.Fatal("a confirmation for wallet 7 was accepted for wallet 70")
 	}
 }
 
@@ -43,6 +43,6 @@ func TestWalletFilePathOfMatchesStoreJSON(t *testing.T) {
 	got := walletFilePathOf(&w)
 	want := filepath.Join(w.HomePath, "wallet3.json")
 	if got != want {
-		t.Fatalf("walletFilePathOf = %q, oczekiwano %q", got, want)
+		t.Fatalf("walletFilePathOf = %q, expected %q", got, want)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	_ "net/http/pprof"
 	"os"
@@ -81,6 +82,8 @@ func main() {
 	// Initialize wallet
 	logger.GetLogger().Println("Initializing wallet...")
 	wallet.InitActiveWallet(0, string(password), common.SigName(), common.SigName2())
+
+	printGenesisKeys()
 
 	// Initialize genesis block
 	logger.GetLogger().Println("Initializing genesis block for setting init params...")
@@ -318,6 +321,39 @@ QF:
 // into the network.
 const bootstrapRetryInterval = 15 * time.Second
 
+// printGenesisKeys writes this wallet's two public keys and their addresses as
+// hex, in the exact encoding genesis/config/*.json expects.
+//
+// The wallet file cannot be used as the source directly: it stores a PubKey
+// whose ByteValue is a []byte, which encoding/json writes as base64, while
+// genesis.storeGenesisPubKey reads its pub_key field with hex.DecodeString.
+// Copying the key out of the wallet file therefore produces a config that
+// aborts the node at startup. Printing it here in the target encoding removes
+// the conversion step, and the guesswork, entirely.
+//
+// This runs before genesis.InitGenesis on purpose: the operator needs these
+// values precisely when the genesis config is still wrong, which is exactly
+// when InitGenesis is about to abort.
+func printGenesisKeys() {
+	w := wallet.GetActiveWallet()
+	if w == nil {
+		logger.GetLogger().Println("no active wallet — cannot print genesis keys")
+		return
+	}
+
+	log := logger.GetLogger()
+	log.Println("=========== GENESIS KEYS (hex — paste straight into genesis config) ===========")
+	log.Printf("  \"account\":   \"%s\"", w.Account1.Address.GetHex())
+	log.Printf("  \"pub_key\":   \"%s\"   (%s)", hex.EncodeToString(w.Account1.PublicKey.ByteValue), w.SigName)
+	log.Printf("  \"pub_key_2\": \"%s\"   (%s)", hex.EncodeToString(w.Account2.PublicKey.ByteValue), w.SigName2)
+	// The secondary key has an address of its own, derived with the non-primary
+	// flag. It is printed for reference only — genesis has no field for it, and
+	// its "account" must be the address of the PRIMARY key above, because
+	// storeGenesisPubKey derives the account from pub_key with primary=true.
+	log.Printf("  (secondary key address, not a genesis field: %s)", w.Account2.Address.GetHex())
+	log.Println("==============================================================================")
+}
+
 // parsePeerIPs extracts bootstrap peer addresses from the command line. Flags
 // (anything starting with "-") are skipped; every remaining argument may hold one
 // address or a comma-separated list, so both of these work:
@@ -357,13 +393,13 @@ func parsePeerIPs(args []string) ([][4]byte, error) {
 func parseIPv4(s string) ([4]byte, error) {
 	parts := strings.Split(s, ".")
 	if len(parts) != 4 {
-		return [4]byte{}, fmt.Errorf("nieprawidłowy adres IP %q: oczekiwano czterech części", s)
+		return [4]byte{}, fmt.Errorf("invalid IP address %q: expected four parts", s)
 	}
 	var ip [4]byte
 	for i, p := range parts {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 0 || n > 255 {
-			return [4]byte{}, fmt.Errorf("nieprawidłowa część adresu IP %q w %q", p, s)
+			return [4]byte{}, fmt.Errorf("invalid IP address part %q in %q", p, s)
 		}
 		ip[i] = byte(n)
 	}
