@@ -20,7 +20,13 @@ func withTempDB(t *testing.T) {
 	db := &database.BlockchainDB{}
 	pdb, err := db.InitPermanent(filepath.Join(t.TempDir(), "blockchain"))
 	if err != nil {
-		t.Skipf("RocksDB unavailable: %v", err)
+		// Fatalf, not Skipf: this package cannot link without RocksDB, so a
+		// failure here is never a false alarm from an environment lacking it -
+		// see TestGenerateSyncMsgHeightCarriesGenesis, the only proof the GB tag
+		// reaches the wire, which this helper guards. A skip would be invisible
+		// in a plain `go test ./...` summary and could let that coverage
+		// silently vanish.
+		t.Fatalf("RocksDB unavailable: %v", err)
 	}
 	saved := database.MainDB
 	database.MainDB = pdb

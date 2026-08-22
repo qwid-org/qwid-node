@@ -1,7 +1,7 @@
 # Genesis handshake: refuse to sync with a peer from another chain
 
 Date: 2026-08-22
-Status: approved, not yet implemented
+Status: implemented, on branch feat/genesis-handshake
 
 ## Problem
 
@@ -80,9 +80,22 @@ peer discovery.
 2. Do not call `recordPeerHeightClaim` — this is the step that otherwise inflates
    `networkHeight()` and triggers the rewind.
 3. Disconnect the peer.
-4. Log once per peer address, at warning level, naming both hashes. This is a
+4. Log once per peer address, naming both hashes, at most once per
+   `genesisRejectionLogInterval` (`shouldLogRejection` in `onmessage.go`, ten
+   minutes: far longer than a rejected peer's ~10s reconnect cadence so it
+   actually suppresses the churn, short enough that a persistent
+   misconfiguration is still visible within the hour). Without this, `hi`'s
+   roughly-once-a-second broadcast combined with the peer reconnecting after
+   every drop turns one misconfigured or foreign peer into an endless
+   drop-reconnect-reject loop logging forever; the per-address timestamp map
+   is pruned of entries older than the interval on every call, so it cannot
+   grow without bound under a flood of forged source addresses. This is a
    configuration error as often as it is a stranger, and the operator needs to
-   see which is which.
+   see which is which. `logger.GetLogger()` is a bare `*log.Logger` with no
+   levels, so "at warning level" (an earlier draft's wording) is not
+   achievable literally; the line instead carries an explicit `WARNING:`
+   prefix, matching this file's existing convention (e.g. the `WARNING:
+   Second block hash mismatch...` line elsewhere in `onmessage.go`).
 
 No ban list entry, per the decision above.
 
@@ -90,6 +103,14 @@ No ban list entry, per the decision above.
 
 Treated exactly as a mismatch, with a distinct log message naming the peer as
 running an unsupported version, so the two causes are told apart in the log.
+
+### What this does not protect against
+
+The `GB` tag is unauthenticated and a genesis hash is public, so a deliberate
+attacker simply echoes back whatever hash the victim sent — this check is a
+strong barrier against accidents and misconfiguration (a testnet reset, the
+wrong `genesis.json`) and a poor one against an adversary who wants to look
+genuine.
 
 ## Testing
 
@@ -107,10 +128,15 @@ The existing `self_peer_test.go` already builds `hi` messages and asserts on
 
 ## Rollout
 
-Because peers without `GB` are rejected, an upgraded node will not sync with a
-v0.1.2 node in either direction. Upgrade every node in one pass rather than
-gradually, or the network partitions along version lines while both halves look
-healthy from the inside.
+The genesis check runs only in `case "hi"` — `gh` and `sh` are unguarded — so the
+split this causes is asymmetric, not symmetric in both directions. An upgraded
+node rejects a v0.1.2 peer's `hi` (no height claim recorded, no peers dialled
+from it, connection dropped), so it will not *initiate* sync with one. But a
+v0.1.2 node can still pull headers and blocks from an upgraded node via `gh`/`sh`
+if it initiates them, since those message types carry no `GB` tag to check.
+Upgrade every node in one pass rather than gradually — a gradual rollout still
+partitions the network along version lines while both halves look healthy from
+the inside, even though the partition is not symmetric.
 
 ## Out of scope
 

@@ -117,6 +117,43 @@ func peerGenesisAccepted(txn map[[2]byte][][]byte) (bool, string) {
 	return true, ""
 }
 
+var (
+	genesisRejectionLogTimes      = make(map[[4]byte]time.Time)
+	genesisRejectionLogTimesMutex sync.Mutex
+	// genesisRejectionLogInterval bounds how often a genesis-mismatch rejection
+	// from the same address is logged. 'hi' is broadcast roughly every second
+	// per peer (sendSyncMsgInLoop), and DropTopicConnection does not stop the
+	// peer from reconnecting, so a misconfigured or foreign peer's reconnect
+	// cadence is on the order of ten seconds - logging every rejection turns
+	// one bad peer into an endless two-line-per-cycle churn. Ten minutes is far
+	// longer than that cadence (so it actually suppresses the churn) while
+	// still surfacing a persistent misconfiguration well within an hour of
+	// someone tailing the log.
+	genesisRejectionLogInterval = 10 * time.Minute
+)
+
+// shouldLogRejection reports whether a genesis-mismatch rejection from addr is
+// worth logging now, and if so records that it was, so the next call for the
+// same address within genesisRejectionLogInterval returns false. It also
+// prunes entries older than the interval - the same "walk and delete expired"
+// approach cleanupExpiredClaims uses for peerHeightClaims - so a flood of
+// rejections from forged source addresses cannot grow this map without bound.
+func shouldLogRejection(addr [4]byte) bool {
+	now := time.Now()
+	genesisRejectionLogTimesMutex.Lock()
+	defer genesisRejectionLogTimesMutex.Unlock()
+	for a, t := range genesisRejectionLogTimes {
+		if now.Sub(t) > genesisRejectionLogInterval {
+			delete(genesisRejectionLogTimes, a)
+		}
+	}
+	if last, ok := genesisRejectionLogTimes[addr]; ok && now.Sub(last) < genesisRejectionLogInterval {
+		return false
+	}
+	genesisRejectionLogTimes[addr] = now
+	return true
+}
+
 // shouldSyncToHeight determines if we should sync based on peer claims
 // Returns true if sync should proceed, and the validated target height
 func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
@@ -380,7 +417,9 @@ func OnMessage(addr [4]byte, m []byte) {
 		// check placed next to the height logic would reject the peer's height
 		// but adopt its network first.
 		if ok, reason := peerGenesisAccepted(txn); !ok {
-			logger.GetLogger().Printf("refusing sync with %v: %s", addr, reason)
+			if shouldLogRejection(addr) {
+				logger.GetLogger().Printf("WARNING: refusing sync with %v: %s", addr, reason)
+			}
 			tcpip.DropTopicConnection(tcpip.SyncTopic, addr)
 			return
 		}

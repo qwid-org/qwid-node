@@ -130,6 +130,14 @@ exchange other sync messages if an upgraded node initiates them. Upgrade every
 node in one pass; a gradual rollout partitions the network along version lines
 while both halves look healthy from the inside.
 
+The `GB` tag is unauthenticated and a genesis hash is public, so this guards
+against accidents and misconfiguration (a testnet reset, the wrong
+`genesis.json`) rather than a deliberate attacker, who can simply echo back
+whatever hash we send. A rejection is logged at most once per peer address
+per ten minutes (`shouldLogRejection` in `onmessage.go`), with a `WARNING:`
+prefix — otherwise `hi`'s roughly-once-a-second broadcast, combined with the
+peer reconnecting after every drop, would log the same rejection forever.
+
 ## Configuration
 
 Runtime config in `~/.qwid/.env`:
