@@ -81,6 +81,17 @@ func RecycleTopicConnection(topic [2]byte, ip [4]byte) {
 	}
 }
 
+// DropTopicConnection closes and unregisters every connection to ip on topic and
+// - unlike RecycleTopicConnection - does NOT ask discovery to re-establish it.
+//
+// This is for turning a peer away on purpose: one whose genesis block is not
+// ours has nothing we want, now or on retry. Recycling such a peer would dial it
+// straight back and spin.
+func DropTopicConnection(topic [2]byte, ip [4]byte) {
+	logger.GetLogger().Printf("dropping connection to %v on topic %c%c", ip, topic[0], topic[1])
+	closeAndRemovePeerTopic(topic, ip)
+}
+
 func closeAndRemovePeerTopic(topic [2]byte, ip [4]byte) [][]byte {
 	PeersMutex.Lock()
 	defer PeersMutex.Unlock()
