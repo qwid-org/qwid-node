@@ -104,6 +104,24 @@ Open these TCP ports: 19023 (transactions), 18023 (nonce), 17023 (self-nonce), 1
 
 Internal ports (localhost only): 19009 (wallet-node RPC), 8000 (Qt requirements)
 
+### Genesis handshake
+
+Sync peers exchange their genesis block hash in the `hi` message under the `GB`
+tag, and a node refuses to sync with a peer whose hash differs — the peer is
+dropped, its advertised peers are not dialled, and, most importantly, its height
+claim is not recorded (an unrecorded claim cannot inflate `networkHeight()` and
+send the stall watchdog rewinding the chain).
+
+`ChainID` (int16, 23) is checked one layer down in `message.BaseMessage`, but it
+only says "some QWID chain": two networks started from different genesis configs
+share it. `ChainID` cannot itself be widened to the genesis hash — it is part of
+the signed bytes of every transaction and is the EVM chain id under EIP-155.
+
+**A peer that sends no `GB` tag is rejected.** Nodes running v0.1.2 or earlier
+will therefore not sync with upgraded ones in either direction. Upgrade every
+node in one pass; a gradual rollout partitions the network along version lines
+while both halves look healthy from the inside.
+
 ## Configuration
 
 Runtime config in `~/.qwid/.env`:
