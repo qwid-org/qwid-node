@@ -165,6 +165,23 @@ func scaleToInt64(amount float64, decimals int) (int64, bool) {
 	return int64(scaled), true
 }
 
+// scaleTokenPrice converts a whole-unit price into the int64 the DEX account
+// stores, scaling by 10^(coinDecimals+tokenDecimals).
+//
+// This value is serialised into consensus state (account/dexAccount.go), so an
+// implementation-defined `int64(hugeFloat)` here is not merely a wrong number:
+// amd64 yields the minimum int64 and arm64 saturates to the maximum, so two
+// nodes on different architectures would write different state for the same
+// block and fork. The multiplier is the SUM of the decimals, which leaves very
+// little headroom — 10^16 for an 8-decimal token, so any price at or above
+// ~922 overflows.
+//
+// The two decimal counts are widened to int before being added. The callers'
+// original expression added them as uint8, which wraps above 247.
+func scaleTokenPrice(price float64, coinDecimals, tokenDecimals uint8) (int64, bool) {
+	return scaleToInt64(price, int(coinDecimals)+int(tokenDecimals))
+}
+
 func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {
 	// 2 - adding liquidity, 3 - buy trade, 4 -sell trade, 5 - withdraw token, 6 - withdraw KURA (5,6 inactive, just withdraw is selling opposite)
 	amountToken := common.GetInt64FromByte(tx.TxData.OptData)
@@ -205,22 +222,34 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 
 	switch operation {
 	case 2: // add liquidity
-		amountCoinInt64 = int64(-amountCoinFloat * math.Pow10(int(common.Decimals)))
-		amountTokenInt64 = int64(-amountTokenFloat * math.Pow10(int(ti.Decimals)))
+		c, okC := scaleToInt64(-amountCoinFloat, int(common.Decimals))
+		tkn, okT := scaleToInt64(-amountTokenFloat, int(ti.Decimals))
+		if !okC || !okT {
+			return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex add liquidity: amount does not fit in int64")
+		}
+		amountCoinInt64, amountTokenInt64 = c, tkn
 		price = common.RoundToken(amountCoinFloat/amountTokenFloat, int(common.Decimals+ti.Decimals))
 	case 5: // withdraw token
 		if poolPrice > 0 {
 			price = poolPrice
 			amount := common.RoundCoin(poolPrice * amountTokenFloat)
-			amountCoinInt64 = int64(amount * math.Pow10(int(common.Decimals)))
-			amountTokenInt64 = int64(amountTokenFloat * math.Pow10(int(ti.Decimals)))
+			c, okC := scaleToInt64(amount, int(common.Decimals))
+			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
+			if !okC || !okT {
+				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex withdraw token: amount does not fit in int64")
+			}
+			amountCoinInt64, amountTokenInt64 = c, tkn
 		}
 	case 6: // withdraw Coin
 		if poolPrice > 0 {
 			price = poolPrice
 			amount := common.RoundToken(1.0/poolPrice*amountCoinFloat, int(ti.Decimals))
-			amountTokenInt64 = int64(amount * math.Pow10(int(ti.Decimals)))
-			amountCoinInt64 = int64(amountCoinFloat * math.Pow10(int(common.Decimals)))
+			tkn, okT := scaleToInt64(amount, int(ti.Decimals))
+			c, okC := scaleToInt64(amountCoinFloat, int(common.Decimals))
+			if !okC || !okT {
+				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex withdraw coin: amount does not fit in int64")
+			}
+			amountTokenInt64, amountCoinInt64 = tkn, c
 		}
 	case 3: //buy
 		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
@@ -228,10 +257,11 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 			amount := common.RoundCoin(-price * amountTokenFloat)
 			c, okC := scaleToInt64(amount, int(common.Decimals))
 			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
-			if okC && okT {
-				amountCoinInt64 = c
-				amountTokenInt64 = tkn
+			if !okC || !okT {
+				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex trade: amount does not fit in int64")
 			}
+			amountCoinInt64 = c
+			amountTokenInt64 = tkn
 		}
 	case 4: //sell
 		amountTokenFloat *= -1
@@ -240,13 +270,23 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 			amount := common.RoundCoin(-price * amountTokenFloat)
 			c, okC := scaleToInt64(amount, int(common.Decimals))
 			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
-			if okC && okT {
-				amountCoinInt64 = c
-				amountTokenInt64 = tkn
+			if !okC || !okT {
+				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex trade: amount does not fit in int64")
 			}
+			amountCoinInt64 = c
+			amountTokenInt64 = tkn
 		}
 	default:
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("wrong operation on dex")
+	}
+
+	// Reject here, while we can still refuse the transaction. EvaluateSCForBlock
+	// scales this same price into accDex.TokenPrice when the block is applied,
+	// and its only failure mode is rejecting the whole block — which would let
+	// one crafted transaction kill every block carrying it. Validating at
+	// transaction level means the value provably fits by the time it is stored.
+	if _, ok := scaleTokenPrice(price, common.Decimals, ti.Decimals); !ok {
+		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex: token price %v does not fit in int64 at %d decimals", price, int(common.Decimals)+int(ti.Decimals))
 	}
 
 	senderAccount, exist := account.GetAccountByAddressBytes(tx.TxParam.Sender.GetBytes())
@@ -397,7 +437,16 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 
 			accDex := account.GetDexAccountByAddressBytes(t.ContractAddress.GetBytes())
 
-			accDex.TokenPrice = int64(price * math.Pow10(int(common.Decimals+ti.Decimals)))
+			// GenerateOptDataDEX above already refused any price that does not
+			// fit, so this cannot fail. Guarded anyway, and on failure the stored
+			// price is left untouched rather than rejecting the block: a
+			// deterministic skip cannot fork the chain, whereas returning false
+			// here would make one transaction invalidate the entire block.
+			if scaledPrice, ok := scaleTokenPrice(price, common.Decimals, ti.Decimals); ok {
+				accDex.TokenPrice = scaledPrice
+			} else {
+				loggerMain.GetLogger().Printf("WARNING: dex token price %v does not fit in int64; keeping the previous stored price", price)
+			}
 
 			if operation == 2 || operation > 4 { // no sell or buy
 				balances := accDex.Balances
