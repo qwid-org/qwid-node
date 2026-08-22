@@ -2,8 +2,11 @@ package syncServices
 
 import (
 	"bytes"
+	"net"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/database"
@@ -35,6 +38,49 @@ func withGenesisHash(t *testing.T, h []byte) {
 	saved := localGenesisHash
 	localGenesisHash = h
 	t.Cleanup(func() { localGenesisHash = saved })
+}
+
+// ppAddrCounter backs freshPPAddr - see its doc comment.
+var ppAddrCounter uint32
+
+// freshPPAddr returns a PP-advertised address that is guaranteed distinct
+// from every previous call in this test binary, including earlier
+// repetitions of the same test under `go test -count=N`: connectingPeers and
+// tcpip's own dial-dedup map (dialing, guarded by beginDial/endDial) are
+// package-level state that persists across repetitions in the same process.
+// Reusing a fixed address risks tcpip's "already active or pending" fast
+// path on a second dial for the same (topic, ip): that path clears the
+// connectingPeers flag from a background goroutine almost immediately,
+// racing the test's synchronous read of it (observed directly: 5 probes of
+// a fixed address gave true,true,true,FALSE,true). A never-before-dialled
+// address instead takes the real dial/connect-refused/retry path, which is
+// bounded below by several seconds of explicit retry backoff in
+// tcpip.StartNewConnection - ample, non-flaky headroom for a check that
+// happens in nanoseconds right after OnMessage returns.
+func freshPPAddr(t *testing.T) []byte {
+	t.Helper()
+	n := atomic.AddUint32(&ppAddrCounter, 1)
+	// Offset away from the low literal addresses (.9, .10, .20 and similar)
+	// already hardcoded elsewhere in this file, and stay inside the
+	// TEST-NET-3 block (RFC 5737) used throughout these tests.
+	return []byte{203, 0, 113, byte(100 + n%150)}
+}
+
+// topicIPKey builds the [2]byte-topic + [4]byte-ip key used both by
+// connectingPeers (the "hi" handler's own dial bookkeeping) and by
+// tcpip.GetPeersConnected.
+func topicIPKey(topic [2]byte, ip []byte) [6]byte {
+	var key [6]byte
+	copy(key[:2], topic[:])
+	copy(key[2:], ip)
+	return key
+}
+
+// ppDialKey is the connectingPeers bookkeeping key the "hi" handler sets
+// synchronously, before spawning the dial goroutine, the instant it decides
+// to connect to an address advertised in PP for the nonce topic.
+func ppDialKey(ip []byte) [6]byte {
+	return topicIPKey(tcpip.NonceTopic, ip)
 }
 
 func TestWithGenesisHashRestores(t *testing.T) {
@@ -122,19 +168,27 @@ func TestPeerGenesisAccepted(t *testing.T) {
 	}
 }
 
-// TestHiWithOurGenesisRecordsHeightClaim is the positive control for the two
+// TestHiWithOurGenesisRecordsHeightClaim is the positive control for the
 // negative tests below. Those only assert that a height claim was NOT
-// recorded, which also passes if the genesis check does not exist at all -
-// any early return in the "hi" handler produces the same "no claim" state.
-// This test proves the opposite path still works: a 'hi' that DOES carry our
-// own genesis hash must still have its height claim recorded, which is what
-// makes the negative tests meaningful evidence of a check that runs and
-// discriminates, not just a handler that stopped recording claims entirely.
+// recorded and a PP-advertised address was NOT dialled, which also passes if
+// the genesis check does not exist at all - any early return in the "hi"
+// handler produces the same "nothing happened" state, and the PP-dial
+// assertion in particular also passes vacuously whenever the PP block is
+// skipped for any unrelated reason (peer cap reached, the address already
+// connected, the address banned). This test proves the opposite path still
+// works end to end: a 'hi' that DOES carry our own genesis hash must still
+// have its height claim recorded AND must still dial an address it
+// advertises in PP. Without this, the two negative tests below are evidence
+// of nothing - they would pass identically against a handler that reached
+// neither code path for reasons that have nothing to do with genesis.
 func TestHiWithOurGenesisRecordsHeightClaim(t *testing.T) {
 	withMyIP(t, [4]byte{10, 0, 0, 7})
 	withGenesisHash(t, bytes.Repeat([]byte{0x11}, 32))
 
 	peer := [4]byte{203, 0, 113, 20}
+	ppAddr := freshPPAddr(t)
+	dialKey := ppDialKey(ppAddr)
+
 	bm := message.BaseMessage{Head: []byte("hi"), ChainID: common.GetChainID()}
 	n := message.TransactionsMessage{
 		BaseMessage:       bm,
@@ -143,61 +197,8 @@ func TestHiWithOurGenesisRecordsHeightClaim(t *testing.T) {
 	n.TransactionsBytes[[2]byte{'L', 'H'}] = [][]byte{common.GetByteInt64(999999)}
 	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{bytes.Repeat([]byte{0x33}, 32)}
 	n.TransactionsBytes[[2]byte{'G', 'B'}] = [][]byte{bytes.Repeat([]byte{0x11}, 32)}
-
-	withClaims(t, map[[4]byte]peerHeightClaim{}, func() {
-		OnMessage(peer, n.GetBytes())
-
-		peerHeightClaimsMutex.RLock()
-		defer peerHeightClaimsMutex.RUnlock()
-		claim, ok := peerHeightClaims[peer]
-		if !ok {
-			t.Fatal("a peer on our own genesis did not have its height claim recorded")
-		}
-		if claim.height != 999999 {
-			t.Fatalf("recorded height = %d, expected 999999", claim.height)
-		}
-	})
-}
-
-// TestHiFromForeignGenesisRecordsNoHeightClaim is the one that matters. The
-// damage a foreign-genesis peer does is not importing its blocks - it is
-// inflating networkHeight() through its height claim, after which the stall
-// watchdog rewinds our chain chasing a height nobody honest can serve. It
-// also proves the second half of the same hole: the handler must not dial a
-// peer advertised in the foreign peer's PP list either, or the foreign
-// network gets seeded into our peer table even while its own height claim is
-// rejected - asserting only one of the two leaves the other half of the hole
-// open.
-func TestHiFromForeignGenesisRecordsNoHeightClaim(t *testing.T) {
-	withMyIP(t, [4]byte{10, 0, 0, 7})
-	withGenesisHash(t, bytes.Repeat([]byte{0x11}, 32))
-
-	peer := [4]byte{203, 0, 113, 9}
-	ppAddr := []byte{203, 0, 113, 99}
-	bm := message.BaseMessage{Head: []byte("hi"), ChainID: common.GetChainID()}
-	n := message.TransactionsMessage{
-		BaseMessage:       bm,
-		TransactionsBytes: map[[2]byte][][]byte{},
-	}
-	n.TransactionsBytes[[2]byte{'L', 'H'}] = [][]byte{common.GetByteInt64(999999)}
-	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{bytes.Repeat([]byte{0x33}, 32)}
-	n.TransactionsBytes[[2]byte{'G', 'B'}] = [][]byte{bytes.Repeat([]byte{0x22}, 32)}
 	n.TransactionsBytes[[2]byte{'P', 'P'}] = [][]byte{ppAddr}
 
-	// dialKey is the bookkeeping key the "hi" handler sets, synchronously and
-	// BEFORE spawning the dial goroutine, the instant it decides to connect to
-	// an address from PP. Checking it - rather than the eventual outcome of a
-	// real network dial to a reserved, non-routable TEST-NET-3 address - is the
-	// least fragile way to observe "was a dial attempted": it needs no network
-	// mocking, and is set unconditionally on the synchronous path that runs
-	// before any goroutine or socket I/O.
-	var dialKey [6]byte
-	copy(dialKey[:2], tcpip.NonceTopic[:])
-	copy(dialKey[2:], ppAddr)
-
-	connectingPeersMutex.Lock()
-	delete(connectingPeers, dialKey)
-	connectingPeersMutex.Unlock()
 	t.Cleanup(func() {
 		connectingPeersMutex.Lock()
 		delete(connectingPeers, dialKey)
@@ -208,17 +209,133 @@ func TestHiFromForeignGenesisRecordsNoHeightClaim(t *testing.T) {
 		OnMessage(peer, n.GetBytes())
 
 		peerHeightClaimsMutex.RLock()
-		if _, ok := peerHeightClaims[peer]; ok {
-			peerHeightClaimsMutex.RUnlock()
+		claim, ok := peerHeightClaims[peer]
+		peerHeightClaimsMutex.RUnlock()
+		if !ok {
+			t.Fatal("a peer on our own genesis did not have its height claim recorded")
+		}
+		if claim.height != 999999 {
+			t.Fatalf("recorded height = %d, expected 999999", claim.height)
+		}
+
+		connectingPeersMutex.Lock()
+		dialed := connectingPeers[dialKey]
+		connectingPeersMutex.Unlock()
+		if !dialed {
+			t.Fatal("a peer on our own genesis did not have its PP-advertised address dialled")
+		}
+	})
+}
+
+// TestHiFromForeignGenesisRejectsPeerEntirely is the one that matters. The
+// damage a foreign-genesis peer does is not importing its blocks - it is
+// inflating networkHeight() through its height claim, after which the stall
+// watchdog rewinds our chain chasing a height nobody honest can serve. This
+// test proves the full rejection, not just one symptom of it:
+//
+//  1. no height claim recorded for the peer;
+//  2. no dial attempted for an address the peer advertised in PP - or the
+//     foreign network gets seeded into our peer table even while its own
+//     height claim is rejected;
+//  3. the existing sync connection to the peer is actually closed and
+//     unregistered (DropTopicConnection ran, not a no-op);
+//  4. no reconnection was queued for it - the distinguishing behaviour
+//     between DropTopicConnection and RecycleTopicConnection. Points 3 and 4
+//     together are what catch a future refactor that swaps back to
+//     RecycleTopicConnection: 3 alone would not, since both functions close
+//     and unregister the connection identically - only the absence of a
+//     requeued reconnect (4) proves Drop, not Recycle, ran;
+//  5. the peer is not added to any ban list - genesis mismatch is a refusal
+//     to sync, not misbehaviour serious enough to ban for.
+func TestHiFromForeignGenesisRejectsPeerEntirely(t *testing.T) {
+	withMyIP(t, [4]byte{10, 0, 0, 7})
+	withGenesisHash(t, bytes.Repeat([]byte{0x11}, 32))
+
+	peer := [4]byte{203, 0, 113, 9}
+	ppAddr := freshPPAddr(t)
+	dialKey := ppDialKey(ppAddr)
+
+	// Seed an existing sync connection for the peer, as if a "hi" handshake
+	// had already brought one up earlier, so the test can prove
+	// DropTopicConnection actually tears it down rather than merely reading
+	// as a no-op that happens to leave no height claim behind either way.
+	conn, peerConn := net.Pipe()
+	t.Cleanup(func() { peerConn.Close() })
+	tcpip.SeedConnectionForTest(tcpip.SyncTopic, peer, conn)
+	t.Cleanup(func() { tcpip.DropTopicConnection(tcpip.SyncTopic, peer) })
+
+	// Swap in a fresh ChanPeer so a queued reconnection - which is exactly
+	// what RecycleTopicConnection, and only RecycleTopicConnection, would
+	// queue - is directly observable.
+	savedChanPeer := tcpip.ChanPeer
+	tcpip.ChanPeer = make(chan []byte, 10)
+	t.Cleanup(func() { tcpip.ChanPeer = savedChanPeer })
+
+	bm := message.BaseMessage{Head: []byte("hi"), ChainID: common.GetChainID()}
+	n := message.TransactionsMessage{
+		BaseMessage:       bm,
+		TransactionsBytes: map[[2]byte][][]byte{},
+	}
+	n.TransactionsBytes[[2]byte{'L', 'H'}] = [][]byte{common.GetByteInt64(999999)}
+	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{bytes.Repeat([]byte{0x33}, 32)}
+	n.TransactionsBytes[[2]byte{'G', 'B'}] = [][]byte{bytes.Repeat([]byte{0x22}, 32)}
+	n.TransactionsBytes[[2]byte{'P', 'P'}] = [][]byte{ppAddr}
+
+	t.Cleanup(func() {
+		connectingPeersMutex.Lock()
+		delete(connectingPeers, dialKey)
+		connectingPeersMutex.Unlock()
+	})
+
+	withClaims(t, map[[4]byte]peerHeightClaim{}, func() {
+		OnMessage(peer, n.GetBytes())
+
+		// 1. no height claim recorded.
+		peerHeightClaimsMutex.RLock()
+		_, hasClaim := peerHeightClaims[peer]
+		peerHeightClaimsMutex.RUnlock()
+		if hasClaim {
 			t.Fatal("a peer on a different genesis had its height claim recorded")
 		}
-		peerHeightClaimsMutex.RUnlock()
 
+		// 2. no dial attempted for its PP-advertised address. dialKey is set
+		// synchronously, before any goroutine or socket I/O, by the same "hi"
+		// handler code this test is otherwise exercising; ppAddr is unique to
+		// this call (see freshPPAddr), so this can only be true here because
+		// the PP block itself was never reached.
 		connectingPeersMutex.Lock()
 		dialed := connectingPeers[dialKey]
 		connectingPeersMutex.Unlock()
 		if dialed {
 			t.Fatal("a peer on a different genesis had a PP-advertised address dialled")
+		}
+
+		// 3. the seeded connection is gone - closed and unregistered. Closing
+		// one end of a net.Pipe makes deadline calls on the OTHER end fail too
+		// (io.ErrClosedPipe), so - exactly as tcpip's own
+		// TestDropTopicConnectionClosesAndUnregisters does - the deadline
+		// error is ignored and only the registration and the write outcome
+		// are asserted.
+		if _, stillRegistered := tcpip.GetPeersConnected(tcpip.SyncTopic)[topicIPKey(tcpip.SyncTopic, peer[:])]; stillRegistered {
+			t.Fatal("a peer on a different genesis kept its sync connection registered")
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+		if _, err := conn.Write([]byte{1}); err == nil {
+			t.Fatal("a peer on a different genesis kept its sync connection open")
+		}
+
+		// 4. no reconnection queued - proves DropTopicConnection ran, not
+		// RecycleTopicConnection.
+		select {
+		case msg := <-tcpip.ChanPeer:
+			t.Fatalf("a peer on a different genesis had a reconnection queued for it: %v", msg)
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		// 5. not banned - a genesis mismatch is a refusal to sync, not
+		// misbehaviour worth banning for.
+		if tcpip.IsIPBanned(peer) {
+			t.Fatal("a peer on a different genesis was banned; genesis mismatch should refuse sync, not ban")
 		}
 	})
 }
