@@ -46,7 +46,7 @@ func TestMultiSignPoolSurvivesRestart(t *testing.T) {
 	conf := multiSignTestTx(t, 2, main.GetHash())
 
 	if !AddMultiSignTransaction(main) || !AddMultiSignTransaction(conf) {
-		t.Fatal("AddMultiSignTransaction odrzucił transakcję")
+		t.Fatal("AddMultiSignTransaction rejected the transaction")
 	}
 
 	// "Restart": fresh in-memory pool, reload from DB.
@@ -56,10 +56,10 @@ func TestMultiSignPoolSurvivesRestart(t *testing.T) {
 	}
 
 	if !PoolTxMultiSign.HasTransaction(main.GetHash().GetBytes()) {
-		t.Fatal("main tx nie przetrwał restartu")
+		t.Fatal("the main tx did not survive a restart")
 	}
 	if !PoolTxMultiSign.HasTransaction(conf.GetHash().GetBytes()) {
-		t.Fatal("potwierdzenie nie przetrwało restartu")
+		t.Fatal("the confirmation did not survive a restart")
 	}
 	// The grouping key must be rebuilt too: PeekTransactions selects by the
 	// main hash's int64 prefix, which is how ProcessTransactionsMultiSign
@@ -67,7 +67,7 @@ func TestMultiSignPoolSurvivesRestart(t *testing.T) {
 	group := PoolTxMultiSign.PeekTransactions(common.MaxTransactionInPool,
 		common.GetInt64FromByte(main.GetHash().GetBytes()))
 	if len(group) != 2 {
-		t.Fatalf("grupa multisig po restarcie ma %d wpisów, oczekiwano 2 (main + potwierdzenie)", len(group))
+		t.Fatalf("the multisig group after restart has %d entries, expected 2 (main + confirmation)", len(group))
 	}
 }
 
@@ -81,7 +81,7 @@ func TestRemoveMultiSignTransactionDropsPersistedCopy(t *testing.T) {
 
 	main := multiSignTestTx(t, 3, common.EmptyHash())
 	if !AddMultiSignTransaction(main) {
-		t.Fatal("AddMultiSignTransaction odrzucił transakcję")
+		t.Fatal("AddMultiSignTransaction rejected the transaction")
 	}
 	RemoveMultiSignTransaction(main.GetHash().GetBytes())
 
@@ -90,6 +90,6 @@ func TestRemoveMultiSignTransactionDropsPersistedCopy(t *testing.T) {
 		t.Fatalf("LoadMultiSignPoolFromDB: %v", err)
 	}
 	if PoolTxMultiSign.HasTransaction(main.GetHash().GetBytes()) {
-		t.Fatal("usunięta transakcja wróciła z bazy po restarcie")
+		t.Fatal("a deleted transaction came back from the database after a restart")
 	}
 }

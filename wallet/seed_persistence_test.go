@@ -41,10 +41,10 @@ func fillAccountsFromSeed(t *testing.T, w *Wallet) {
 func TestSetMnemonicRejectsInvalidPhrase(t *testing.T) {
 	w := newSeedTestWallet(t, 200)
 	if err := w.SetMnemonic([]byte("not a real phrase")); err == nil {
-		t.Fatal("oczekiwano błędu dla nieprawidłowej frazy")
+		t.Fatal("expected an error for an invalid phrase")
 	}
 	if w.HasSeed() {
-		t.Fatal("portfel ma ziarno mimo odrzuconej frazy")
+		t.Fatal("the wallet has a seed even though the phrase was rejected")
 	}
 }
 
@@ -67,11 +67,11 @@ func TestSeededWalletIsReproducibleFromPhrase(t *testing.T) {
 	fillAccountsFromSeed(t, w2)
 
 	if w1.MainAddress.GetHex() != w2.MainAddress.GetHex() {
-		t.Fatalf("ta sama fraza dała różne adresy: %s vs %s",
+		t.Fatalf("the same phrase produced different addresses: %s vs %s",
 			w1.MainAddress.GetHex(), w2.MainAddress.GetHex())
 	}
 	if w1.Account2.Address.GetHex() != w2.Account2.Address.GetHex() {
-		t.Fatal("ta sama fraza dała różne adresy drugiego konta")
+		t.Fatal("the same phrase produced different second-account addresses")
 	}
 }
 
@@ -98,7 +98,7 @@ func TestDifferentPhrasesGiveDifferentWallets(t *testing.T) {
 	fillAccountsFromSeed(t, w2)
 
 	if w1.MainAddress.GetHex() == w2.MainAddress.GetHex() {
-		t.Fatal("różne frazy dały ten sam adres")
+		t.Fatal("different phrases produced the same address")
 	}
 }
 
@@ -116,7 +116,7 @@ func TestMnemonicSurvivesStoreAndLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(w.EncryptedMnemonic) == 0 {
-		t.Fatal("StoreJSON nie zapisał zaszyfrowanej frazy")
+		t.Fatal("StoreJSON did not write the encrypted phrase")
 	}
 
 	loaded, err := LoadJSONFromDir(w.HomePath, 203, "test-password-123", w.SigName, w.SigName2)
@@ -124,10 +124,10 @@ func TestMnemonicSurvivesStoreAndLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !loaded.HasSeed() {
-		t.Fatal("wczytany portfel nie ma ziarna")
+		t.Fatal("the loaded wallet has no seed")
 	}
 	if loaded.MainAddress.GetHex() != w.MainAddress.GetHex() {
-		t.Fatal("adres zmienił się po zapisie i odczycie")
+		t.Fatal("the address changed across a save and load")
 	}
 }
 
@@ -154,18 +154,18 @@ func TestLegacyWalletLoadsWithoutSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(data, "encrypted_mnemonic") {
-		t.Fatal("portfel bez frazy zapisał puste pole encrypted_mnemonic — brakuje omitempty")
+		t.Fatal("a wallet with no phrase wrote an empty encrypted_mnemonic field — omitempty is missing")
 	}
 
 	loaded, err := LoadJSONFromDir(w.HomePath, 204, "test-password-123", w.SigName, w.SigName2)
 	if err != nil {
-		t.Fatalf("portfel starego typu nie wczytał się: %v", err)
+		t.Fatalf("an old-style wallet failed to load: %v", err)
 	}
 	if loaded.HasSeed() {
-		t.Fatal("portfel starego typu zgłasza posiadanie ziarna")
+		t.Fatal("an old-style wallet reports that it has a seed")
 	}
 	if _, err := loaded.Sign([]byte("qwid"), true); err != nil {
-		t.Fatalf("portfel starego typu nie podpisuje: %v", err)
+		t.Fatalf("an old-style wallet cannot sign: %v", err)
 	}
 }
 
@@ -192,7 +192,7 @@ func TestWipeClearsSeed(t *testing.T) {
 	w.Wipe()
 
 	if w.HasSeed() {
-		t.Fatal("Wipe nie wyczyścił ziarna")
+		t.Fatal("Wipe did not clear the seed")
 	}
 	for i, b := range seedBackup {
 		if b != 0 {
@@ -703,40 +703,40 @@ func TestRestoreFromDifferentPhraseLeavesNoStaleArchive(t *testing.T) {
 
 	storedAccount1, storedArchive := readStoredAccountAddresses(t, w.HomePath, 230)
 	if storedAccount1 != addressFromB {
-		t.Fatalf("account_1.address = %s, oczekiwano tożsamości z nowej frazy %s", storedAccount1, addressFromB)
+		t.Fatalf("account_1.address = %s, expected the identity from the new phrase %s", storedAccount1, addressFromB)
 	}
 	if got, ok := storedArchive[w.SigName]; ok && got != addressFromB {
-		t.Fatalf("accounts[%q].address = %s nie zgadza się z frazą (%s); plik niesie dwie różne tożsamości",
+		t.Fatalf("accounts[%q].address = %s does not match the phrase (%s); the file carries two different identities",
 			w.SigName, got, addressFromB)
 	}
 	if got, ok := storedArchive[w.SigName2]; ok && got != w.Account2.Address.GetHex() {
-		t.Fatalf("accounts[%q].address = %s nie zgadza się z frazą (%s)",
+		t.Fatalf("accounts[%q].address = %s does not match the phrase (%s)",
 			w.SigName2, got, w.Account2.Address.GetHex())
 	}
 	for scheme, addr := range storedArchive {
 		if addr == addressFromA {
-			t.Fatalf("archiwum wciąż zawiera tożsamość sprzed odtworzenia pod kluczem %q (%s)", scheme, addr)
+			t.Fatalf("the archive still holds the pre-restore identity under key %q (%s)", scheme, addr)
 		}
 	}
 
 	loaded, err := LoadJSONFromDir(w.HomePath, 230, "test-password-123", w.SigName, w.SigName2)
 	if err != nil {
-		t.Fatalf("odtworzony portfel nie wczytuje się: %v", err)
+		t.Fatalf("the restored wallet does not load: %v", err)
 	}
 	if loaded.MainAddress.GetHex() != addressFromB {
-		t.Fatalf("po ponownym wczytaniu MainAddress = %s, oczekiwano %s (tożsamość z odtworzonej frazy)",
+		t.Fatalf("after reloading, MainAddress = %s, expected %s (the identity from the restored phrase)",
 			loaded.MainAddress.GetHex(), addressFromB)
 	}
 	if loaded.Account1.Address.GetHex() != addressFromB {
-		t.Fatalf("po ponownym wczytaniu Account1 = %s, oczekiwano %s",
+		t.Fatalf("after reloading, Account1 = %s, expected %s",
 			loaded.Account1.Address.GetHex(), addressFromB)
 	}
 	phrase, err := loaded.GetMnemonicWords(true)
 	if err != nil {
-		t.Fatalf("odtworzona fraza nie jest dostępna po wczytaniu: %v", err)
+		t.Fatalf("the restored phrase is not available after loading: %v", err)
 	}
 	if strings.Join(strings.Fields(phrase), " ") != strings.Join(strings.Fields(string(phraseB)), " ") {
-		t.Fatal("zapisana fraza to nie ta, z której odtworzono portfel")
+		t.Fatal("the stored phrase is not the one the wallet was restored from")
 	}
 }
 
@@ -795,15 +795,15 @@ func TestSchemeChangeSeedOutranksStaleArchive(t *testing.T) {
 		t.Fatalf("seeded wallet failed a scheme change it should have derived: %v", err)
 	}
 	if loaded.Account1.Address.GetHex() != expected.Address.GetHex() {
-		t.Fatalf("Account1 = %s, oczekiwano wyprowadzonego z frazy %s (wzięto wpis z archiwum %s)",
+		t.Fatalf("Account1 = %s, expected the one derived from the phrase %s (an archive entry %s was used instead)",
 			loaded.Account1.Address.GetHex(), expected.Address.GetHex(), foreign.Address.GetHex())
 	}
 	if loaded.MainAddress.GetHex() != expected.Address.GetHex() {
-		t.Fatalf("MainAddress = %s, oczekiwano %s", loaded.MainAddress.GetHex(), expected.Address.GetHex())
+		t.Fatalf("MainAddress = %s, expected %s", loaded.MainAddress.GetHex(), expected.Address.GetHex())
 	}
 	_, archive := readStoredAccountAddresses(t, w.HomePath, 231)
 	if got, ok := archive[schemeChangeTarget]; ok && got == foreign.Address.GetHex() {
-		t.Fatalf("obcy wpis archiwum dla %q przetrwał wczytanie (%s)", schemeChangeTarget, got)
+		t.Fatalf("a foreign archive entry for %q survived loading (%s)", schemeChangeTarget, got)
 	}
 }
 
@@ -842,10 +842,10 @@ func TestLegacyWalletSchemeChangeStillUsesArchive(t *testing.T) {
 
 	loaded, err := LoadJSONFromDir(w.HomePath, 232, "test-password-123", schemeChangeTarget, w.SigName2)
 	if err != nil {
-		t.Fatalf("portfel bez frazy z zarchiwizowanym kluczem nie wczytał się po zmianie schematu: %v", err)
+		t.Fatalf("a phrase-less wallet with an archived key failed to load after a scheme change: %v", err)
 	}
 	if loaded.Account1.Address.GetHex() != archived.Address.GetHex() {
-		t.Fatalf("Account1 = %s, oczekiwano klucza z archiwum %s",
+		t.Fatalf("Account1 = %s, expected the archived key %s",
 			loaded.Account1.Address.GetHex(), archived.Address.GetHex())
 	}
 }

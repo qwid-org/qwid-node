@@ -25,10 +25,10 @@ func TestGetMnemonicWordsReturnsThePhraseThatCreatedTheWallet(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got != string(mnemonic) {
-		t.Fatalf("zwrócona fraza różni się od podanej przy tworzeniu")
+		t.Fatalf("the returned phrase differs from the one given at creation")
 	}
 	if n := len(strings.Fields(got)); n != MnemonicWordCount {
-		t.Fatalf("liczba słów = %d, oczekiwano %d", n, MnemonicWordCount)
+		t.Fatalf("word count = %d, expected %d", n, MnemonicWordCount)
 	}
 }
 
@@ -39,10 +39,10 @@ func TestGetMnemonicWordsOnLegacyWalletExplainsWhy(t *testing.T) {
 	w := newSeedTestWallet(t, 221)
 	_, err := w.GetMnemonicWords(true)
 	if err == nil {
-		t.Fatal("oczekiwano błędu dla portfela bez frazy")
+		t.Fatal("expected an error for a wallet with no phrase")
 	}
 	if !strings.Contains(err.Error(), "wallet-file") {
-		t.Fatalf("komunikat %q nie kieruje do kopii pliku portfela", err.Error())
+		t.Fatalf("message %q does not point at the wallet-file backup", err.Error())
 	}
 }
 
@@ -66,10 +66,10 @@ func TestRestoreFromMnemonicRebuildsTheSameKeys(t *testing.T) {
 	}
 
 	if restored.Account1.Address.GetHex() != original.Account1.Address.GetHex() {
-		t.Fatal("odtworzony klucz podstawowy ma inny adres")
+		t.Fatal("the restored primary key has a different address")
 	}
 	if restored.Account2.Address.GetHex() != original.Account2.Address.GetHex() {
-		t.Fatal("odtworzony klucz dodatkowy ma inny adres")
+		t.Fatal("the restored secondary key has a different address")
 	}
 
 	sig, err := restored.Sign([]byte("qwid"), true)
@@ -78,14 +78,14 @@ func TestRestoreFromMnemonicRebuildsTheSameKeys(t *testing.T) {
 	}
 	if !Verify([]byte("qwid"), sig.GetBytes(), original.Account1.PublicKey.GetBytes(),
 		original.SigName, original.SigName2, false, false) {
-		t.Fatal("podpis odtworzonym kluczem nie weryfikuje się oryginalnym kluczem publicznym")
+		t.Fatal("a signature made with the restored key does not verify against the original public key")
 	}
 }
 
 func TestRestoreFromMnemonicRejectsBadPhrase(t *testing.T) {
 	w := newSeedTestWallet(t, 223)
 	if err := w.RestoreSecretKeyFromMnemonic("abandon abandon abandon", true); err == nil {
-		t.Fatal("oczekiwano błędu dla frazy o złej długości")
+		t.Fatal("expected an error for a phrase of the wrong length")
 	}
 }
 
@@ -123,13 +123,13 @@ func TestRestoreFromMnemonicTwiceRebuildsBothAccountsFromTheSecondPhrase(t *test
 		t.Fatal(err)
 	}
 	if got != string(mnemonicB) {
-		t.Fatalf("GetMnemonicWords zwróciła frazę inną niż ostatnio ustawiona (fraza B)")
+		t.Fatalf("GetMnemonicWords returned a phrase other than the one last set (phrase B)")
 	}
 	if w.Account1.Address.GetHex() != wantB.Account1.Address.GetHex() {
-		t.Fatalf("Account1 nie odpowiada frazie B po drugim restore (partial restore bug)")
+		t.Fatalf("Account1 does not match phrase B after the second restore (partial restore bug)")
 	}
 	if w.Account2.Address.GetHex() != wantB.Account2.Address.GetHex() {
-		t.Fatalf("Account2 nie odpowiada frazie B po drugim restore")
+		t.Fatalf("Account2 does not match phrase B after the second restore")
 	}
 }
 
@@ -162,10 +162,10 @@ func TestRestoreFromMnemonicUpdatesMainAddress(t *testing.T) {
 	}
 
 	if w.MainAddress.GetHex() == oldMainAddress {
-		t.Fatal("MainAddress nie została zaktualizowana po restore (stale-MainAddress bug)")
+		t.Fatal("MainAddress was not updated after the restore (stale-MainAddress bug)")
 	}
 	if w.MainAddress.GetHex() != w.Account1.Address.GetHex() {
-		t.Fatalf("MainAddress (%s) różni się od Account1.Address (%s) po restore",
+		t.Fatalf("MainAddress (%s) differs from Account1.Address (%s) after the restore",
 			w.MainAddress.GetHex(), w.Account1.Address.GetHex())
 	}
 }
@@ -191,13 +191,13 @@ func TestRestoreFromMnemonicIsRoleIndependent(t *testing.T) {
 	}
 
 	if wTrue.Account1.Address.GetHex() != wFalse.Account1.Address.GetHex() {
-		t.Fatal("Account1 zależy od wartości primary przekazanej do restore")
+		t.Fatal("Account1 depends on the primary value passed to restore")
 	}
 	if wTrue.Account2.Address.GetHex() != wFalse.Account2.Address.GetHex() {
-		t.Fatal("Account2 zależy od wartości primary przekazanej do restore")
+		t.Fatal("Account2 depends on the primary value passed to restore")
 	}
 	if wTrue.MainAddress.GetHex() != wFalse.MainAddress.GetHex() {
-		t.Fatal("MainAddress zależy od wartości primary przekazanej do restore")
+		t.Fatal("MainAddress depends on the primary value passed to restore")
 	}
 }
 
@@ -221,20 +221,20 @@ func TestRestoreFromMnemonicLeavesWalletUnchangedOnBadPhrase(t *testing.T) {
 	wantEncMnemonic := append([]byte(nil), w.EncryptedMnemonic...)
 
 	if err := w.RestoreSecretKeyFromMnemonic("abandon abandon abandon", true); err == nil {
-		t.Fatal("oczekiwano błędu dla frazy o złej długości")
+		t.Fatal("expected an error for a phrase of the wrong length")
 	}
 
 	if w.Account1.Address.GetHex() != wantAccount1 {
-		t.Fatal("Account1 zmienił się mimo błędnej frazy")
+		t.Fatal("Account1 changed despite an invalid phrase")
 	}
 	if w.Account2.Address.GetHex() != wantAccount2 {
-		t.Fatal("Account2 zmienił się mimo błędnej frazy")
+		t.Fatal("Account2 changed despite an invalid phrase")
 	}
 	if w.MainAddress.GetHex() != wantMain {
-		t.Fatal("MainAddress zmienił się mimo błędnej frazy")
+		t.Fatal("MainAddress changed despite an invalid phrase")
 	}
 	if !bytes.Equal(w.EncryptedMnemonic, wantEncMnemonic) {
-		t.Fatal("EncryptedMnemonic zmienił się mimo błędnej frazy")
+		t.Fatal("EncryptedMnemonic changed despite an invalid phrase")
 	}
 }
 
@@ -271,7 +271,7 @@ func TestRestoreFromMnemonicLeavesWalletUnchangedOnDerivationFailure(t *testing.
 		t.Fatal(err)
 	}
 	if err := w.RestoreSecretKeyFromMnemonic(string(other), true); err == nil {
-		t.Fatal("oczekiwano błędu dla nieobsługiwanego schematu podpisu")
+		t.Fatal("expected an error for an unsupported signature scheme")
 	}
 
 	got, err := w.GetMnemonicWords(true)
@@ -279,18 +279,18 @@ func TestRestoreFromMnemonicLeavesWalletUnchangedOnDerivationFailure(t *testing.
 		t.Fatal(err)
 	}
 	if got != string(original) {
-		t.Fatalf("GetMnemonicWords zwróciła nową frazę mimo nieudanej derywacji klucza")
+		t.Fatalf("GetMnemonicWords returned a new phrase even though key derivation failed")
 	}
 	if w.Account1.Address.GetHex() != wantAccount1 {
-		t.Fatal("Account1 zmienił się mimo nieudanej derywacji klucza")
+		t.Fatal("Account1 changed even though key derivation failed")
 	}
 	if w.Account2.Address.GetHex() != wantAccount2 {
-		t.Fatal("Account2 zmienił się mimo nieudanej derywacji klucza")
+		t.Fatal("Account2 changed even though key derivation failed")
 	}
 	if w.MainAddress.GetHex() != wantMain {
-		t.Fatal("MainAddress zmienił się mimo nieudanej derywacji klucza")
+		t.Fatal("MainAddress changed even though key derivation failed")
 	}
 	if !bytes.Equal(w.EncryptedMnemonic, wantEncMnemonic) {
-		t.Fatal("EncryptedMnemonic zmienił się mimo nieudanej derywacji klucza")
+		t.Fatal("EncryptedMnemonic changed even though key derivation failed")
 	}
 }

@@ -59,16 +59,16 @@ func main() {
 	// its keys, and nothing can rebuild it).
 	overwriteConfirmed, err := confirmOverwriteIfExists(reader, walletFile, walletNumber)
 	if err != nil {
-		logger.GetLogger().Fatalf("%v — nie zapisano żadnego pliku", err)
+		logger.GetLogger().Fatalf("%v — no file was written", err)
 	}
 
-	fmt.Print("\n[1] utwórz nowy portfel  [2] odtwórz z frazy 24 słów\nWybór [1]: ")
+	fmt.Print("\n[1] create a new wallet  [2] restore from a 24-word phrase\nChoice [1]: ")
 	mode, _ := reader.ReadString('\n')
 	mode = strings.TrimSpace(mode)
 
 	var mnemonic []byte
 	if mode == "2" {
-		fmt.Print("Wpisz frazę (24 słowa oddzielone spacjami): ")
+		fmt.Print("Enter the phrase (24 words separated by spaces): ")
 		// Read without echo: the phrase owns every key of the wallet, so echoing
 		// it would leave it in terminal scrollback, tmux/screen logs and any
 		// recording of the session. ReadPassword reads fd 0 directly, which is
@@ -89,11 +89,11 @@ func main() {
 		if err != nil {
 			logger.GetLogger().Fatal(err)
 		}
-		fmt.Println("\n================ FRAZA ODZYSKIWANIA ================")
+		fmt.Println("\n================ RECOVERY PHRASE ================")
 		fmt.Println(string(mnemonic))
-		fmt.Println("====================================================")
-		fmt.Println("Zapisz ją teraz. Nie da się jej odzyskać z klucza,")
-		fmt.Println("a bez niej ani bez pliku portfela środki przepadną.")
+		fmt.Println("=================================================")
+		fmt.Println("Write it down now. It cannot be recovered from the key,")
+		fmt.Println("and without it or the wallet file the funds are lost.")
 
 		positions, err := randomConfirmPositions(wallet.MnemonicWordCount)
 		if err != nil {
@@ -111,7 +111,7 @@ func main() {
 		for attempt := 1; attempt <= maxConfirmAttempts; attempt++ {
 			answers := make([]string, len(positions))
 			for i, p := range positions {
-				fmt.Printf("Podaj słowo numer %d: ", p)
+				fmt.Printf("Enter word number %d: ", p)
 				line, err := reader.ReadString('\n')
 				if err != nil {
 					logger.GetLogger().Fatal(err)
@@ -119,14 +119,14 @@ func main() {
 				answers[i] = line
 			}
 			if err := checkConfirmation(string(mnemonic), positions, answers); err != nil {
-				fmt.Printf("Potwierdzenie nie powiodło się (próba %d/%d): %v\n", attempt, maxConfirmAttempts, err)
+				fmt.Printf("Confirmation failed (attempt %d/%d): %v\n", attempt, maxConfirmAttempts, err)
 				continue
 			}
 			confirmed = true
 			break
 		}
 		if !confirmed {
-			logger.GetLogger().Fatalf("potwierdzenie frazy nie powiodło się po %d próbach", maxConfirmAttempts)
+			logger.GetLogger().Fatalf("phrase confirmation failed after %d attempts", maxConfirmAttempts)
 		}
 	}
 	defer wallet.ZeroBytes(mnemonic)
@@ -187,7 +187,7 @@ func main() {
 	// that was never given for it.
 	if !overwriteConfirmed {
 		if _, statErr := os.Stat(walletFile); statErr == nil {
-			logger.GetLogger().Fatalf("plik %s pojawił się w trakcie tworzenia portfela, a nadpisanie nie zostało potwierdzone — nie zapisano niczego", walletFile)
+			logger.GetLogger().Fatalf("file %s appeared while the wallet was being created and no overwrite was confirmed — nothing was written", walletFile)
 		}
 	}
 
@@ -197,7 +197,7 @@ func main() {
 		return
 	}
 
-	fmt.Printf("\nAdres portfela: %s\n", w.MainAddress.GetHex())
+	fmt.Printf("\nWallet address: %s\n", w.MainAddress.GetHex())
 }
 
 // walletFilePath is the file StoreJSON writes for this wallet number. Kept next
@@ -213,7 +213,7 @@ func walletFilePath(homePath string, walletNumber int) string {
 // without reading, and the number is the thing they are most likely to have got
 // wrong in the first place.
 func overwriteConfirmationPhrase(walletNumber int) string {
-	return fmt.Sprintf("nadpisz portfel %d", walletNumber)
+	return fmt.Sprintf("overwrite wallet %d", walletNumber)
 }
 
 // checkOverwriteConfirmation reports whether answer is the exact confirmation
@@ -223,7 +223,7 @@ func checkOverwriteConfirmation(answer string, walletNumber int) error {
 	want := overwriteConfirmationPhrase(walletNumber)
 	got := strings.Join(strings.Fields(strings.ToLower(answer)), " ")
 	if got != want {
-		return fmt.Errorf("nie potwierdzono nadpisania portfela %d (oczekiwano dokładnie %q, podano %q)", walletNumber, want, answer)
+		return fmt.Errorf("overwrite of wallet %d was not confirmed (expected exactly %q, got %q)", walletNumber, want, answer)
 	}
 	return nil
 }
@@ -238,26 +238,26 @@ func confirmOverwriteIfExists(in *bufio.Reader, walletFile string, walletNumber 
 		if os.IsNotExist(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("nie można sprawdzić, czy portfel %d jest zajęty (%s): %v", walletNumber, walletFile, err)
+		return false, fmt.Errorf("cannot check whether wallet %d is occupied (%s): %v", walletNumber, walletFile, err)
 	}
 
-	fmt.Printf("\n!!! UWAGA: portfel numer %d JUŻ ISTNIEJE !!!\n", walletNumber)
-	fmt.Printf("Plik: %s\n", walletFile)
-	fmt.Println("Kontynuacja NADPISZE ten plik. Klucze, które są w nim zapisane,")
-	fmt.Println("zostaną zniszczone bezpowrotnie — jeśli ten portfel powstał przed")
-	fmt.Println("wprowadzeniem fraz odzyskiwania, ten plik jest jedyną kopią jego")
-	fmt.Println("kluczy i nic ich potem nie odtworzy. Środki na nim przepadną.")
-	fmt.Println("Jeśli chciałeś tylko odtworzyć portfel z frazy, użyj WOLNEGO numeru.")
-	fmt.Printf("\nAby nadpisać, wpisz dokładnie: %s\nW przeciwnym razie naciśnij Enter, aby przerwać.\n> ", overwriteConfirmationPhrase(walletNumber))
+	fmt.Printf("\n!!! WARNING: wallet number %d ALREADY EXISTS !!!\n", walletNumber)
+	fmt.Printf("File: %s\n", walletFile)
+	fmt.Println("Continuing will OVERWRITE this file. The keys stored in it will be")
+	fmt.Println("destroyed irreversibly — if this wallet was created before recovery")
+	fmt.Println("phrases existed, this file is the only copy of its keys and nothing")
+	fmt.Println("will rebuild them afterwards. The funds on it will be lost.")
+	fmt.Println("If you only meant to restore a wallet from a phrase, use a FREE number.")
+	fmt.Printf("\nTo overwrite, type exactly: %s\nOtherwise press Enter to abort.\n> ", overwriteConfirmationPhrase(walletNumber))
 
 	answer, err := in.ReadString('\n')
 	if err != nil && answer == "" {
-		return false, fmt.Errorf("nie potwierdzono nadpisania portfela %d (%s): %v", walletNumber, walletFile, err)
+		return false, fmt.Errorf("overwrite of wallet %d was not confirmed (%s): %v", walletNumber, walletFile, err)
 	}
 	if err := checkOverwriteConfirmation(answer, walletNumber); err != nil {
 		return false, err
 	}
-	fmt.Printf("Potwierdzono nadpisanie portfela %d (%s).\n", walletNumber, walletFile)
+	fmt.Printf("Overwrite of wallet %d confirmed (%s).\n", walletNumber, walletFile)
 	return true, nil
 }
 
@@ -304,15 +304,15 @@ func randomConfirmPositions(wordCount int) ([]int, error) {
 func checkConfirmation(mnemonic string, positions []int, answers []string) error {
 	words := strings.Fields(mnemonic)
 	if len(positions) != len(answers) {
-		return fmt.Errorf("oczekiwano %d odpowiedzi, podano %d", len(positions), len(answers))
+		return fmt.Errorf("expected %d answers, got %d", len(positions), len(answers))
 	}
 	for i, p := range positions {
 		if p < 1 || p > len(words) {
-			return fmt.Errorf("pozycja %d poza zakresem", p)
+			return fmt.Errorf("position %d out of range", p)
 		}
 		got := strings.ToLower(strings.TrimSpace(answers[i]))
 		if got != words[p-1] {
-			return fmt.Errorf("słowo na pozycji %d nie zgadza się", p)
+			return fmt.Errorf("word at position %d does not match", p)
 		}
 	}
 	return nil

@@ -17,11 +17,11 @@ func TestGetMnemonicIsDisabledOverHTTP(t *testing.T) {
 			GetMnemonic(rec, httptest.NewRequest(method, "/api/wallet/mnemonic", strings.NewReader(`{"password":"x"}`)))
 
 			if rec.Code == http.StatusOK {
-				t.Fatalf("endpoint odpowiedział 200 — fraza mogła wyciec")
+				t.Fatalf("the endpoint answered 200 — the phrase may have leaked")
 			}
 			body := rec.Body.String()
 			if !strings.Contains(strings.ToLower(body), "local") {
-				t.Fatalf("odpowiedź %q nie tłumaczy, że fraza jest dostępna tylko lokalnie", body)
+				t.Fatalf("response %q does not explain that the phrase is available locally only", body)
 			}
 		})
 	}

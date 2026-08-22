@@ -37,17 +37,17 @@ func TestDueMissingTxRequests(t *testing.T) {
 
 	due, esc, _ := dueMissingTxRequests([][]byte{h1, h2}, t0)
 	if len(due) != 2 || len(esc) != 0 {
-		t.Fatalf("pierwsza runda: due=%d esc=%d, oczekiwano 2/0", len(due), len(esc))
+		t.Fatalf("first round: due=%d esc=%d, expected 2/0", len(due), len(esc))
 	}
 
 	// Half a second later (the old spam cadence): nothing is due.
 	if due, _, _ = dueMissingTxRequests([][]byte{h1, h2}, t0.Add(500*time.Millisecond)); len(due) != 0 {
-		t.Fatalf("po 500ms due=%d, oczekiwano 0 (throttle)", len(due))
+		t.Fatalf("after 500ms due=%d, expected 0 (throttle)", len(due))
 	}
 
 	// After the retry interval both are due again.
 	if due, _, _ = dueMissingTxRequests([][]byte{h1, h2}, t0.Add(missingTxRetryInterval+time.Second)); len(due) != 2 {
-		t.Fatalf("po interwale due=%d, oczekiwano 2", len(due))
+		t.Fatalf("after the interval due=%d, expected 2", len(due))
 	}
 
 	// Drive h1 to the escalation threshold.
@@ -61,14 +61,14 @@ func TestDueMissingTxRequests(t *testing.T) {
 		}
 	}
 	if !escalated {
-		t.Fatalf("po %d próbach hash nie został eskalowany", 2+missingTxEscalateAfter)
+		t.Fatalf("the hash was not escalated after %d attempts", 2+missingTxEscalateAfter)
 	}
 
 	// clearMissingTx starts a fresh cycle: immediately due again, no escalation.
 	clearMissingTx()
 	due, esc, _ = dueMissingTxRequests([][]byte{h1}, now)
 	if len(due) != 1 || len(esc) != 0 {
-		t.Fatalf("po wyczyszczeniu due=%d esc=%d, oczekiwano 1/0", len(due), len(esc))
+		t.Fatalf("after clearing due=%d esc=%d, expected 1/0", len(due), len(esc))
 	}
 }
 
@@ -88,7 +88,7 @@ func TestMissingTxRecycleThreshold(t *testing.T) {
 		}
 	}
 	if recycled != 2 {
-		t.Fatalf("recycle zasygnalizowany %d razy po %d próbach, oczekiwano 2 (co %d prób)",
+		t.Fatalf("recycle signalled %d times after %d attempts, expected 2 (every %d attempts)",
 			recycled, 2*missingTxRecycleAfter, missingTxRecycleAfter)
 	}
 }
@@ -106,6 +106,6 @@ func TestMissingTxForget(t *testing.T) {
 	n := len(missingTx)
 	missingTxMutex.Unlock()
 	if n != 1 {
-		t.Fatalf("mapa ma %d wpisów, oczekiwano 1 (stary wpis zapomniany)", n)
+		t.Fatalf("the map has %d entries, expected 1 (the old entry was forgotten)", n)
 	}
 }

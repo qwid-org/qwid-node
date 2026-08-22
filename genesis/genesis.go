@@ -77,7 +77,13 @@ type Genesis struct {
 func storeGenesisPubKey(pubkeystr string, primary bool) common.PubKey {
 	pubKeyOpBytes, err := hex.DecodeString(pubkeystr)
 	if err != nil {
-		logger.GetLogger().Fatal("cannot decode address from string in genesis block")
+		// Naming the field and the expected encoding matters: the wallet file
+		// stores this key as base64 (PubKey.ByteValue is a []byte, which
+		// encoding/json base64-encodes), so pasting it straight from there
+		// lands here. The old message said "cannot decode address", which sent
+		// operators looking at the account field instead of the key.
+		logger.GetLogger().Fatalf("cannot decode pub_key in genesis config: expected hex, got %d characters that are not hex (%v). "+
+			"Start the mining node to print this wallet's keys in hex.", len(pubkeystr), err)
 	}
 	addressOp1, err := common.PubKeyToAddress(pubKeyOpBytes[:], primary)
 	if err != nil {

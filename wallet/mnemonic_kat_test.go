@@ -39,8 +39,8 @@ const (
 func TestKnownAnswerDerivation(t *testing.T) {
 	w := newSeedTestWallet(t, 241)
 	if w.SigName != katPrimaryScheme || w.SigName2 != katSecondaryScheme {
-		t.Fatalf("przypięte adresy zapisano dla schematów %q/%q, a środowisko testowe używa %q/%q — "+
-			"to NIE znaczy, że derywacja się zmieniła; przypięte wartości dotyczą innych schematów",
+		t.Fatalf("the pinned addresses were recorded for schemes %q/%q while the test environment uses %q/%q — "+
+			"this does NOT mean derivation changed; the pinned values belong to different schemes",
 			katPrimaryScheme, katSecondaryScheme, w.SigName, w.SigName2)
 	}
 	if err := w.SetMnemonic([]byte(katPhrase)); err != nil {
@@ -58,11 +58,11 @@ func TestKnownAnswerDerivation(t *testing.T) {
 	}
 
 	if got := primary.Address.GetHex(); got != katPrimaryAddress {
-		t.Fatalf("adres podstawowy = %s, przypięty %s — derywacja się zmieniła, "+
-			"istniejące frazy odtworzą inny portfel", got, katPrimaryAddress)
+		t.Fatalf("primary address = %s, pinned %s — derivation has changed, "+
+			"existing phrases will restore a different wallet", got, katPrimaryAddress)
 	}
 	if got := secondary.Address.GetHex(); got != katSecondaryAddress {
-		t.Fatalf("adres dodatkowy = %s, przypięty %s — derywacja się zmieniła, "+
-			"istniejące frazy odtworzą inny portfel", got, katSecondaryAddress)
+		t.Fatalf("secondary address = %s, pinned %s — derivation has changed, "+
+			"existing phrases will restore a different wallet", got, katSecondaryAddress)
 	}
 }

@@ -68,11 +68,11 @@ func TestOldSnapshotDecodesWithDerivedCounts(t *testing.T) {
 		t.Fatalf("Unmarshal starego formatu: %v", err)
 	}
 	if decoded.SentCount != 2 || decoded.ReceivedCount != 1 {
-		t.Fatalf("liczniki = %d/%d, oczekiwano 2/1 (wyprowadzone z długości list)",
+		t.Fatalf("counters = %d/%d, expected 2/1 (derived from the list lengths)",
 			decoded.SentCount, decoded.ReceivedCount)
 	}
 	if len(decoded.TransactionsSender) != 2 || len(decoded.TransactionsRecipient) != 1 {
-		t.Fatal("listy starego formatu nie zostały odczytane")
+		t.Fatal("the old-format lists were not read")
 	}
 
 	// New-format round trip carries the counters explicitly.
@@ -82,7 +82,7 @@ func TestOldSnapshotDecodesWithDerivedCounts(t *testing.T) {
 		t.Fatalf("Unmarshal nowego formatu: %v", err)
 	}
 	if decoded2.SentCount != 9 || decoded2.ReceivedCount != 4 {
-		t.Fatalf("liczniki nowego formatu = %d/%d, oczekiwano 9/4", decoded2.SentCount, decoded2.ReceivedCount)
+		t.Fatalf("new-format counters = %d/%d, expected 9/4", decoded2.SentCount, decoded2.ReceivedCount)
 	}
 }
 
@@ -117,17 +117,17 @@ func TestMigrationMovesListsToIndex(t *testing.T) {
 
 	acc, ok := GetAccountByAddressBytes(addr[:])
 	if !ok {
-		t.Fatal("konto zniknęło po migracji")
+		t.Fatal("the account disappeared after migration")
 	}
 	if len(acc.TransactionsSender) != 0 || len(acc.TransactionsRecipient) != 0 {
-		t.Fatal("listy w stanie nie zostały wyczyszczone po migracji")
+		t.Fatal("the in-state lists were not cleared after migration")
 	}
 	if acc.SentCount != 3 || acc.ReceivedCount != 1 {
-		t.Fatalf("liczniki po migracji = %d/%d, oczekiwano 3/1", acc.SentCount, acc.ReceivedCount)
+		t.Fatalf("counters after migration = %d/%d, expected 3/1", acc.SentCount, acc.ReceivedCount)
 	}
 	sent := GetTxHistorySent(addr, 0)
 	if len(sent) != 3 || sent[0] != hashOf(1) || sent[2] != hashOf(3) {
-		t.Fatalf("indeks wysłanych po migracji = %v", sent)
+		t.Fatalf("sent index after migration = %v", sent)
 	}
 	if recv := GetTxHistoryReceived(addr, 0); len(recv) != 1 || recv[0] != hashOf(4) {
 		t.Fatalf("indeks odebranych po migracji = %v", recv)
@@ -172,14 +172,14 @@ func TestHistoryRollbackByCounter(t *testing.T) {
 	AccountsRWMutex.Unlock()
 
 	if got := GetTxHistorySent(addr, 0); len(got) != 1 || got[0] != hashOf(1) {
-		t.Fatalf("po rewindzie widoczna historia = %v, oczekiwano tylko wpisu 1", got)
+		t.Fatalf("after the rewind the visible history = %v, expected entry 1 only", got)
 	}
 
 	// Re-apply a different fork: entry at seq 1 must be overwritten.
 	AddTransactionsSender(addr, hashOf(9))
 	got := GetTxHistorySent(addr, 0)
 	if len(got) != 2 || got[1] != hashOf(9) {
-		t.Fatalf("po ponownym aplikowaniu historia = %v, oczekiwano [1 9]", got)
+		t.Fatalf("after re-applying, history = %v, expected [1 9]", got)
 	}
 }
 
@@ -200,19 +200,19 @@ func TestLastStoredHeightMetaSurvivesGaps(t *testing.T) {
 		}
 	}
 	if h, err := LastHeightStoredInAccounts(); err != nil || h != 66 {
-		t.Fatalf("LastHeightStoredInAccounts = %d, %v; oczekiwano 66 mimo dziur", h, err)
+		t.Fatalf("LastHeightStoredInAccounts = %d, %v; expected 66 despite the gaps", h, err)
 	}
 
 	// The rewind removed everything above 34 and lowered the record.
 	SetLastStoredSnapshotHeights(34)
 	if h, err := LastHeightStoredInAccounts(); err != nil || h != 34 {
-		t.Fatalf("po obniżeniu LastHeightStoredInAccounts = %d, %v; oczekiwano 34", h, err)
+		t.Fatalf("after lowering, LastHeightStoredInAccounts = %d, %v; expected 34", h, err)
 	}
 	// A later store raises it again.
 	if err := StoreAccounts(98); err != nil {
 		t.Fatalf("StoreAccounts(98): %v", err)
 	}
 	if h, err := LastHeightStoredInAccounts(); err != nil || h != 98 {
-		t.Fatalf("po kolejnym zapisie LastHeightStoredInAccounts = %d, %v; oczekiwano 98", h, err)
+		t.Fatalf("after a further write, LastHeightStoredInAccounts = %d, %v; expected 98", h, err)
 	}
 }

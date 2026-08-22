@@ -49,7 +49,7 @@ func TestCommitEVMStateIfChanged(t *testing.T) {
 		t.Fatalf("CommitEVMStateIfChanged(8): %v", err)
 	}
 	if h, err := State.LastStoredHeight(); err != nil || h != 8 {
-		t.Fatalf("snapshot nie został zapisany po zmianie: LastStoredHeight = %d, %v", h, err)
+		t.Fatalf("no snapshot was written after a change: LastStoredHeight = %d, %v", h, err)
 	}
 
 	// Next contract-free block: the flag was cleared by the store, so no new key.
@@ -57,6 +57,6 @@ func TestCommitEVMStateIfChanged(t *testing.T) {
 		t.Fatalf("CommitEVMStateIfChanged(9): %v", err)
 	}
 	if h, err := State.LastStoredHeight(); err != nil || h != 8 {
-		t.Fatalf("snapshot zapisany dla bloku bez aktywności kontraktów: LastStoredHeight = %d, %v", h, err)
+		t.Fatalf("a snapshot was written for a block with no contract activity: LastStoredHeight = %d, %v", h, err)
 	}
 }

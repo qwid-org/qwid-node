@@ -14,7 +14,7 @@ func TestParsePeerIPs(t *testing.T) {
 		want [][4]byte
 	}{
 		{
-			name: "brak argumentów",
+			name: "no arguments",
 			args: nil,
 			want: nil,
 		},
@@ -24,7 +24,7 @@ func TestParsePeerIPs(t *testing.T) {
 			want: [][4]byte{{1, 2, 3, 4}},
 		},
 		{
-			name: "flagi są pomijane",
+			name: "flags are skipped",
 			args: []string{"-log", "1.2.3.4"},
 			want: [][4]byte{{1, 2, 3, 4}},
 		},
@@ -34,12 +34,12 @@ func TestParsePeerIPs(t *testing.T) {
 			want: [][4]byte{{1, 2, 3, 4}, {5, 6, 7, 8}},
 		},
 		{
-			name: "wiele argumentów",
+			name: "many arguments",
 			args: []string{"1.2.3.4", "5.6.7.8"},
 			want: [][4]byte{{1, 2, 3, 4}, {5, 6, 7, 8}},
 		},
 		{
-			name: "duplikaty usuwane, kolejność zachowana",
+			name: "duplicates removed, order preserved",
 			args: []string{"1.2.3.4", "5.6.7.8", "1.2.3.4"},
 			want: [][4]byte{{1, 2, 3, 4}, {5, 6, 7, 8}},
 		},
@@ -54,14 +54,14 @@ func TestParsePeerIPs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parsePeerIPs(tc.args)
 			if err != nil {
-				t.Fatalf("parsePeerIPs(%v) zwrócił błąd: %v", tc.args, err)
+				t.Fatalf("parsePeerIPs(%v) returned an error: %v", tc.args, err)
 			}
 			if len(got) != len(tc.want) {
-				t.Fatalf("otrzymano %v, oczekiwano %v", got, tc.want)
+				t.Fatalf("got %v, expected %v", got, tc.want)
 			}
 			for i := range got {
 				if got[i] != tc.want[i] {
-					t.Fatalf("adres %d = %v, oczekiwano %v", i, got[i], tc.want[i])
+					t.Fatalf("address %d = %v, expected %v", i, got[i], tc.want[i])
 				}
 			}
 		})
@@ -76,10 +76,10 @@ func TestParsePeerIPsRejectsGarbage(t *testing.T) {
 		t.Run(arg, func(t *testing.T) {
 			_, err := parsePeerIPs([]string{arg})
 			if err == nil {
-				t.Fatalf("parsePeerIPs(%q) nie zwrócił błędu", arg)
+				t.Fatalf("parsePeerIPs(%q) returned no error", arg)
 			}
-			if !strings.Contains(err.Error(), "adres") {
-				t.Fatalf("komunikat %q nie wskazuje na problem z adresem", err.Error())
+			if !strings.Contains(err.Error(), "IP address") {
+				t.Fatalf("message %q does not point at the address problem", err.Error())
 			}
 		})
 	}
@@ -98,12 +98,12 @@ func TestDialerSkipsWhileInFlight(t *testing.T) {
 		started.Done()
 		<-release
 	}) {
-		t.Fatal("pierwsze wywołanie powinno wystartować")
+		t.Fatal("the first call should have started")
 	}
 	started.Wait()
 
-	if d.run("peer", func() { t.Error("drugie wywołanie nie powinno wystartować") }) {
-		t.Fatal("drugie wywołanie wystartowało mimo trwającego pierwszego")
+	if d.run("peer", func() { t.Error("the second call should not have started") }) {
+		t.Fatal("the second call started while the first was still running")
 	}
 
 	close(release)
@@ -115,7 +115,7 @@ func TestDialerSkipsWhileInFlight(t *testing.T) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("klucz nie zwolnił się po zakończeniu pierwszego wywołania")
+			t.Fatal("the key was not released after the first call finished")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -135,7 +135,7 @@ func TestDialerRunsDifferentKeysConcurrently(t *testing.T) {
 			wg.Done()
 			<-release
 		}) {
-			t.Fatalf("wywołanie dla klucza %q nie wystartowało", key)
+			t.Fatalf("the call for key %q did not start", key)
 		}
 	}
 	wg.Wait()

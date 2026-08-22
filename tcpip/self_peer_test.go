@@ -41,14 +41,14 @@ func TestCountPeersOnTopicSkipsSelf(t *testing.T) {
 		{10, 0, 0, 7}:  nil,
 	})
 	if got := CountPeersOnTopic(topic); got != 0 {
-		t.Fatalf("CountPeersOnTopic = %d, oczekiwano 0 - same połączenia z samym sobą", got)
+		t.Fatalf("CountPeersOnTopic = %d, expected 0 - these are all self-connections", got)
 	}
 
 	PeersMutex.Lock()
 	tcpConnections[topic][[4]byte{178, 182, 254, 9}] = nil
 	PeersMutex.Unlock()
 	if got := CountPeersOnTopic(topic); got != 1 {
-		t.Fatalf("CountPeersOnTopic = %d, oczekiwano 1 - prawdziwy peer musi się liczyć", got)
+		t.Fatalf("CountPeersOnTopic = %d, expected 1 - a real peer must count", got)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestGetIPsConnectedNeverAdvertisesSelf(t *testing.T) {
 	}()
 
 	if ips := GetIPsConnected(); len(ips) != 0 {
-		t.Fatalf("GetIPsConnected = %v, oczekiwano pustej listy - rozgłaszamy własne adresy", ips)
+		t.Fatalf("GetIPsConnected = %v, expected an empty list - we would be advertising our own addresses", ips)
 	}
 }
 
@@ -88,10 +88,10 @@ func TestIsSelfIP(t *testing.T) {
 	selfs := [][4]byte{{127, 0, 0, 1}, {10, 0, 0, 7}, {192, 168, 1, 5}}
 	for _, ip := range selfs {
 		if !IsSelfIP(ip) {
-			t.Fatalf("IsSelfIP(%v) = false, oczekiwano true", ip)
+			t.Fatalf("IsSelfIP(%v) = false, expected true", ip)
 		}
 	}
 	if IsSelfIP([4]byte{178, 182, 254, 9}) {
-		t.Fatal("IsSelfIP: obcy adres uznany za własny")
+		t.Fatal("IsSelfIP: a foreign address was treated as our own")
 	}
 }

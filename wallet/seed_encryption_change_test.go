@@ -37,7 +37,7 @@ func TestSchemeChangeIsReproducibleFromPhrase(t *testing.T) {
 	}
 
 	if w1.Account1.Address.GetHex() != w2.Account1.Address.GetHex() {
-		t.Fatalf("klucz dla nowego schematu nie jest odtwarzalny z frazy: %s vs %s",
+		t.Fatalf("the key for the new scheme is not reproducible from the phrase: %s vs %s",
 			w1.Account1.Address.GetHex(), w2.Account1.Address.GetHex())
 	}
 }
@@ -89,7 +89,7 @@ func TestSchemeChangeIsReproducibleFromPhraseUnknownScheme(t *testing.T) {
 	}
 
 	if w1.Account1.Address.GetHex() != w2.Account1.Address.GetHex() {
-		t.Fatalf("klucz dla nieznanego schematu %q nie jest odtwarzalny z frazy: %s vs %s",
+		t.Fatalf("the key for unknown scheme %q is not reproducible from the phrase: %s vs %s",
 			schemeChangeTarget, w1.Account1.Address.GetHex(), w2.Account1.Address.GetHex())
 	}
 }
@@ -129,17 +129,17 @@ func TestSchemeChangeRefusedWithoutPhrase(t *testing.T) {
 	newScheme := common.SigName2()
 	err = w.AddNewEncryptionToActiveWallet(newScheme, true)
 	if err == nil {
-		t.Fatal("portfel bez frazy wygenerował losowy klucz dla nowego schematu zamiast odmówić")
+		t.Fatal("a wallet with no phrase generated a random key for the new scheme instead of refusing")
 	}
 	if !strings.Contains(err.Error(), newScheme) {
-		t.Fatalf("komunikat nie nazywa nowego schematu %q: %v", newScheme, err)
+		t.Fatalf("the message does not name the new scheme %q: %v", newScheme, err)
 	}
 	for _, want := range []string{"recovery phrase", "wallet-file backup"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("komunikat nie mówi operatorowi o %q: %v", want, err)
+			t.Fatalf("the message does not tell the operator about %q: %v", want, err)
 		}
 	}
 	if w.Account1.Address.GetHex() != addressBefore {
-		t.Fatalf("odmowa mimo to podmieniła tożsamość: %s -> %s", addressBefore, w.Account1.Address.GetHex())
+		t.Fatalf("the refusal still replaced the identity: %s -> %s", addressBefore, w.Account1.Address.GetHex())
 	}
 }
