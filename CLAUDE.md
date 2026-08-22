@@ -114,11 +114,19 @@ send the stall watchdog rewinding the chain).
 
 `ChainID` (int16, 23) is checked one layer down in `message.BaseMessage`, but it
 only says "some QWID chain": two networks started from different genesis configs
-share it. `ChainID` cannot itself be widened to the genesis hash — it is part of
-the signed bytes of every transaction and is the EVM chain id under EIP-155.
+share it. `ChainID` cannot itself be widened to the genesis hash — most
+importantly, it is part of the signed bytes of every transaction
+(`transactionsDefinition/baseTransaction.go`), so changing its width invalidates
+every existing signature. Note that the EVM's exposed chain id (via the CHAINID
+opcode) is a separate value, currently hardcoded to 1337 in
+`params.AllEthashProtocolChanges`, regardless of `ChainID`; they are not the same
+number and serve different purposes.
 
-**A peer that sends no `GB` tag is rejected.** Nodes running v0.1.2 or earlier
-will therefore not sync with upgraded ones in either direction. Upgrade every
+**A peer that sends no `GB` tag is rejected in the `hi` sync message.** The
+genesis check does not run in other sync message types (`gh`, `sh`
+at `services/syncService/onmessage.go`), so only the `hi` path is guarded. Nodes
+running v0.1.2 or earlier will not sync via `hi` with upgraded ones, but might
+exchange other sync messages if an upgraded node initiates them. Upgrade every
 node in one pass; a gradual rollout partitions the network along version lines
 while both halves look healthy from the inside.
 
