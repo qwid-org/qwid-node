@@ -28,7 +28,30 @@ func sampleIPs(ips [][]byte, n int) [][]byte {
 	return out
 }
 
+// localGenesisHash is the hash of this node's block 0, the fingerprint of the
+// chain it belongs to. Read once at startup: it cannot change while the process
+// lives, and re-reading it per message would put a database read on the path of
+// every 'hi'.
+//
+// It is read from the database rather than derived from the genesis config,
+// because genesis.CreateBlockFromGenesis stores public keys as a side effect and
+// so cannot be used to merely compute what our genesis hash would be.
+var localGenesisHash []byte
+
+// initLocalGenesisHash loads block 0's hash. Safe at this point in startup:
+// cmd/mining/main.go creates the genesis block before it starts this service.
+func initLocalGenesisHash() {
+	h, err := blocks.LoadHashOfBlock(0)
+	if err != nil {
+		logger.GetLogger().Fatalf("cannot read the genesis block hash, refusing to start the sync service: %v", err)
+		return
+	}
+	localGenesisHash = h
+	logger.GetLogger().Printf("genesis block hash: %x", h)
+}
+
 func InitSyncService() {
+	initLocalGenesisHash()
 	services.SendMutexSync.Lock()
 	services.SendChanSync = make(chan []byte, 100)
 
@@ -55,6 +78,10 @@ func generateSyncMsgHeight() []byte {
 		return []byte("")
 	}
 	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{lastBlockHash}
+
+	// GB names the chain we are on. ChainID (int16) only says "some QWID chain";
+	// two networks started from different genesis configs share it.
+	n.TransactionsBytes[[2]byte{'G', 'B'}] = [][]byte{localGenesisHash}
 
 	// NP-M14: share only a bounded random subset of connected peers, so no single
 	// 'hi' message discloses the full topology, while peer discovery still works.
