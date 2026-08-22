@@ -95,6 +95,65 @@ func recordPeerHeightClaim(addr [4]byte, height int64, blockHash []byte) {
 	}
 }
 
+// peerGenesisAccepted reports whether a 'hi' came from a node on our chain.
+//
+// ChainID, checked one layer down in message.BaseMessage, only establishes that
+// the sender speaks this protocol at chain 23. Two networks started from
+// different genesis configs - a testnet reset, different operator keys, a
+// different staked allocation - share that number and are otherwise
+// indistinguishable to the sync service.
+//
+// A peer that sends no GB tag is rejected too: it is running a version from
+// before this check, and accepting it would leave the hole open to anyone who
+// simply omits the tag.
+func peerGenesisAccepted(txn map[[2]byte][][]byte) (bool, string) {
+	gb := txn[[2]byte{'G', 'B'}]
+	if len(gb) == 0 {
+		return false, "sent no genesis hash (node predates the genesis handshake)"
+	}
+	if !bytes.Equal(gb[0], localGenesisHash) {
+		return false, fmt.Sprintf("genesis %x, ours is %x", gb[0], localGenesisHash)
+	}
+	return true, ""
+}
+
+var (
+	genesisRejectionLogTimes      = make(map[[4]byte]time.Time)
+	genesisRejectionLogTimesMutex sync.Mutex
+	// genesisRejectionLogInterval bounds how often a genesis-mismatch rejection
+	// from the same address is logged. 'hi' is broadcast roughly every second
+	// per peer (sendSyncMsgInLoop), and DropTopicConnection does not stop the
+	// peer from reconnecting, so a misconfigured or foreign peer's reconnect
+	// cadence is on the order of ten seconds - logging every rejection turns
+	// one bad peer into an endless two-line-per-cycle churn. Ten minutes is far
+	// longer than that cadence (so it actually suppresses the churn) while
+	// still surfacing a persistent misconfiguration well within an hour of
+	// someone tailing the log.
+	genesisRejectionLogInterval = 10 * time.Minute
+)
+
+// shouldLogRejection reports whether a genesis-mismatch rejection from addr is
+// worth logging now, and if so records that it was, so the next call for the
+// same address within genesisRejectionLogInterval returns false. It also
+// prunes entries older than the interval - the same "walk and delete expired"
+// approach cleanupExpiredClaims uses for peerHeightClaims - so a flood of
+// rejections from forged source addresses cannot grow this map without bound.
+func shouldLogRejection(addr [4]byte) bool {
+	now := time.Now()
+	genesisRejectionLogTimesMutex.Lock()
+	defer genesisRejectionLogTimesMutex.Unlock()
+	for a, t := range genesisRejectionLogTimes {
+		if now.Sub(t) > genesisRejectionLogInterval {
+			delete(genesisRejectionLogTimes, a)
+		}
+	}
+	if last, ok := genesisRejectionLogTimes[addr]; ok && now.Sub(last) < genesisRejectionLogInterval {
+		return false
+	}
+	genesisRejectionLogTimes[addr] = now
+	return true
+}
+
 // shouldSyncToHeight determines if we should sync based on peer claims
 // Returns true if sync should proceed, and the validated target height
 func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
@@ -352,6 +411,19 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
+
+		// Before anything else, and above all before the peer discovery below:
+		// this handler dials the addresses in PP before it ever reads LH/LB, so a
+		// check placed next to the height logic would reject the peer's height
+		// but adopt its network first.
+		if ok, reason := peerGenesisAccepted(txn); !ok {
+			if shouldLogRejection(addr) {
+				logger.GetLogger().Printf("WARNING: refusing sync with %v: %s", addr, reason)
+			}
+			tcpip.DropTopicConnection(tcpip.SyncTopic, addr)
+			return
+		}
+
 		var topicip [6]byte
 		var ip4 [4]byte
 		if tcpip.GetPeersCount() < common.MaxPeersConnected {
