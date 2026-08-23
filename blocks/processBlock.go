@@ -178,10 +178,10 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 				return nil, fmt.Errorf("new encryption has to be paused, 1")
 			}
 
-			if shouldCheck && (enc1.SigName != common.SigName()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, true) {
+			if shouldCheck && (enc1.SigName != common.SigName()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, true, newBlock.BaseBlock.BaseHeader.Encryption1[:]) {
 				return nil, fmt.Errorf("voting replacement encryption check fails, 1")
 			}
-			if shouldCheck && enc1.IsPaused == true && enc1.SigName == common.SigName() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, true) {
+			if shouldCheck && enc1.IsPaused == true && enc1.SigName == common.SigName() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, true, newBlock.BaseBlock.BaseHeader.Encryption1[:]) {
 				return nil, fmt.Errorf("voting pausing check fails, 1")
 			}
 			if enc1.SigName == common.SigName2() {
@@ -211,10 +211,10 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 			if shouldCheck && (enc2.SigName != common.SigName2()) && (enc2.IsPaused == false) {
 				return nil, fmt.Errorf("new encryption has to be paused, 2")
 			}
-			if shouldCheck && (enc2.SigName != common.SigName2()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, false) {
+			if shouldCheck && (enc2.SigName != common.SigName2()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, false, newBlock.BaseBlock.BaseHeader.Encryption2[:]) {
 				return nil, fmt.Errorf("voting replacement encryption check fails, 2")
 			}
-			if shouldCheck && enc2.IsPaused == true && enc2.SigName == common.SigName2() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, false) {
+			if shouldCheck && enc2.IsPaused == true && enc2.SigName == common.SigName2() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, false, newBlock.BaseBlock.BaseHeader.Encryption2[:]) {
 				return nil, fmt.Errorf("voting pausing check fails, 2")
 			}
 			if enc2.SigName == common.SigName() {
