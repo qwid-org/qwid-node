@@ -111,16 +111,59 @@ func matchOracleData(subs map[uint8]oracleSubmission, priceData, randData []byte
 	return nil
 }
 
+// sigNamesAtProofHeight resolves the signature-scheme configuration recorded
+// in the chain at the given height, using the in-memory blocks first: during
+// batched sync the block at that height may belong to the same not-yet-stored
+// batch, in which case only newBlock and its parent are at hand. Falling back
+// to the parent's config in that gap is no worse than the pre-fix global
+// config, and the sync loop's stop-batch-and-apply-prefix recovery covers it.
+func sigNamesAtProofHeight(height int64, newBlock, lastBlock Block) (string, string, bool, bool, error) {
+	if height >= newBlock.GetHeader().Height {
+		return newBlock.GetSigNames()
+	}
+	if height == lastBlock.GetHeader().Height {
+		return lastBlock.GetSigNames()
+	}
+	if b, err := LoadBlock(height); err == nil {
+		return b.GetSigNames()
+	}
+	return lastBlock.GetSigNames()
+}
+
 // AuthenticateOracleProofs verifies that the oracle values embedded in a block
 // are each backed by a signature-verified, fresh oracle nonce transaction.
-func AuthenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData, randData []byte) error {
-	return authenticateOracleProofs(blockHeight, proofs, priceData, randData, func(pb []byte) (*transactionsDefinition.Transaction, error) {
+//
+// Each proof is verified with the signature-scheme configuration in force at
+// the proof's own signing height (taken from block headers), not the node's
+// current global config: around a scheme change a block legitimately embeds
+// proofs signed under the previous scheme, and a node that has already adopted
+// the new scheme would otherwise be permanently unable to verify that block.
+func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
+	blockHeight := newBlock.GetHeader().Height
+	// Resolving a config re-validates the scheme against liboqs (a keypair
+	// generation), so cache it per height for the duration of this block check —
+	// proofs cluster on a handful of heights.
+	type sigNames struct {
+		sigName, sigName2   string
+		isPaused, isPaused2 bool
+	}
+	cache := map[int64]sigNames{}
+	return authenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData, func(pb []byte) (*transactionsDefinition.Transaction, error) {
 		var tx transactionsDefinition.Transaction
 		decoded, _, err := tx.GetFromBytes(pb)
 		if err != nil {
 			return nil, fmt.Errorf("cannot decode oracle proof: %w", err)
 		}
-		if !decoded.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+		names, ok := cache[decoded.Height]
+		if !ok {
+			sigName, sigName2, isPaused, isPaused2, err := sigNamesAtProofHeight(decoded.Height, newBlock, lastBlock)
+			if err != nil {
+				return nil, fmt.Errorf("cannot resolve signature schemes for oracle proof at height %d: %w", decoded.Height, err)
+			}
+			names = sigNames{sigName, sigName2, isPaused, isPaused2}
+			cache[decoded.Height] = names
+		}
+		if !decoded.Verify(names.sigName, names.sigName2, names.isPaused, names.isPaused2) {
 			return nil, fmt.Errorf("oracle proof signature verification failed")
 		}
 		return &decoded, nil

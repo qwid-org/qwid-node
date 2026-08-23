@@ -195,7 +195,23 @@ func (bh *BaseHeader) Verify(sigName, sigName2 string, isPaused, isPaused2 bool)
 	sig := bh.Signature.GetBytes()
 	primary = sig[0] == 0
 	//logger.GetLogger().Println("a:", a, "primary:", primary)
-	pk, err := pubkeys.LoadPubKeyWithPrimary(a, primary)
+	// Select the operator key matching the scheme this header is verified
+	// under: after a scheme change the account carries keys of both the old and
+	// the new scheme with the same primary flag, and the newest one is not
+	// necessarily the one this (possibly historical) header was signed with.
+	schemeName := sigName
+	if !primary {
+		schemeName = sigName2
+	}
+	var pk common.PubKey
+	if expLen, lerr := oqs.PubKeyLength(schemeName); lerr == nil {
+		pk, err = pubkeys.LoadPubKeyWithPrimaryOfLength(a, primary, expLen)
+	} else {
+		err = lerr
+	}
+	if err != nil {
+		pk, err = pubkeys.LoadPubKeyWithPrimary(a, primary)
+	}
 	if err != nil {
 		logger.GetLogger().Println(err)
 		return false

@@ -7,6 +7,7 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/pubkeys"
@@ -382,7 +383,23 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 	pkb := pk.GetBytes()
 	if len(pkb) == 0 {
 		senderAddr := tx.GetSenderAddress()
-		pkp, err := pubkeys.LoadPubKeyWithPrimary(senderAddr, primary)
+		// Prefer the sender key whose length matches the scheme this signature
+		// is verified under: after a scheme change the newest registered key
+		// belongs to the new scheme, while a signature made earlier (an oracle
+		// proof verified against the config at its signing height) needs the
+		// superseded key it was made with.
+		schemeName := sigName
+		if !primary {
+			schemeName = sigName2
+		}
+		var pkp common.PubKey
+		expLen, err := oqs.PubKeyLength(schemeName)
+		if err == nil {
+			pkp, err = pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen)
+		}
+		if err != nil {
+			pkp, err = pubkeys.LoadPubKeyWithPrimary(senderAddr, primary)
+		}
 		if err != nil {
 			logger.GetLogger().Println("Verify: cannot load sender pubkey from DB:", err)
 			logger.GetLogger().Println("  Sender address:", senderAddr.GetHex())

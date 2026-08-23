@@ -447,10 +447,13 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 			"Until then this node cannot produce with %q",
 			sigName, sigName, sigName, sigName)
 	}
-	mainAddress, err := common.PubKeyToAddress(pubKey, primary)
-	if err != nil {
-		return err
-	}
+	// The key's MainAddress is the wallet's identity (w.MainAddress), exactly as
+	// every other init/load path sets it — NOT an address derived from the new
+	// key. Deriving it here detached the announced key from the operator's
+	// on-chain identity: StorePubKeyInPatriciaTrie filed it under a stray trie
+	// root and the embedded-pubkey verification (pk.MainAddress == sender) could
+	// never match, so peers had no way to associate the new key with this node.
+	mainAddress := w.MainAddress
 	if primary {
 		err = w.Account1.PublicKey.Init(pubKey, mainAddress)
 		if err != nil {

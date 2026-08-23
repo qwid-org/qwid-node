@@ -156,16 +156,22 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	optData = append(optData, EncryptionOptData...)
 	encryptionMutex.Unlock()
 
+	// Nonce transactions never carry a pubkey. Key registration happens through
+	// exactly one channel: a transaction the operator sends MANUALLY with the
+	// pubkey included (signed with that key), processed by ProcessBlockPubKey
+	// when it lands in a block. Until the key of the CURRENT secondary scheme is
+	// registered on-chain, sign nonces with the primary key so this node never
+	// emits material peers cannot verify.
 	pubkey := common.PubKey{}
 	if primary == false {
-		pktrie, err := pubkeys.LoadTreeWithoutAddresses(sender)
-		if err != nil {
-			return message.TransactionsMessage{}, err
-		}
-		isAddr := pktrie.IsAddressInTree(w.Account2.Address)
-		if !isAddr {
-			logger.GetLogger().Println("no address2 in blockchain")
-			pubkey = w.Account2.PublicKey
+		if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(sender, false, common.PubKeyLength2(false)); err != nil {
+			if !common.IsPaused() {
+				primary = true
+			} else {
+				logger.GetLogger().Println("WARNING: secondary key of the current scheme is not registered on-chain and the " +
+					"primary scheme is paused - peers will ignore this node's nonces; register the new key by sending a " +
+					"transaction with the pubkey included")
+			}
 		}
 	}
 

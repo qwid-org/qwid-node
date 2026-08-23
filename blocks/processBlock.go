@@ -124,7 +124,7 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// and rand entry must be backed by a signature-verified, fresh proof so a
 	// producer cannot fabricate values attributed to other validators.
 	if blockHeight >= OracleProofsActivationHeight {
-		if err := AuthenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData); err != nil {
+		if err := AuthenticateOracleProofs(newBlock, lastBlock); err != nil {
 			return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Define constants or derive values for offsets and size
@@ -108,6 +109,33 @@ func VerifyEncConfig(encConfig ConfigEnc) bool {
 		return false
 	}
 	return true
+}
+
+var (
+	pubKeyLengthCacheMu sync.RWMutex
+	pubKeyLengthCache   = map[string]int{}
+)
+
+// PubKeyLength returns the public-key byte length of the named signature
+// scheme. Only the first call per scheme touches liboqs; the result is cached,
+// since verification paths ask for this on every signature.
+func PubKeyLength(sigName string) (int, error) {
+	pubKeyLengthCacheMu.RLock()
+	l, ok := pubKeyLengthCache[sigName]
+	pubKeyLengthCacheMu.RUnlock()
+	if ok {
+		return l, nil
+	}
+	var signer Signature
+	defer signer.Clean()
+	if err := signer.Init(sigName, nil); err != nil {
+		return 0, err
+	}
+	l = signer.Details().LengthPublicKey
+	pubKeyLengthCacheMu.Lock()
+	pubKeyLengthCache[sigName] = l
+	pubKeyLengthCacheMu.Unlock()
+	return l, nil
 }
 
 func GenerateEncConfig(sigName string) (ConfigEnc, error) {
