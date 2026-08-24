@@ -86,6 +86,7 @@ func pruneSeen(seen map[common.Hash]struct{}, txs []transactionsDefinition.Trans
 
 func broadcastTransactionsMsgInLoop() {
 	seen := make(map[common.Hash]struct{}) // NP-H10: hashes already re-broadcast by this loop (single-goroutine, no mutex)
+	var lastNoPeerLog time.Time            // rate-limits the "nowhere to send" warning below
 	for {
 		select {
 		case <-tcpip.Quit:
@@ -102,6 +103,18 @@ func broadcastTransactionsMsgInLoop() {
 			n, err := GenerateTransactionMsg(newTxs, []byte("tx"), topic)
 			if err == nil {
 				peers := tcpip.GetPeersConnected(tcpip.TransactionTopic)
+				// With no peer on the transaction topic this loop sends nothing
+				// and says nothing, so locally submitted transactions sit in the
+				// pool as "pending" while the node looks perfectly healthy. Say
+				// it out loud instead — the pool filling up with transactions
+				// that have nowhere to go is a connectivity fault, not patience.
+				if len(peers) == 0 {
+					if time.Since(lastNoPeerLog) > time.Minute {
+						logger.GetLogger().Printf("WARNING: %d transaction(s) waiting to be broadcast but no peer is connected on the transaction topic; "+
+							"they cannot reach the network and will stay pending", len(newTxs))
+						lastNoPeerLog = time.Now()
+					}
+				}
 				for topicip := range peers {
 					var ip [4]byte
 					copy(ip[:], topicip[2:])
