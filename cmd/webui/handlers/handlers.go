@@ -590,11 +590,29 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 
 	pk := common.PubKey{}
 	if req.IncludePubKey {
-		if req.UsePrimaryEncryption {
+		// "Register Paused public key" means the key of whichever scheme is
+		// currently PAUSED — not Account1. Which slot that is follows from the
+		// pause state: while the primary is live the spare is the paused one,
+		// and after the primary is paused it becomes the paused one itself.
+		//
+		// Tying this to Account1 registered the live scheme's key, which is
+		// already registered and never the one that needs it. The key that
+		// needs registering is always the paused one: a scheme arrives paused
+		// and cannot sign for itself, which is why the live scheme signs for it.
+		registerPrimary := !signPrimary
+		if !req.UsePrimaryEncryption {
+			// Unchecked: register the live scheme's key instead.
+			registerPrimary = signPrimary
+		}
+		if registerPrimary {
 			pk = MainWallet.Account1.PublicKey
 		} else {
 			pk = MainWallet.Account2.PublicKey
 		}
+		logger.GetLogger().Printf("including pubkey for registration: %s slot (%s), %d bytes",
+			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
+			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
+			len(pk.GetBytes()))
 	}
 
 	// Build transaction
@@ -859,11 +877,29 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 
 	pk := common.PubKey{}
 	if req.IncludePubKey {
-		if req.UsePrimaryEncryption {
+		// "Register Paused public key" means the key of whichever scheme is
+		// currently PAUSED — not Account1. Which slot that is follows from the
+		// pause state: while the primary is live the spare is the paused one,
+		// and after the primary is paused it becomes the paused one itself.
+		//
+		// Tying this to Account1 registered the live scheme's key, which is
+		// already registered and never the one that needs it. The key that
+		// needs registering is always the paused one: a scheme arrives paused
+		// and cannot sign for itself, which is why the live scheme signs for it.
+		registerPrimary := !signPrimary
+		if !req.UsePrimaryEncryption {
+			// Unchecked: register the live scheme's key instead.
+			registerPrimary = signPrimary
+		}
+		if registerPrimary {
 			pk = MainWallet.Account1.PublicKey
 		} else {
 			pk = MainWallet.Account2.PublicKey
 		}
+		logger.GetLogger().Printf("including pubkey for registration: %s slot (%s), %d bytes",
+			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
+			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
+			len(pk.GetBytes()))
 	}
 
 	// Build transaction
@@ -1461,11 +1497,29 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 
 	pk := common.PubKey{}
 	if req.IncludePubKey {
-		if req.UsePrimaryEncryption {
+		// "Register Paused public key" means the key of whichever scheme is
+		// currently PAUSED — not Account1. Which slot that is follows from the
+		// pause state: while the primary is live the spare is the paused one,
+		// and after the primary is paused it becomes the paused one itself.
+		//
+		// Tying this to Account1 registered the live scheme's key, which is
+		// already registered and never the one that needs it. The key that
+		// needs registering is always the paused one: a scheme arrives paused
+		// and cannot sign for itself, which is why the live scheme signs for it.
+		registerPrimary := !signPrimary
+		if !req.UsePrimaryEncryption {
+			// Unchecked: register the live scheme's key instead.
+			registerPrimary = signPrimary
+		}
+		if registerPrimary {
 			pk = MainWallet.Account1.PublicKey
 		} else {
 			pk = MainWallet.Account2.PublicKey
 		}
+		logger.GetLogger().Printf("including pubkey for registration: %s slot (%s), %d bytes",
+			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
+			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
+			len(pk.GetBytes()))
 	}
 
 	// Build transaction
