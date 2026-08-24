@@ -109,18 +109,20 @@ func bytesSliceFromBytes(b []byte) ([][]byte, []byte, error) {
 }
 
 func FromBytesToEncryptionConfig(bb []byte, primary bool) (oqs.ConfigEnc, error) {
+	// Empty bytes mean "unchanged": the header is not carrying a new config, so
+	// the answer is whatever the current one is — pause flag included.
+	//
+	// This must NOT be gated on the scheme being live. Describing a scheme and
+	// being allowed to sign with it are different questions, and the pause flag
+	// is part of the description. Gating it made every header with an empty slot
+	// unreadable the moment that slot's scheme was paused, which takes down
+	// GetSigNames and with it block verification, node startup and oracle-proof
+	// checks — for a header that says nothing more than "no change".
 	if len(bb) == 0 {
-
-		if !common.IsPaused() && primary {
-			enc := oqs.CreateEncryptionScheme(common.SigName(), common.PubKeyLength(false), common.PrivateKeyLength(), common.SignatureLength(false), common.IsPaused())
-			return enc, nil
-		} else if !common.IsPaused2() && !primary {
-			//TODO maybe one should make it better
-			enc := oqs.CreateEncryptionScheme(common.SigName2(), common.PubKeyLength2(false), common.PrivateKeyLength2(), common.SignatureLength2(false), common.IsPaused2())
-			return enc, nil
-		} else {
-			return oqs.ConfigEnc{}, fmt.Errorf("no valid encyption scheme")
+		if primary {
+			return oqs.CreateEncryptionScheme(common.SigName(), common.PubKeyLength(false), common.PrivateKeyLength(), common.SignatureLength(false), common.IsPaused()), nil
 		}
+		return oqs.CreateEncryptionScheme(common.SigName2(), common.PubKeyLength2(false), common.PrivateKeyLength2(), common.SignatureLength2(false), common.IsPaused2()), nil
 	}
 	return oqs.FromBytesToEncryptionConfig(bb[:])
 }
@@ -216,7 +218,16 @@ func (bh *BaseHeader) Verify(sigName, sigName2 string, isPaused, isPaused2 bool)
 		logger.GetLogger().Println(err)
 		return false
 	}
-	return wallet.Verify(calcHash, bh.Signature.GetBytes(), pk.GetBytes(), sigName, sigName2, isPaused, isPaused2)
+	ok := wallet.Verify(calcHash, bh.Signature.GetBytes(), pk.GetBytes(), sigName, sigName2, isPaused, isPaused2)
+	if !ok {
+		// Diagnostic: a header rejection is otherwise indistinguishable between
+		// "wrong signature", "scheme not accepted right now" and "the operator
+		// key we loaded is not the one that signed". Name all three.
+		logger.GetLogger().Printf(
+			"header verify FAILED height=%d operator=%s signedWith=%s (primary=%v) schemes=[%s/%s] paused=[%v/%v] loadedPubKeyLen=%d",
+			bh.Height, a.GetHex(), schemeName, primary, sigName, sigName2, isPaused, isPaused2, len(pk.GetBytes()))
+	}
+	return ok
 }
 
 func (bh *BaseHeader) Sign(primary bool) (common.Signature, []byte, error) {

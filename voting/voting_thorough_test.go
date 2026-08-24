@@ -257,7 +257,7 @@ func TestPausingNeedsExactlyOneThird(t *testing.T) {
 	if err := SaveVotesEncryption1(voteValue(1), 100, delegated(20), 3_000); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
-	if !VerifyEncryptionForPausing(100, total, true) {
+	if !VerifyEncryptionForPausing(100, total, true, voteValue(1)) {
 		t.Error("exactly one third was rejected for pausing")
 	}
 }
@@ -269,7 +269,7 @@ func TestPausingRejectsJustBelowOneThird(t *testing.T) {
 	if err := SaveVotesEncryption1(voteValue(1), 100, delegated(21), 2_999); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
-	if VerifyEncryptionForPausing(100, total, true) {
+	if VerifyEncryptionForPausing(100, total, true, voteValue(1)) {
 		t.Error("one unit below a third was accepted for pausing")
 	}
 }
@@ -281,7 +281,7 @@ func TestReplacingNeedsExactlyTwoThirds(t *testing.T) {
 	if err := SaveVotesEncryption2(voteValue(1), 100, delegated(22), 6_000); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
-	if !VerifyEncryptionForReplacing(100, total, false) {
+	if !VerifyEncryptionForReplacing(100, total, false, voteValue(1)) {
 		t.Error("exactly two thirds was rejected for replacing")
 	}
 }
@@ -293,7 +293,7 @@ func TestReplacingRejectsJustBelowTwoThirds(t *testing.T) {
 	if err := SaveVotesEncryption2(voteValue(1), 100, delegated(23), 5_999); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
-	if VerifyEncryptionForReplacing(100, total, false) {
+	if VerifyEncryptionForReplacing(100, total, false, voteValue(1)) {
 		t.Error("one unit below two thirds was accepted for replacing")
 	}
 }
@@ -308,7 +308,7 @@ func TestThresholdsAreExactAtChainSizedStakes(t *testing.T) {
 	if err := SaveVotesEncryption1(voteValue(1), 100, delegated(24), 100_000_000_000_000_001); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
-	if !VerifyEncryptionForPausing(100, total, true) {
+	if !VerifyEncryptionForPausing(100, total, true, voteValue(1)) {
 		t.Error("exact third at chain scale was rejected")
 	}
 
@@ -316,7 +316,7 @@ func TestThresholdsAreExactAtChainSizedStakes(t *testing.T) {
 	if err := SaveVotesEncryption1(voteValue(1), 100, delegated(24), 100_000_000_000_000_000); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
-	if VerifyEncryptionForPausing(100, total, true) {
+	if VerifyEncryptionForPausing(100, total, true, voteValue(1)) {
 		t.Error("one unit below the exact third at chain scale was accepted")
 	}
 }
@@ -330,7 +330,7 @@ func TestExpiredVotesDoNotReachThreshold(t *testing.T) {
 		t.Fatalf("vote: %v", err)
 	}
 	past := int64(100) + common.VotingHeightDistance + 1
-	if VerifyEncryptionForReplacing(past, total, true) {
+	if VerifyEncryptionForReplacing(past, total, true, voteValue(1)) {
 		t.Error("a vote past its window still authorised a scheme replacement")
 	}
 }
@@ -345,10 +345,10 @@ func TestNoVotesAuthorisesNothing(t *testing.T) {
 	resetVoting(t)
 
 	for _, total := range []int64{0, -1, 9_000} {
-		if VerifyEncryptionForPausing(100, total, true) {
+		if VerifyEncryptionForPausing(100, total, true, voteValue(1)) {
 			t.Errorf("pausing approved with no votes at totalStaked=%d", total)
 		}
-		if VerifyEncryptionForReplacing(100, total, true) {
+		if VerifyEncryptionForReplacing(100, total, true, voteValue(1)) {
 			t.Errorf("replacing approved with no votes at totalStaked=%d", total)
 		}
 	}
@@ -365,7 +365,7 @@ func TestNonPositiveTotalStakeAuthorisesNothing(t *testing.T) {
 		if err := SaveVotesEncryption1(voteValue(1), 100, delegated(28), 5_000); err != nil {
 			t.Fatalf("vote: %v", err)
 		}
-		if VerifyEncryptionForPausing(100, total, true) {
+		if VerifyEncryptionForPausing(100, total, true, voteValue(1)) {
 			t.Errorf("pausing approved at totalStaked=%d despite no measurable threshold", total)
 		}
 
@@ -373,7 +373,7 @@ func TestNonPositiveTotalStakeAuthorisesNothing(t *testing.T) {
 		if err := SaveVotesEncryption2(voteValue(1), 100, delegated(28), 5_000); err != nil {
 			t.Fatalf("vote: %v", err)
 		}
-		if VerifyEncryptionForReplacing(100, total, false) {
+		if VerifyEncryptionForReplacing(100, total, false, voteValue(1)) {
 			t.Errorf("replacing approved at totalStaked=%d despite no measurable threshold", total)
 		}
 	}
@@ -389,10 +389,10 @@ func TestTallyEmptiedByExpiryAuthorisesNothing(t *testing.T) {
 	}
 	past := int64(100) + common.VotingHeightDistance + 1
 
-	if VerifyEncryptionForPausing(past, 0, true) {
+	if VerifyEncryptionForPausing(past, 0, true, voteValue(1)) {
 		t.Error("pausing approved after the only vote expired")
 	}
-	if VerifyEncryptionForReplacing(past, 0, true) {
+	if VerifyEncryptionForReplacing(past, 0, true, voteValue(1)) {
 		t.Error("replacing approved after the only vote expired")
 	}
 }
@@ -420,7 +420,7 @@ func TestVerifyPurgesExpiredVotesAsASideEffect(t *testing.T) {
 		t.Fatalf("vote: %v", err)
 	}
 	past := int64(100) + common.VotingHeightDistance + 1
-	VerifyEncryptionForPausing(past, 9_000, true)
+	VerifyEncryptionForPausing(past, 9_000, true, voteValue(1))
 
 	VotesEncryptionMutex.Lock()
 	defer VotesEncryptionMutex.Unlock()

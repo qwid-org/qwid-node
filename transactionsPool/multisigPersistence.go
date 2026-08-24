@@ -11,7 +11,10 @@ import (
 )
 
 var verifyPersistedMultiSign = func(tx *transactionsDefinition.Transaction) bool {
-	return tx.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
+	// See persistedTxPauseFlags in escrowPersistence.go for why the pause gate
+	// is deliberately not applied to transactions reloaded from the database.
+	isPaused, isPaused2 := persistedTxPauseFlags()
+	return tx.Verify(common.SigName(), common.SigName2(), isPaused, isPaused2)
 }
 
 // MultiSignPoolKeyFor returns the grouping key the multisig pool orders by: a

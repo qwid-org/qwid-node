@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -408,25 +409,51 @@ func handleCHECK(line []byte, reply *[]byte) {
 	logger.GetLogger().Println(string(line))
 	*reply = nil
 
-	var primaryAddr, secondaryAddr []byte
+	// The wire format still carries both addresses so existing callers keep
+	// working, but only the primary one is used: it IS the main address that
+	// both schemes' keys are registered under, and the secondary key is looked
+	// up by scheme length rather than by its own address (see below).
+	var primaryAddr []byte
 	if len(line) == 2*common.AddressLength {
 		primaryAddr = line[:common.AddressLength]
-		secondaryAddr = line[common.AddressLength:]
 	} else {
 		w := wallet.GetActiveWallet()
 		if w == nil {
 			*reply = []byte("no wallet loaded on this node; send the addresses to check")
 			return
 		}
-		primaryAddr = w.Account1.Address.GetBytes()
-		secondaryAddr = w.Account2.Address.GetBytes()
+		primaryAddr = w.MainAddress.GetBytes()
 	}
 
-	if _, err := pubkeys.LoadPubKey(primaryAddr); err != nil {
-		*reply = []byte("Primary pubkey is not registered in blockchain. Please send transaction including primary PubKey to blockchain")
+	// Ask the question the consensus paths ask: is there a key of the CURRENT
+	// scheme's length? LoadPubKey answers only "is anything stored at this
+	// address", which stays true after a signature-scheme change — the previous
+	// scheme's key is still there. CHECK then reported the secondary key as
+	// registered while blockCreation (which uses the length-aware lookup) kept
+	// falling back to the primary key, leaving the operator unable to pause the
+	// primary scheme and with no indication why.
+	//
+	// mainAddress is the primary account address: wallet.MainAddress is set to
+	// Account1.Address, and keys of both schemes are registered under it.
+	mainAddress := common.Address{}
+	if err := mainAddress.Init(primaryAddr); err != nil {
+		*reply = []byte("invalid primary address")
+		return
 	}
-	if _, err := pubkeys.LoadPubKey(secondaryAddr); err != nil {
-		*reply = []byte("Secondary pubkey is not registered in blockchain. Please send transaction including secondary PubKey to blockchain")
+
+	var missing []string
+	if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(mainAddress, true, common.PubKeyLength(false)); err != nil {
+		missing = append(missing, fmt.Sprintf("Primary pubkey (%s, %d bytes) is not registered in blockchain. Please send transaction including primary PubKey to blockchain",
+			common.SigName(), common.PubKeyLength(false)))
+	}
+	if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(mainAddress, false, common.PubKeyLength2(false)); err != nil {
+		missing = append(missing, fmt.Sprintf("Secondary pubkey (%s, %d bytes) is not registered in blockchain. Please send transaction including secondary PubKey to blockchain",
+			common.SigName2(), common.PubKeyLength2(false)))
+	}
+	// Report every missing key. The previous form assigned to *reply twice, so
+	// when both were missing the operator was told only about the secondary.
+	if len(missing) > 0 {
+		*reply = []byte(strings.Join(missing, "\n"))
 	}
 }
 
@@ -1180,12 +1207,20 @@ func handlePUBA(line []byte, reply *[]byte) {
 				Address: a.GetHex(),
 				Primary: a.Primary,
 			})
-			if a.Primary {
-				resp.HasPrimary = true
-			} else {
-				resp.HasSecondary = true
-			}
 		}
+	}
+
+	// HasPrimary/HasSecondary must answer "is there a key of the CURRENT
+	// scheme", not "is there any key in this slot". After a scheme change the
+	// superseded key is still registered and still flagged primary, so the slot
+	// looks occupied while nothing can actually verify a signature made under
+	// the new scheme — the UI reported "Registered" for a key the node could not
+	// use. Same mistake as handleCHECK once made.
+	if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(addr, true, common.PubKeyLength(false)); err == nil {
+		resp.HasPrimary = true
+	}
+	if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(addr, false, common.PubKeyLength2(false)); err == nil {
+		resp.HasSecondary = true
 	}
 
 	result, err := json.Marshal(resp)

@@ -383,6 +383,10 @@ func TestReloadedSeededWalletSchemeChangeIgnoresReadableArchive(t *testing.T) {
 		schemeChangeTarget: append([]byte(nil), foreign.secretKey.GetBytes()...),
 	})
 
+	// See the matching note in TestSchemeChangeSeedOutranksStaleArchive: a
+	// scheme change swaps the key, not the wallet's identity.
+	originalMain := w.MainAddress.GetHex()
+
 	switched, err := LoadJSONFromDir(w.HomePath, 245, "test-password-123", schemeChangeTarget, w.SigName2)
 	if err != nil {
 		t.Fatalf("seeded wallet failed a scheme change it should have derived: %v", err)
@@ -391,8 +395,9 @@ func TestReloadedSeededWalletSchemeChangeIgnoresReadableArchive(t *testing.T) {
 		t.Fatalf("Account1 = %s, expected the phrase-derived key %s (the readable archive entry %s won instead)",
 			switched.Account1.Address.GetHex(), expected.Address.GetHex(), foreign.Address.GetHex())
 	}
-	if switched.MainAddress.GetHex() != expected.Address.GetHex() {
-		t.Fatalf("MainAddress = %s, expected %s", switched.MainAddress.GetHex(), expected.Address.GetHex())
+	if switched.MainAddress.GetHex() != originalMain {
+		t.Fatalf("MainAddress moved to %s after a scheme change; it must stay %s",
+			switched.MainAddress.GetHex(), originalMain)
 	}
 	// And the archive was refreshed with what the phrase derives, so the foreign
 	// entry cannot come back on a later load.

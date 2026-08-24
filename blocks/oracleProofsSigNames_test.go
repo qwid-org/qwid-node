@@ -92,3 +92,15 @@ func TestSigNamesAtProofHeightUsesConfigAtSigningHeight(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "MAYO-5", s2)
 }
+
+// Pins the decision that re-verifying an already-embedded oracle proof does not
+// apply the pause gate. Reintroducing it re-judges committed history by today's
+// policy and halts the chain at the first block carrying a proof signed under a
+// since-paused scheme — which is exactly how it failed once.
+func TestHistoricalProofVerificationIgnoresPauseFlags(t *testing.T) {
+	isPaused, isPaused2 := historicalProofPauseFlags()
+	if isPaused || isPaused2 {
+		t.Fatalf("historical proof verification applies the pause gate (%v, %v); a signature valid when it was made must stay valid",
+			isPaused, isPaused2)
+	}
+}

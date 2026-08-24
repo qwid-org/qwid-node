@@ -130,6 +130,29 @@ func sigNamesAtProofHeight(height int64, newBlock, lastBlock Block) (string, str
 	return lastBlock.GetSigNames()
 }
 
+// historicalProofPauseFlags returns the pause flags used when re-verifying an
+// oracle proof that is ALREADY embedded in a block: none, for either scheme.
+//
+// Pausing is a forward-looking policy — it governs what may enter the system
+// from now on, not a claim that signatures already committed to the chain have
+// become forgeries. Applying it here re-judges history by today's rules: when
+// the spare scheme became paused by default, every proof signed under it (about
+// half of them, because the signer was chosen at random while both schemes were
+// live) stopped verifying, and the chain stopped at the first block carrying
+// one.
+//
+// The scheme NAMES still come from the configuration in force at the proof's
+// own height, so a proof must still verify under a scheme the chain actually
+// had. What is dropped is only the liveness gate.
+//
+// The trade-off is deliberate and worth stating: if a scheme was paused because
+// it is broken, an attacker who can forge its signatures can forge a proof at a
+// historical height. Guarding against that requires rejecting the history
+// itself, which no running chain can do.
+func historicalProofPauseFlags() (bool, bool) {
+	return false, false
+}
+
 // AuthenticateOracleProofs verifies that the oracle values embedded in a block
 // are each backed by a signature-verified, fresh oracle nonce transaction.
 //
@@ -163,7 +186,8 @@ func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 			names = sigNames{sigName, sigName2, isPaused, isPaused2}
 			cache[decoded.Height] = names
 		}
-		if !decoded.Verify(names.sigName, names.sigName2, names.isPaused, names.isPaused2) {
+		isPaused, isPaused2 := historicalProofPauseFlags()
+		if !decoded.Verify(names.sigName, names.sigName2, isPaused, isPaused2) {
 			return nil, fmt.Errorf("oracle proof signature verification failed")
 		}
 		return &decoded, nil
