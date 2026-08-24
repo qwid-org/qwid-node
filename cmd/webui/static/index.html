@@ -524,10 +524,6 @@
                 </div>
 
                 <div class="form-group" style="display:flex;gap:20px;">
-                    <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="stakingUsePrimaryEncryption" checked style="width:auto;margin-right:8px;" title="Registers the paused scheme's public key. The signing key is chosen automatically: whichever scheme is currently live.">
-                        Register Paused public key
-                    </label>
                 </div>
 
                 <button class="btn-primary" onclick="executeStaking()">Execute</button>
@@ -596,10 +592,6 @@
                     <label style="display:flex;align-items:center;cursor:pointer;">
                         <input type="checkbox" id="escrowIncludePubKey" style="width:auto;margin-right:8px;">
                         Include Public Key
-                    </label>
-                    <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="escrowUsePrimaryEncryption" checked style="width:auto;margin-right:8px;" title="Registers the paused scheme's public key. The signing key is chosen automatically: whichever scheme is currently live.">
-                        Register Paused public key
                     </label>
                 </div>
 
@@ -831,10 +823,6 @@ contract Coin {
                 </div>
 
                 <div class="form-group" style="display:flex;gap:20px;">
-                    <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="dexUsePrimaryEncryption" checked style="width:auto;margin-right:8px;">
-                        Register Paused public key
-                    </label>
                 </div>
 
                 <div style="display:flex;gap:10px;">
@@ -1421,7 +1409,6 @@ contract Coin {
             const delegatedAccount = document.getElementById('stakingDelegatedAccount').value || '1';
             const amount = parseFloat(document.getElementById('stakingAmount').value) || 0;
             const intendOperator = document.getElementById('intendOperator').checked;
-            const usePrimaryEncryption = document.getElementById('stakingUsePrimaryEncryption').checked;
 
             if (amount <= 0) {
                 showMessage('Please enter a valid amount', 'error');
@@ -1434,8 +1421,7 @@ contract Coin {
                     delegatedAccount,
                     amount,
                     intendOperator,
-                    includePubKey: false,
-                    usePrimaryEncryption
+                    includePubKey: false
                 });
                 if (res.error) {
                     showMessage(res.error, 'error');
@@ -1730,15 +1716,13 @@ contract Coin {
             const multiSigNumber = parseInt(document.getElementById('multiSigNumber').value) || 0;
             const multiSigAddresses = document.getElementById('multiSigAddresses').value;
             const includePubKey = document.getElementById('escrowIncludePubKey').checked;
-            const usePrimaryEncryption = document.getElementById('escrowUsePrimaryEncryption').checked;
 
             try {
                 const res = await api('/api/escrow/modify', 'POST', {
                     escrowDelay,
                     multiSigNumber,
                     multiSigAddresses,
-                    includePubKey,
-                    usePrimaryEncryption
+                    includePubKey
                 });
                 if (res.error) {
                     showMessage(res.error, 'error');
@@ -1992,7 +1976,6 @@ contract Coin {
             const operation = document.querySelector('input[name="dexOperation"]:checked').value;
             const tokenAmount = parseFloat(document.getElementById('dexTokenAmount').value) || 0;
             const qwdAmount = parseFloat(document.getElementById('dexQwdAmount').value) || 0;
-            const usePrimaryEncryption = document.getElementById('dexUsePrimaryEncryption').checked;
 
             if (!tokenAddr) {
                 showMessage('Please select a token', 'error');
@@ -2004,8 +1987,7 @@ contract Coin {
                     tokenAddress: tokenAddr,
                     operation,
                     tokenAmount,
-                    qwdAmount,
-                    usePrimaryEncryption
+                    qwdAmount
                 });
                 if (res.error) {
                     showMessage(res.error, 'error');
@@ -2021,7 +2003,6 @@ contract Coin {
             document.querySelector('input[name="dexOperation"][value="trade"]').checked = true;
             const tokenAddr = document.getElementById('dexTokenSelect').value;
             const tokenAmount = parseFloat(document.getElementById('dexTokenAmount').value) || 0;
-            const usePrimaryEncryption = document.getElementById('dexUsePrimaryEncryption').checked;
 
             if (!tokenAddr || tokenAmount <= 0) {
                 showMessage('Select token and enter amount', 'error');
@@ -2032,8 +2013,7 @@ contract Coin {
                 const res = await api('/api/dex/trade', 'POST', {
                     tokenAddress: tokenAddr,
                     action: 'buy',
-                    amount: tokenAmount,
-                    usePrimaryEncryption
+                    amount: tokenAmount
                 });
                 if (res.error) {
                     showMessage(res.error, 'error');
@@ -2049,7 +2029,6 @@ contract Coin {
             document.querySelector('input[name="dexOperation"][value="trade"]').checked = true;
             const tokenAddr = document.getElementById('dexTokenSelect').value;
             const tokenAmount = parseFloat(document.getElementById('dexTokenAmount').value) || 0;
-            const usePrimaryEncryption = document.getElementById('dexUsePrimaryEncryption').checked;
 
             if (!tokenAddr || tokenAmount <= 0) {
                 showMessage('Select token and enter amount', 'error');
@@ -2060,8 +2039,7 @@ contract Coin {
                 const res = await api('/api/dex/trade', 'POST', {
                     tokenAddress: tokenAddr,
                     action: 'sell',
-                    amount: tokenAmount,
-                    usePrimaryEncryption
+                    amount: tokenAmount
                 });
                 if (res.error) {
                     showMessage(res.error, 'error');
