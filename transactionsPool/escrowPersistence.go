@@ -10,8 +10,26 @@ import (
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
+// persistedTxPauseFlags returns the pause flags used when re-verifying a
+// transaction reloaded from the database on restart: none, for either scheme.
+//
+// The reason is consistency, not leniency. Only the DATABASE reload re-verifies;
+// the in-memory pool of a node that has not restarted does not. Applying the
+// pause gate here would therefore make a restarted node drop a pending escrow or
+// multisig entry that every still-running node keeps and settles — the exact
+// consensus divergence this persistence exists to prevent, now triggered by
+// nothing more than who happened to restart.
+//
+// The scheme NAMES still apply, so the signature must still verify under a
+// scheme the node knows. What is dropped is only the liveness gate, matching
+// blocks.historicalProofPauseFlags for embedded oracle proofs.
+func persistedTxPauseFlags() (bool, bool) {
+	return false, false
+}
+
 var verifyPersistedEscrow = func(tx *transactionsDefinition.Transaction) bool {
-	return tx.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
+	isPaused, isPaused2 := persistedTxPauseFlags()
+	return tx.Verify(common.SigName(), common.SigName2(), isPaused, isPaused2)
 }
 
 // AddEscrowTransaction adds a delayed transaction to the escrow pool and mirrors

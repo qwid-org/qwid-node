@@ -163,10 +163,23 @@ func IsPaused() bool {
 	return atomic.LoadInt32(paused) == 1
 }
 
+// IsPaused2 reports whether the SPARE scheme is out of use. It is DERIVED from
+// the primary's state rather than stored, so that exactly one scheme is usable
+// at any moment and never zero.
+//
+// The spare exists to take over when the primary is paused: while the primary
+// works, the spare must be inert (nobody signs with an algorithm held in
+// reserve), and the moment the primary is paused the spare must become usable —
+// otherwise nothing can sign, and since votes travel in signed nonce
+// transactions and their outcome is recorded by a signed block, a pause with no
+// live scheme could never be lifted or resolved.
+//
+// The isPaused2 FIELD is still written by SetEncryption and still serialised, so
+// the wire format and the stored config are unchanged; it simply no longer
+// decides whether the spare is live. The secondary slot carries WHICH algorithm
+// the spare is, never WHETHER it is on.
 func IsPaused2() bool {
-	var paused *int32
-	paused = &encryptionConfigInstance.isPaused2
-	return atomic.LoadInt32(paused) == 1
+	return !IsPaused()
 }
 
 func PubKeyLength(withPrev bool) int {
@@ -323,7 +336,7 @@ type PubKey struct {
 
 func (pk *PubKey) Init(b []byte, mainAddress Address) error {
 	//logger.GetLogger().Println("PubKey.Init: len(b)=", len(b), "PubKeyLength=", PubKeyLength(false), "PubKeyLength2=", PubKeyLength2(false))
-	if len(b) != PubKeyLength(false) && len(b) != PubKeyLength2(false) && encryptionConfigInstance.isPaused == 0 && encryptionConfigInstance.isPaused2 == 0 {
+	if len(b) != PubKeyLength(false) && len(b) != PubKeyLength2(false) && !IsPaused() && !IsPaused2() {
 		return fmt.Errorf("error Pubkey initialization with wrong length, should be %v, %v, got %v", PubKeyLength(false), PubKeyLength2(false), len(b))
 	}
 	if len(b) == PubKeyLength(false) {

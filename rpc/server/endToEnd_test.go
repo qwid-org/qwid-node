@@ -118,18 +118,38 @@ func TestWallet10IsAcceptedOverTheRealRPCPath(t *testing.T) {
 	}
 }
 
-// The second scheme has to work too, or a wallet signing with MAYO-5 is
-// verified against a Falcon-512 key and can never authenticate.
-func TestWallet10IsAcceptedOnTheSecondaryScheme(t *testing.T) {
+// Exactly one scheme is usable at a time, so a secondary-scheme signature is
+// accepted precisely when the primary is paused — and refused otherwise.
+//
+// This test used to assert that the secondary always authenticates, which was
+// true when both schemes ran live side by side. Under the single-active-scheme
+// invariant that would mean two usable schemes at once; the property worth
+// pinning is the swap itself, because it is what makes a pause recoverable: a
+// node whose primary is paused must still be able to sign, or the vote that
+// lifts the pause can never be cast.
+func TestSecondarySchemeIsAcceptedOnlyWhileThePrimaryIsPaused(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
 	withEmptyPools(t)
 	_, user := withNodeAndUserWallets(t)
 
+	// Primary live: the spare is in reserve and must not authenticate.
 	reply := localCall(t, user, append([]byte("PEND"), user.MainAddress.GetBytes()...), false)
+	if !strings.Contains(reply, "Invalid signature") {
+		t.Fatalf("a spare-scheme signature authenticated while the primary was live: %q", reply)
+	}
 
+	// Pause the primary: the spare takes over and must authenticate.
+	common.GetEncryptionConfigInstance().SetEncryption(common.SigName(), common.PubKeyLength(false),
+		common.PrivateKeyLength(), common.SignatureLength(false), true, true)
+	t.Cleanup(func() {
+		common.GetEncryptionConfigInstance().SetEncryption(common.SigName(), common.PubKeyLength(false),
+			common.PrivateKeyLength(), common.SignatureLength(false), false, true)
+	})
+
+	reply = localCall(t, user, append([]byte("PEND"), user.MainAddress.GetBytes()...), false)
 	if strings.Contains(reply, "Invalid signature") {
-		t.Fatalf("a secondary-scheme signature was rejected: %q", reply)
+		t.Fatalf("the spare scheme was rejected while the primary was paused, so a paused node cannot sign at all: %q", reply)
 	}
 }
 

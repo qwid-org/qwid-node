@@ -1207,12 +1207,20 @@ func handlePUBA(line []byte, reply *[]byte) {
 				Address: a.GetHex(),
 				Primary: a.Primary,
 			})
-			if a.Primary {
-				resp.HasPrimary = true
-			} else {
-				resp.HasSecondary = true
-			}
 		}
+	}
+
+	// HasPrimary/HasSecondary must answer "is there a key of the CURRENT
+	// scheme", not "is there any key in this slot". After a scheme change the
+	// superseded key is still registered and still flagged primary, so the slot
+	// looks occupied while nothing can actually verify a signature made under
+	// the new scheme — the UI reported "Registered" for a key the node could not
+	// use. Same mistake as handleCHECK once made.
+	if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(addr, true, common.PubKeyLength(false)); err == nil {
+		resp.HasPrimary = true
+	}
+	if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(addr, false, common.PubKeyLength2(false)); err == nil {
+		resp.HasSecondary = true
 	}
 
 	result, err := json.Marshal(resp)

@@ -255,12 +255,15 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 
 	acc, err = wallet.GenerateNewAccount(wl, wl.SigName2)
 	if err != nil {
-		if !common.IsPaused2() {
-			jsonError(w, fmt.Sprintf("Failed to generate secondary account: %v", err), http.StatusInternalServerError)
-			return
-		}
-		logger.GetLogger().Println("Warning: secondary account generation failed (paused):", err)
-	} else {
+		// Always an error, even though the spare scheme is paused. Paused here
+		// means "held in reserve", not "not needed": a wallet created without a
+		// working spare key looks fine until the primary scheme is paused, and
+		// at that point it cannot sign anything and the key can no longer be
+		// registered on-chain either.
+		jsonError(w, fmt.Sprintf("Failed to generate secondary (spare) account: %v", err), http.StatusInternalServerError)
+		return
+	}
+	{
 		emptyAddr := common.EmptyAddress()
 		if bytes.Equal(wl.MainAddress.GetBytes(), emptyAddr.GetBytes()) {
 			wl.MainAddress = acc.Address
@@ -570,10 +573,24 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Public key inclusion
+	// Two separate decisions, previously conflated into one flag.
+	//
+	// WHICH KEY TO REGISTER is the operator's choice: usePrimaryEncryption picks
+	// the public key that travels in the transaction.
+	//
+	// WHICH KEY SIGNS is not a choice at all — it must be the scheme that is
+	// live right now. The case that matters is registering the primary key
+	// straight after a scheme replacement: that key arrives PAUSED and cannot
+	// sign anything, so the spare (live precisely while the primary is paused)
+	// has to sign for it. Leaving this to a checkbox meant the operator sent a
+	// transaction signed with a paused scheme and got back nothing more useful
+	// than "transaction fail to verify".
+	SetCurrentEncryptions()
+	signPrimary := !common.IsPaused()
+
 	pk := common.PubKey{}
-	primary := req.UsePrimaryEncryption
 	if req.IncludePubKey {
-		if primary {
+		if req.UsePrimaryEncryption {
 			pk = MainWallet.Account1.PublicKey
 		} else {
 			pk = MainWallet.Account2.PublicKey
@@ -628,7 +645,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tx.Sign(MainWallet, primary); err != nil {
+	if err := tx.Sign(MainWallet, signPrimary); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to sign transaction: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -712,6 +729,11 @@ func CancelTransaction(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("Failed to calculate cancellation hash: %v", err), http.StatusInternalServerError)
 		return
 	}
+	// Refresh the scheme state from the node before choosing which key signs.
+	// This process caches it, and a signature-scheme pause or replacement happens
+	// on the chain, not here: without the refresh the UI keeps signing with a
+	// scheme the node has since paused, and every such transaction is rejected.
+	SetCurrentEncryptions()
 	primary := !common.IsPaused()
 	if err := tx.Sign(MainWallet, primary); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to sign cancellation: %v", err), http.StatusInternalServerError)
@@ -820,10 +842,24 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Public key
+	// Two separate decisions, previously conflated into one flag.
+	//
+	// WHICH KEY TO REGISTER is the operator's choice: usePrimaryEncryption picks
+	// the public key that travels in the transaction.
+	//
+	// WHICH KEY SIGNS is not a choice at all — it must be the scheme that is
+	// live right now. The case that matters is registering the primary key
+	// straight after a scheme replacement: that key arrives PAUSED and cannot
+	// sign anything, so the spare (live precisely while the primary is paused)
+	// has to sign for it. Leaving this to a checkbox meant the operator sent a
+	// transaction signed with a paused scheme and got back nothing more useful
+	// than "transaction fail to verify".
+	SetCurrentEncryptions()
+	signPrimary := !common.IsPaused()
+
 	pk := common.PubKey{}
-	primary := req.UsePrimaryEncryption
 	if req.IncludePubKey {
-		if primary {
+		if req.UsePrimaryEncryption {
 			pk = MainWallet.Account1.PublicKey
 		} else {
 			pk = MainWallet.Account2.PublicKey
@@ -901,7 +937,7 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tx.Sign(MainWallet, primary); err != nil {
+	if err := tx.Sign(MainWallet, signPrimary); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to sign transaction: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1271,7 +1307,7 @@ func Vote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Action         string `json:"action"`         // pausePrimary, unpausePrimary, replacePrimary, pauseSecondary, unpauseSecondary, replaceSecondary
+		Action         string `json:"action"`         // pausePrimary, unpausePrimary, replacePrimary, replaceSecondary
 		EncryptionName string `json:"encryptionName"` // Name of encryption (optional, uses current if empty)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1301,7 +1337,19 @@ func Vote(w http.ResponseWriter, r *http.Request) {
 		enb = common.BytesToLenAndBytes(enb1)
 		enb = append(enb, common.BytesToLenAndBytes([]byte{})...)
 
-	case "pauseSecondary", "unpauseSecondary", "replaceSecondary":
+	case "pauseSecondary", "unpauseSecondary":
+		// The spare's liveness is derived from the primary's (common.IsPaused2),
+		// so voting it on or off separately cannot express anything: exactly one
+		// scheme is usable at a time, and which one follows from whether the
+		// primary is paused. Accepting these would let an operator publish a
+		// config the invariant forbids.
+		jsonError(w, "the secondary scheme is the spare: it is paused whenever the primary is live and usable "+
+			"whenever the primary is paused, so it cannot be paused or unpaused on its own. "+
+			"Use pausePrimary/unpausePrimary, or replaceSecondary to change which algorithm the spare is.",
+			http.StatusBadRequest)
+		return
+
+	case "replaceSecondary":
 		encName := req.EncryptionName
 		if encName == "" {
 			encName = common.SigName2()
@@ -1311,7 +1359,8 @@ func Vote(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, fmt.Sprintf("Invalid encryption name: %v", err), http.StatusBadRequest)
 			return
 		}
-		isPaused := req.Action == "pauseSecondary" || req.Action == "replaceSecondary"
+		// A spare is by definition not live, and its state is derived anyway.
+		isPaused := true
 		enb2, err := oqs.GenerateBytesFromParams(config.SigName, config.PubKeyLength, config.PrivateKeyLength, config.SignatureLength, isPaused)
 		if err != nil {
 			jsonError(w, fmt.Sprintf("Failed to generate encryption params: %v", err), http.StatusInternalServerError)
@@ -1321,7 +1370,7 @@ func Vote(w http.ResponseWriter, r *http.Request) {
 		enb = append(enb, common.BytesToLenAndBytes(enb2)...)
 
 	default:
-		jsonError(w, "Invalid action. Use: pausePrimary, unpausePrimary, replacePrimary, pauseSecondary, unpauseSecondary, replaceSecondary", http.StatusBadRequest)
+		jsonError(w, "Invalid action. Use: pausePrimary, unpausePrimary, replacePrimary, replaceSecondary", http.StatusBadRequest)
 		return
 	}
 
@@ -1395,10 +1444,24 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Public key
+	// Two separate decisions, previously conflated into one flag.
+	//
+	// WHICH KEY TO REGISTER is the operator's choice: usePrimaryEncryption picks
+	// the public key that travels in the transaction.
+	//
+	// WHICH KEY SIGNS is not a choice at all — it must be the scheme that is
+	// live right now. The case that matters is registering the primary key
+	// straight after a scheme replacement: that key arrives PAUSED and cannot
+	// sign anything, so the spare (live precisely while the primary is paused)
+	// has to sign for it. Leaving this to a checkbox meant the operator sent a
+	// transaction signed with a paused scheme and got back nothing more useful
+	// than "transaction fail to verify".
+	SetCurrentEncryptions()
+	signPrimary := !common.IsPaused()
+
 	pk := common.PubKey{}
-	primary := req.UsePrimaryEncryption
 	if req.IncludePubKey {
-		if primary {
+		if req.UsePrimaryEncryption {
 			pk = MainWallet.Account1.PublicKey
 		} else {
 			pk = MainWallet.Account2.PublicKey
@@ -1450,7 +1513,7 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tx.Sign(MainWallet, primary); err != nil {
+	if err := tx.Sign(MainWallet, signPrimary); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to sign transaction: %v", err), http.StatusInternalServerError)
 		return
 	}
