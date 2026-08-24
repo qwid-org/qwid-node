@@ -12,6 +12,7 @@ import (
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/oracles"
+	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/tcpip"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
@@ -100,7 +101,20 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 		Signature:        common.Signature{},
 		SignatureMessage: sendingTimeMessage,
 	}
-	sign, signatureBlockHeaderMessage, err := bh.Sign(common.GetNodeSignPrimary(heightTransaction))
+	signPrimary := common.GetNodeSignPrimary(heightTransaction)
+	if !signPrimary && !common.IsPaused() {
+		// Never sign a header with a key peers cannot verify. After a signature-
+		// scheme change the freshly derived secondary key is unregistered until
+		// the operator MANUALLY sends a transaction carrying the pubkey and it
+		// lands in a block (ProcessBlockPubKey), and a header — unlike a
+		// transaction — cannot carry the pubkey itself. Until the key of the
+		// CURRENT secondary scheme is registered, keep headers primary-signed.
+		if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(myWallet.MainAddress, false, common.PubKeyLength2(false)); err != nil {
+			logger.GetLogger().Println("secondary key not yet registered on-chain - signing block header with primary key")
+			signPrimary = true
+		}
+	}
+	sign, signatureBlockHeaderMessage, err := bh.Sign(signPrimary)
 	if err != nil {
 		return blocks.Block{}, err
 	}

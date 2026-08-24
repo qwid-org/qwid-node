@@ -84,7 +84,16 @@ func (bl *Block) GetSigNames() (string, string, bool, bool, error) {
 	if err != nil {
 		return "", "", false, false, err
 	}
-	return enc1.SigName, enc2.SigName, enc1.IsPaused, enc2.IsPaused, nil
+	// The spare's liveness is DERIVED from the primary's, exactly as
+	// common.IsPaused2 derives it from common.IsPaused: exactly one scheme is
+	// usable at any moment, and never zero.
+	//
+	// The flag stored in the Encryption2 slot is not consulted. Headers written
+	// before that invariant existed carry combinations it forbids — [paused,
+	// paused] above all, which says nothing may sign and would stall the chain
+	// at the first block following it. The slot records WHICH algorithm the
+	// spare is; whether it is live follows from the primary.
+	return enc1.SigName, enc2.SigName, enc1.IsPaused, !enc1.IsPaused, nil
 }
 
 func SetEncryptionFromBlock(height int64) error {

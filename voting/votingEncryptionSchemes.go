@@ -1,6 +1,7 @@
 package voting
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/qwid-org/qwid-node/account"
@@ -156,13 +157,44 @@ func GenerateEncryption2Data(height int64) ([]byte, [][]byte, int64) {
 }
 
 // one has to think what happens when verification is not on current block than GetStakedInDelegatedAccount should depend on height
-func VerifyEncryptionForPausing(height int64, totalStaked int64, primary bool) bool {
+// stakedForValue sums the stake of live votes whose value is exactly want.
+//
+// The threshold asks "does enough stake back THIS change", so a vote for
+// anything else must not count towards it. Summing every live vote — which is
+// what the tally used to do — meant two validators proposing two different
+// changes authorised both, and, because the same tally fed both verifiers, a
+// vote to REPLACE a scheme also counted towards PAUSING it.
+//
+// Expired votes are pruned here as GenerateEncryption*Data does, so the
+// verification path cannot be kept alive by entries the data path would drop.
+// The caller holds VotesEncryptionMutex.
+func stakedForValue(votes map[uint8]Votes, height int64, want []byte) int64 {
 	staked := int64(0)
-	if primary {
-		_, _, staked = GenerateEncryption1Data(height)
-	} else {
-		_, _, staked = GenerateEncryption2Data(height)
+	toRemove := []uint8{}
+	for i, po := range votes {
+		if height <= po.Height+common.VotingHeightDistance && len(po.Values) > 0 {
+			if bytes.Equal(po.Values, want) {
+				staked += po.Staked
+			}
+		} else {
+			toRemove = append(toRemove, i)
+		}
 	}
+	for _, i := range toRemove {
+		delete(votes, i)
+	}
+	return staked
+}
+
+func VerifyEncryptionForPausing(height int64, totalStaked int64, primary bool, want []byte) bool {
+	staked := int64(0)
+	VotesEncryptionMutex.Lock()
+	if primary {
+		staked = stakedForValue(VotesEncryption1, height, want)
+	} else {
+		staked = stakedForValue(VotesEncryption2, height, want)
+	}
+	VotesEncryptionMutex.Unlock()
 
 	// An empty tally authorises nothing, and neither does an unmeasurable one.
 	// The ratio below cannot express either case: with totalStaked at zero it
@@ -185,13 +217,15 @@ func VerifyEncryptionForPausing(height int64, totalStaked int64, primary bool) b
 }
 
 // one has to think what happens when verification is not on current block than GetStakedInDelegatedAccount should depend on height
-func VerifyEncryptionForReplacing(height int64, totalStaked int64, primary bool) bool {
+func VerifyEncryptionForReplacing(height int64, totalStaked int64, primary bool, want []byte) bool {
 	staked := int64(0)
+	VotesEncryptionMutex.Lock()
 	if primary {
-		_, _, staked = GenerateEncryption1Data(height)
+		staked = stakedForValue(VotesEncryption1, height, want)
 	} else {
-		_, _, staked = GenerateEncryption2Data(height)
+		staked = stakedForValue(VotesEncryption2, height, want)
 	}
+	VotesEncryptionMutex.Unlock()
 
 	// See VerifyEncryptionForPausing: neither an empty tally nor a non-positive
 	// total can authorise anything, and the ratio alone expresses neither.

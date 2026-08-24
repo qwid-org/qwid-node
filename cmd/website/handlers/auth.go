@@ -239,12 +239,15 @@ func Register(w http.ResponseWriter, r *http.Request) {
 
 	acc, err = wallet.GenerateNewAccount(wl, wl.SigName2)
 	if err != nil {
-		if !common.IsPaused2() {
-			JsonError(w, fmt.Sprintf("Failed to generate secondary account: %v", err), http.StatusInternalServerError)
-			return
-		}
-		logger.GetLogger().Println("Warning: secondary account generation failed (paused):", err)
-	} else {
+		// Always an error, even though the spare scheme is paused. Paused here
+		// means "held in reserve", not "not needed": a wallet created without a
+		// working spare key looks fine until the primary scheme is paused, and
+		// at that point it cannot sign anything and the key can no longer be
+		// registered on-chain either.
+		JsonError(w, fmt.Sprintf("Failed to generate secondary (spare) account: %v", err), http.StatusInternalServerError)
+		return
+	}
+	{
 		// If primary failed (paused), use secondary address as main
 		emptyAddr := common.EmptyAddress()
 		if bytes.Equal(wl.MainAddress.GetBytes(), emptyAddr.GetBytes()) {
@@ -451,6 +454,11 @@ func sendWelcomeTransaction(recipient common.Address) {
 		return
 	}
 
+	// Refresh the scheme state from the node before choosing which key signs.
+	// This process caches it, and a signature-scheme pause or replacement happens
+	// on the chain, not here: without the refresh the UI keeps signing with a
+	// scheme the node has since paused, and every such transaction is rejected.
+	SetCurrentEncryptions()
 	primary := !common.IsPaused()
 	if err := tx.Sign(NodeWallet, primary); err != nil {
 		logger.GetLogger().Println("sendWelcomeTransaction: failed to sign:", err)

@@ -142,6 +142,11 @@ func CreateToken(w http.ResponseWriter, r *http.Request) {
 
 	// Build deployment transaction (empty recipient = contract creation)
 	wl := sess.Wallet
+	// Refresh the scheme state from the node before choosing which key signs.
+	// This process caches it, and a signature-scheme pause or replacement happens
+	// on the chain, not here: without the refresh the UI keeps signing with a
+	// scheme the node has since paused, and every such transaction is rejected.
+	SetCurrentEncryptions()
 	primary := !common.IsPaused()
 
 	// Always include pubkey so the transaction can be verified

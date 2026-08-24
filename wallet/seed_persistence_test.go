@@ -790,6 +790,11 @@ func TestSchemeChangeSeedOutranksStaleArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The identity does not move when the SCHEME changes: public keys are
+	// registered under MainAddress and the operator's stake is held against it,
+	// so following the new scheme key here would orphan both.
+	originalMain := w.MainAddress.GetHex()
+
 	loaded, err := LoadJSONFromDir(w.HomePath, 231, "test-password-123", schemeChangeTarget, w.SigName2)
 	if err != nil {
 		t.Fatalf("seeded wallet failed a scheme change it should have derived: %v", err)
@@ -798,8 +803,9 @@ func TestSchemeChangeSeedOutranksStaleArchive(t *testing.T) {
 		t.Fatalf("Account1 = %s, expected the one derived from the phrase %s (an archive entry %s was used instead)",
 			loaded.Account1.Address.GetHex(), expected.Address.GetHex(), foreign.Address.GetHex())
 	}
-	if loaded.MainAddress.GetHex() != expected.Address.GetHex() {
-		t.Fatalf("MainAddress = %s, expected %s", loaded.MainAddress.GetHex(), expected.Address.GetHex())
+	if loaded.MainAddress.GetHex() != originalMain {
+		t.Fatalf("MainAddress moved to %s after a scheme change; it must stay %s, the identity keys are registered under",
+			loaded.MainAddress.GetHex(), originalMain)
 	}
 	_, archive := readStoredAccountAddresses(t, w.HomePath, 231)
 	if got, ok := archive[schemeChangeTarget]; ok && got == foreign.Address.GetHex() {

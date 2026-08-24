@@ -111,16 +111,83 @@ func matchOracleData(subs map[uint8]oracleSubmission, priceData, randData []byte
 	return nil
 }
 
+// sigNamesAtProofHeight resolves the signature-scheme configuration recorded
+// in the chain at the given height, using the in-memory blocks first: during
+// batched sync the block at that height may belong to the same not-yet-stored
+// batch, in which case only newBlock and its parent are at hand. Falling back
+// to the parent's config in that gap is no worse than the pre-fix global
+// config, and the sync loop's stop-batch-and-apply-prefix recovery covers it.
+func sigNamesAtProofHeight(height int64, newBlock, lastBlock Block) (string, string, bool, bool, error) {
+	if height >= newBlock.GetHeader().Height {
+		return newBlock.GetSigNames()
+	}
+	if height == lastBlock.GetHeader().Height {
+		return lastBlock.GetSigNames()
+	}
+	if b, err := LoadBlock(height); err == nil {
+		return b.GetSigNames()
+	}
+	return lastBlock.GetSigNames()
+}
+
+// historicalProofPauseFlags returns the pause flags used when re-verifying an
+// oracle proof that is ALREADY embedded in a block: none, for either scheme.
+//
+// Pausing is a forward-looking policy — it governs what may enter the system
+// from now on, not a claim that signatures already committed to the chain have
+// become forgeries. Applying it here re-judges history by today's rules: when
+// the spare scheme became paused by default, every proof signed under it (about
+// half of them, because the signer was chosen at random while both schemes were
+// live) stopped verifying, and the chain stopped at the first block carrying
+// one.
+//
+// The scheme NAMES still come from the configuration in force at the proof's
+// own height, so a proof must still verify under a scheme the chain actually
+// had. What is dropped is only the liveness gate.
+//
+// The trade-off is deliberate and worth stating: if a scheme was paused because
+// it is broken, an attacker who can forge its signatures can forge a proof at a
+// historical height. Guarding against that requires rejecting the history
+// itself, which no running chain can do.
+func historicalProofPauseFlags() (bool, bool) {
+	return false, false
+}
+
 // AuthenticateOracleProofs verifies that the oracle values embedded in a block
 // are each backed by a signature-verified, fresh oracle nonce transaction.
-func AuthenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData, randData []byte) error {
-	return authenticateOracleProofs(blockHeight, proofs, priceData, randData, func(pb []byte) (*transactionsDefinition.Transaction, error) {
+//
+// Each proof is verified with the signature-scheme configuration in force at
+// the proof's own signing height (taken from block headers), not the node's
+// current global config: around a scheme change a block legitimately embeds
+// proofs signed under the previous scheme, and a node that has already adopted
+// the new scheme would otherwise be permanently unable to verify that block.
+func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
+	blockHeight := newBlock.GetHeader().Height
+	// Resolving a config re-validates the scheme against liboqs (a keypair
+	// generation), so cache it per height for the duration of this block check —
+	// proofs cluster on a handful of heights.
+	type sigNames struct {
+		sigName, sigName2   string
+		isPaused, isPaused2 bool
+	}
+	cache := map[int64]sigNames{}
+	return authenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData, func(pb []byte) (*transactionsDefinition.Transaction, error) {
 		var tx transactionsDefinition.Transaction
 		decoded, _, err := tx.GetFromBytes(pb)
 		if err != nil {
 			return nil, fmt.Errorf("cannot decode oracle proof: %w", err)
 		}
-		if !decoded.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+		names, ok := cache[decoded.Height]
+		if !ok {
+			sigName, sigName2, isPaused, isPaused2, err := sigNamesAtProofHeight(decoded.Height, newBlock, lastBlock)
+			if err != nil {
+				return nil, fmt.Errorf("cannot resolve signature schemes for oracle proof at height %d: %w", decoded.Height, err)
+			}
+			names = sigNames{sigName, sigName2, isPaused, isPaused2}
+			cache[decoded.Height] = names
+		}
+		isPaused, isPaused2 := historicalProofPauseFlags()
+		if !decoded.Verify(names.sigName, names.sigName2, isPaused, isPaused2) {
 			return nil, fmt.Errorf("oracle proof signature verification failed")
 		}
 		return &decoded, nil

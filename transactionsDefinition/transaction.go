@@ -7,6 +7,7 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/pubkeys"
@@ -382,12 +383,50 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 	pkb := pk.GetBytes()
 	if len(pkb) == 0 {
 		senderAddr := tx.GetSenderAddress()
-		pkp, err := pubkeys.LoadPubKeyWithPrimary(senderAddr, primary)
-		if err != nil {
-			logger.GetLogger().Println("Verify: cannot load sender pubkey from DB:", err)
-			logger.GetLogger().Println("  Sender address:", senderAddr.GetHex())
-			logger.GetLogger().Println("  Primary flag:", primary)
-			return false
+		// Prefer the sender key whose length matches the scheme this signature
+		// is verified under: after a scheme change the newest registered key
+		// belongs to the new scheme, while a signature made earlier (an oracle
+		// proof verified against the config at its signing height) needs the
+		// superseded key it was made with.
+		schemeName := sigName
+		if !primary {
+			schemeName = sigName2
+		}
+		var pkp common.PubKey
+		expLen, lenErr := oqs.PubKeyLength(schemeName)
+		if lenErr != nil {
+			// The scheme is not one liboqs knows, so its key length is unknown
+			// and no length-matched lookup is possible. Best effort: take the
+			// newest key registered in this slot.
+			var err error
+			pkp, err = pubkeys.LoadPubKeyWithPrimary(senderAddr, primary)
+			if err != nil {
+				logger.GetLogger().Println("Verify: cannot load sender pubkey from DB:", err)
+				logger.GetLogger().Println("  Sender address:", senderAddr.GetHex())
+				logger.GetLogger().Println("  Primary flag:", primary)
+				return false
+			}
+		} else {
+			var err error
+			pkp, err = pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen)
+			if err != nil {
+				// Deliberately NOT falling back to "any key in this slot". Key
+				// length identifies the scheme here, so a key of a different
+				// length cannot verify a signature made under this one — the
+				// fallback could only ever produce a rejection, while replacing
+				// the real reason with an obscure "LengthPublicKey: 1793
+				// len(pubkey): 897" from the verifier.
+				//
+				// This is what a signature-scheme change looks like before the
+				// new key has been registered on-chain: registration happens
+				// only when the operator sends a transaction carrying the
+				// pubkey, and until then nothing this account signs can be
+				// verified by anyone.
+				logger.GetLogger().Printf("Verify: sender %s has no registered %s key (%d bytes) in the %s slot; "+
+					"the key for the current scheme must be registered by sending a transaction that carries the pubkey: %v",
+					senderAddr.GetHex(), schemeName, expLen, map[bool]string{true: "primary", false: "secondary"}[primary], err)
+				return false
+			}
 		}
 		pkb = pkp.GetBytes()
 	} else {
@@ -398,6 +437,12 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 		logger.GetLogger().Println("  Sender address:", senderAddr.GetHex())
 		logger.GetLogger().Println("  Signature primary flag:", primary)
 		logger.GetLogger().Println("  PubKey.Primary field:", pk.Primary)
+		// PubKey.Primary is DERIVED from the key length by PubKey.Init, so a
+		// "false" on a key that ought to be primary means the key does not
+		// belong to the scheme currently in the primary slot. Print what that
+		// slot expects, so the mismatch is stated instead of inferred.
+		logger.GetLogger().Printf("  schemes in force: primary=%s (%d-byte key), secondary=%s (%d-byte key); paused=[%v/%v]",
+			sigName, common.PubKeyLength(false), sigName2, common.PubKeyLength2(false), isPausedTmp, isPaused2Tmp)
 
 		// Use the pubkey's own Primary flag for address derivation
 		pkPrimary := pk.Primary
@@ -409,16 +454,67 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 		logger.GetLogger().Println("  Derived address:", pkAddr.GetHex())
 		logger.GetLogger().Println("  PubKey.MainAddress:", pk.MainAddress.GetHex())
 
-		// For primary pubkey: derived address should match sender address directly
-		// For secondary pubkey: MainAddress (which equals the wallet's main/primary address) should match sender
+		// Which identity a key belongs to is ON-CHAIN state, so read it from the
+		// key registry rather than believing what the transaction asserts.
+		// LoadPubKey resolves the key's own derived address to the record stored
+		// when it was registered, and that record's MainAddress is the binding
+		// consensus already agreed on.
+		//
+		// This matters beyond tidiness. The pk.MainAddress field travels inside
+		// the transaction, so taking it at face value let a sender nominate any
+		// identity it liked for a key it controls; the registry cannot be talked
+		// into a claim it never recorded.
+		//
+		// It also handles the case the derived-address rule could not express: a
+		// key of a NEWLY voted-in scheme has an address of its own, different
+		// from the identity it serves, exactly as a secondary key always has.
 		addressMatch := false
-		if pkPrimary {
-			// Primary pubkey: derived address should equal sender address
-			addressMatch = bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes())
-		} else {
-			// Secondary pubkey: the pubkey's MainAddress should equal sender address
-			// (MainAddress is the wallet's primary address that both accounts share)
-			addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
+		resolvedFromRegistry := false
+		if stored, lerr := pubkeys.LoadPubKey(pkAddr.GetBytes()); lerr == nil {
+			addressMatch = bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes())
+			resolvedFromRegistry = true
+			logger.GetLogger().Println("  registry says this key belongs to:", stored.MainAddress.GetHex())
+		}
+		if !resolvedFromRegistry {
+			// The key is new: there is no recorded binding, so the transaction
+			// has to demonstrate authority over the identity it names.
+			//
+			// It does that by being SIGNED WITH A KEY ALREADY REGISTERED under
+			// that identity, while the new key rides along as data. Signing with
+			// the enclosed key would prove only that the sender owns that key,
+			// which is no argument for attaching it to somebody's identity.
+			//
+			// This is also the only way a new PRIMARY key can ever be introduced:
+			// a scheme replacement arrives paused, so the incoming primary
+			// cannot sign anything — the spare, live exactly while the primary
+			// is paused, is what authorises it.
+			signingScheme := sigName
+			if !primary {
+				signingScheme = sigName2
+			}
+			authorised := false
+			if expLen, lerr := oqs.PubKeyLength(signingScheme); lerr == nil {
+				if existing, aerr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen); aerr == nil {
+					// Verify the signature against the REGISTERED key, not the
+					// enclosed one.
+					pkb = existing.GetBytes()
+					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
+					authorised = true
+					logger.GetLogger().Printf("  new key introduced by identity %s, authorised by its registered %s key",
+						senderAddr.GetHex(), signingScheme)
+				}
+			}
+			if !authorised {
+				// Nothing is registered for this sender yet, so there is no
+				// identity to authorise anything: the very first key can only
+				// vouch for itself, and its address IS the identity.
+				logger.GetLogger().Println("  sender has no registered key for the signing scheme; bootstrap rule applies (key address must equal the sender)")
+				if pkPrimary {
+					addressMatch = bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes())
+				} else {
+					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
+				}
+			}
 		}
 
 		if !addressMatch {

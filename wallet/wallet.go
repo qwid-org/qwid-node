@@ -447,10 +447,13 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 			"Until then this node cannot produce with %q",
 			sigName, sigName, sigName, sigName)
 	}
-	mainAddress, err := common.PubKeyToAddress(pubKey, primary)
-	if err != nil {
-		return err
-	}
+	// The key's MainAddress is the wallet's identity (w.MainAddress), exactly as
+	// every other init/load path sets it — NOT an address derived from the new
+	// key. Deriving it here detached the announced key from the operator's
+	// on-chain identity: StorePubKeyInPatriciaTrie filed it under a stray trie
+	// root and the embedded-pubkey verification (pk.MainAddress == sender) could
+	// never match, so peers had no way to associate the new key with this node.
+	mainAddress := w.MainAddress
 	if primary {
 		err = w.Account1.PublicKey.Init(pubKey, mainAddress)
 		if err != nil {
@@ -463,6 +466,15 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 		}
 		(*w).Account1.signer = signer
 		(*w).HomePath = ew.HomePath
+		// Record WHICH scheme this key belongs to, and archive it. Without this
+		// the wallet file ends up internally inconsistent — sig_name naming the
+		// old scheme while account_1 holds the new scheme's key — and the load
+		// path, which compares scheme NAMES, sees nothing wrong and keeps the
+		// mismatched key. The node then signs with an algorithm the chain does
+		// not expect, and deleting the chain database does not help because the
+		// contradiction lives in the wallet file.
+		(*w).SigName = sigName
+		w.setArchivedAccount(sigName, w.Account1)
 	} else {
 		err = w.Account2.PublicKey.Init(pubKey, mainAddress)
 		if err != nil {
@@ -474,6 +486,9 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 			return err
 		}
 		(*w).Account2.signer = signer
+		// See the primary branch: name and archive the spare's scheme too.
+		(*w).SigName2 = sigName
+		w.setArchivedAccount(sigName, w.Account2)
 	}
 
 	logger.GetLogger().Println(signer.Details())
@@ -904,7 +919,15 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 		}
 	}
 
-	if !common.IsPaused() && w.SigName != sigName {
+	// Follow a change of the PRIMARY scheme regardless of its pause state, for
+	// the same reason as the spare branch below — and here it is not merely a
+	// missed update but a deadlock. A primary replacement can only be voted in
+	// while the primary is paused, so gating adoption on "not paused" meant the
+	// wallet never derived a key for the incoming scheme: it could not register
+	// that key (registration needs a transaction signed with it), and could not
+	// sign anything once the pause lifted. The wallet kept the superseded key and
+	// looked healthy while being unable to act.
+	if w.SigName != sigName {
 		w.SigName = sigName
 		// The seed outranks the per-scheme key archive, and is consulted FIRST.
 		// For a seeded wallet the phrase defines the identity: derivation is
@@ -937,7 +960,12 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 			return nil, fmt.Errorf("the network switched primary signature scheme to %q, but this wallet has neither a stored key for %q nor a recovery phrase to derive one from; restore this wallet from its 24-word recovery phrase (preferred), or from a wallet-file backup taken after a %q key was already present", sigName, sigName, sigName)
 		}
 	}
-	if !common.IsPaused2() && w.SigName2 != sigName2 {
+	// Follow a change of the SPARE scheme regardless of its pause state. The
+	// spare is paused precisely because it is held in reserve, so gating this on
+	// "not paused" meant the wallet never derived a key for a newly voted-in
+	// spare — and the spare's key must already be registered on-chain before the
+	// primary can be paused, which is the one moment the spare is needed.
+	if w.SigName2 != sigName2 {
 		w.SigName2 = sigName2
 		// Seed first — see the matching comment in the primary branch above.
 		if w.HasSeed() {
@@ -1011,14 +1039,17 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 			}
 		}
 		if !account2OK {
-			if !common.IsPaused2() {
-				logger.GetLogger().Println("Account2 init failed:", err)
-				return nil, fmt.Errorf("Account2 init failed: %v", err)
-			}
-			logger.GetLogger().Println("Account2 init failed (2nd encryption paused, OK):", err)
+			// Not tolerated when the spare is paused, unlike Account1's mirror
+			// branch. Account1 may fail while the PRIMARY is paused because the
+			// spare has taken over signing; the spare has no such stand-in. A
+			// wallet whose spare key is unusable looks healthy right up to the
+			// moment the primary is paused, and then cannot sign at all —
+			// which is exactly when it is too late to fix.
+			logger.GetLogger().Println("Account2 init failed:", err)
+			return nil, fmt.Errorf("Account2 (spare scheme %s) init failed, and the spare must stay ready: %v", w.SigName2, err)
 		}
-	} else if !common.IsPaused2() {
-		return nil, fmt.Errorf("Account2 encrypted secret key is empty")
+	} else {
+		return nil, fmt.Errorf("Account2 (spare scheme %s) encrypted secret key is empty, and the spare must stay ready", w.SigName2)
 	}
 
 	if !account1OK && !account2OK {
@@ -1048,11 +1079,22 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 			logger.GetLogger().Println("MainAddress was empty, set from Account2.Address:", w.MainAddress.GetHex())
 		}
 	} else if account1OK && account1HasAddress && !bytes.Equal(w.MainAddress.GetBytes(), w.Account1.Address.GetBytes()) {
-		// Only update MainAddress from Account1 if Account1 actually initialized
-		logger.GetLogger().Println("WARNING: MainAddress differs from Account1.Address!")
-		logger.GetLogger().Println("MainAddress:", w.MainAddress.GetHex())
-		logger.GetLogger().Println("Account1.Address:", w.Account1.Address.GetHex())
-		w.MainAddress = w.Account1.Address
+		// Report the difference, but do NOT repoint MainAddress at Account1.
+		//
+		// MainAddress is the wallet's stable identity: public keys are
+		// registered UNDER it (pubkeys.AddPubKeyToAddress) and looked up by it,
+		// and the operator's stake is held against it. After a signature-scheme
+		// change Account1 legitimately holds a key of the NEW scheme, whose
+		// address differs — that is the normal state, not a fault. Following it
+		// here silently moved the wallet to a fresh identity, orphaning every
+		// key already registered under the old one along with the stake.
+		//
+		// A restore from a recovery phrase, where the identity really does
+		// change, sets MainAddress itself in RestoreSecretKeyFromMnemonic's
+		// atomic commit; it does not rely on this branch.
+		logger.GetLogger().Println("MainAddress differs from Account1.Address (normal after a signature-scheme change):")
+		logger.GetLogger().Println("  MainAddress (identity, keys registered under it):", w.MainAddress.GetHex())
+		logger.GetLogger().Println("  Account1.Address (current primary-scheme key):", w.Account1.Address.GetHex())
 	}
 
 	// Ensure MainAddress is set on PublicKeys (may be empty from older wallet JSON)
@@ -1458,7 +1500,12 @@ func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isP
 			isVerified, err := verifier.Verify(msg, sig, pubkey)
 
 			if err != nil {
-				logger.GetLogger().Println(err)
+				// Name the pairing. "incorrect signature size" alone cannot
+				// say WHICH scheme verified WHICH signature, and a mismatch
+				// between them is always the interesting case.
+				logger.GetLogger().Printf("verify failed: %v (verifierScheme=%s primaryFlag=%v sigLen=%d maxSigLen=%d pubKeyLen=%d; in force=[%s/%s] paused=[%v/%v])",
+					err, verifier.Details().Name, primary, len(sig), verifier.Details().MaxLengthSignature,
+					len(pubkey), sigName, sigName2, isPaused, isPaused2)
 				return false
 			}
 			if !isVerified {
@@ -1478,7 +1525,12 @@ func Verify(msg []byte, sig []byte, pubkey []byte, sigName, sigName2 string, isP
 		if verifier.Details().LengthPublicKey == len(pubkey) {
 			isVerified, err := verifier.Verify(msg, sig, pubkey)
 			if err != nil {
-				logger.GetLogger().Println(err)
+				// Name the pairing. "incorrect signature size" alone cannot
+				// say WHICH scheme verified WHICH signature, and a mismatch
+				// between them is always the interesting case.
+				logger.GetLogger().Printf("verify failed: %v (verifierScheme=%s primaryFlag=%v sigLen=%d maxSigLen=%d pubKeyLen=%d; in force=[%s/%s] paused=[%v/%v])",
+					err, verifier.Details().Name, primary, len(sig), verifier.Details().MaxLengthSignature,
+					len(pubkey), sigName, sigName2, isPaused, isPaused2)
 				return false
 			}
 			if !isVerified {

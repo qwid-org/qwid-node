@@ -55,25 +55,17 @@ func AddNewPubKeyToActiveWallet(sigName string, primary bool, height int64) erro
 			return err
 		}
 	}
-	if primary {
-		err := StorePubKey(w.Account1.PublicKey)
-		if err != nil {
-			return err
-		}
-		err = StorePubKeyInPatriciaTrie(w.Account1.PublicKey)
-		if err != nil {
-			return err
-		}
-	} else {
-		err := StorePubKey(w.Account2.PublicKey)
-		if err != nil {
-			return err
-		}
-		err = StorePubKeyInPatriciaTrie(w.Account2.PublicKey)
-		if err != nil {
-			return err
-		}
+	if !primary {
+		logger.GetLogger().Println("NEW SECONDARY KEY DERIVED AND STORED IN THE WALLET. It is NOT registered anywhere yet: " +
+			"the operator must register it MANUALLY by sending a transaction with the pubkey included, signed with the new " +
+			"key. Until that transaction is in a block, this node signs nonces and block headers with the primary key")
 	}
+	// Deliberately NOT registering the new key in the local pubkey DB/trie here.
+	// Registration is consensus state with exactly one channel: a transaction
+	// carrying the pubkey, sent manually by the operator and processed by
+	// ProcessBlockPubKey on every node when its block is applied. Self-
+	// registering here made the local DB diverge from the rest of the network
+	// (this node considered its key known while no other node had it).
 	err := w.StoreJSON()
 	if err != nil {
 		return err

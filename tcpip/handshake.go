@@ -129,9 +129,34 @@ func randNonce() ([]byte, error) {
 	return n, err
 }
 
+// verifyPeer authenticates the peer's transcript signature against the pubkey
+// it presented. The key is self-certifying here (open peering: the nodeID is
+// derived from the key, not looked up in a registry), so the signature is
+// judged under the scheme(s) matching the PRESENTED key rather than this
+// node's current chain configuration — two nodes on opposite sides of a voted
+// scheme change must still be able to connect, or the lagging node could never
+// sync the very blocks that would teach it the new scheme. Pause flags are a
+// consensus policy and are deliberately not applied to transport
+// authentication.
 func verifyPeer(transcript, sig, peerPubKey []byte) bool {
-	return wallet.Verify(transcript, sig, peerPubKey,
-		common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
+	if len(sig) < 1 {
+		return false
+	}
+	// Fast path: the schemes this node currently runs.
+	if wallet.Verify(transcript, sig, peerPubKey, common.SigName(), common.SigName2(), false, false) {
+		return true
+	}
+	// The peer may already (or still) be on the other side of a scheme change:
+	// try every enabled scheme whose public-key length matches the presented key.
+	for _, name := range oqs.SchemesForPubKeyLength(len(peerPubKey)) {
+		if name == common.SigName() || name == common.SigName2() {
+			continue
+		}
+		if wallet.Verify(transcript, sig, peerPubKey, name, name, false, false) {
+			return true
+		}
+	}
+	return false
 }
 
 // HandshakeInitiator runs the dialing side, returns the peer's VERIFIED nodeID,

@@ -124,7 +124,7 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// and rand entry must be backed by a signature-verified, fresh proof so a
 	// producer cannot fabricate values attributed to other validators.
 	if blockHeight >= OracleProofsActivationHeight {
-		if err := AuthenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData); err != nil {
+		if err := AuthenticateOracleProofs(newBlock, lastBlock); err != nil {
 			return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
 		}
 	}
@@ -160,6 +160,14 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 		if err != nil {
 			return nil, err
 		}
+		// Reported alongside the node's own view: when the two disagree, the
+		// node's global config has drifted from the chain and that, not the
+		// block, is the thing to investigate.
+		lastBlockEnc1Paused := false
+		if pe, perr := FromBytesToEncryptionConfig(lastBlock.BaseBlock.BaseHeader.Encryption1[:], true); perr == nil {
+			lastBlockEnc1Paused = pe.IsPaused
+		}
+		_ = lastBlockEnc1Paused
 
 		if enc1.SigName == common.SigName() && enc1.IsPaused == common.IsPaused() {
 			//newBlock.BaseBlock.BaseHeader.Encryption1 = []byte{}
@@ -169,20 +177,21 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 				return nil, fmt.Errorf("encryption 1 verification fails")
 			}
 			if shouldCheck && common.IsPaused() == false && common.SigName() != enc1.SigName {
-				return nil, fmt.Errorf("you need to pause first to replace encryption, 1")
+				return nil, fmt.Errorf("you need to pause first to replace encryption, 1: block proposes %q while the node holds %q and reports the primary as live (paused=%v); the parent block records paused=%v",
+					enc1.SigName, common.SigName(), common.IsPaused(), lastBlockEnc1Paused)
 			}
 			if enc1.IsPaused == true && common.IsPaused() == true && enc1.SigName == common.SigName() {
-				return nil, fmt.Errorf("pausing fails, encryption is just puased, 1")
+				return nil, fmt.Errorf("pausing fails, encryption is just paused, 1: block proposes pausing %q which the node already holds paused", enc1.SigName)
 			}
 			if shouldCheck && (enc1.SigName != common.SigName()) && (enc1.IsPaused == false) {
-				return nil, fmt.Errorf("new encryption has to be paused, 1")
+				return nil, fmt.Errorf("new encryption has to be paused, 1: block proposes %q with paused=false while replacing %q", enc1.SigName, common.SigName())
 			}
 
-			if shouldCheck && (enc1.SigName != common.SigName()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, true) {
-				return nil, fmt.Errorf("voting replacement encryption check fails, 1")
+			if shouldCheck && (enc1.SigName != common.SigName()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, true, newBlock.BaseBlock.BaseHeader.Encryption1[:]) {
+				return nil, fmt.Errorf("voting replacement encryption check fails, 1: not enough staked votes back replacing %q with %q at height %d", common.SigName(), enc1.SigName, blockHeight)
 			}
-			if shouldCheck && enc1.IsPaused == true && enc1.SigName == common.SigName() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, true) {
-				return nil, fmt.Errorf("voting pausing check fails, 1")
+			if shouldCheck && enc1.IsPaused == true && enc1.SigName == common.SigName() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, true, newBlock.BaseBlock.BaseHeader.Encryption1[:]) {
+				return nil, fmt.Errorf("voting pausing check fails, 1: not enough staked votes back pausing %q at height %d", enc1.SigName, blockHeight)
 			}
 			if enc1.SigName == common.SigName2() {
 				return nil, fmt.Errorf("cannot exist 2 the same ecnryptions schemes, 1")
@@ -211,10 +220,10 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 			if shouldCheck && (enc2.SigName != common.SigName2()) && (enc2.IsPaused == false) {
 				return nil, fmt.Errorf("new encryption has to be paused, 2")
 			}
-			if shouldCheck && (enc2.SigName != common.SigName2()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, false) {
+			if shouldCheck && (enc2.SigName != common.SigName2()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, false, newBlock.BaseBlock.BaseHeader.Encryption2[:]) {
 				return nil, fmt.Errorf("voting replacement encryption check fails, 2")
 			}
-			if shouldCheck && enc2.IsPaused == true && enc2.SigName == common.SigName2() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, false) {
+			if shouldCheck && enc2.IsPaused == true && enc2.SigName == common.SigName2() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, false, newBlock.BaseBlock.BaseHeader.Encryption2[:]) {
 				return nil, fmt.Errorf("voting pausing check fails, 2")
 			}
 			if enc2.SigName == common.SigName() {
@@ -566,7 +575,20 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	}
 
 	head := newBlock.GetHeader()
-	sigName, sigName2, isPaused, isPaused2, err := newBlock.GetSigNames()
+	// Verify the header against the encryption configuration in force BEFORE
+	// this block — the parent's — not the one this block declares.
+	//
+	// A block that changes the configuration is signed under the OLD rules,
+	// because that is all its producer had when it signed. Judging it by the
+	// rules it introduces makes it invalidate its own signature: a block
+	// announcing "the primary scheme is paused" is signed with the primary
+	// scheme, so verifying it under its own config rejects it, and the pause
+	// can never be recorded. The same holds for a scheme replacement.
+	//
+	// This was masked while two schemes were live at once — there was always a
+	// second, unpaused scheme to sign with — and surfaced as soon as exactly
+	// one scheme could be active.
+	sigName, sigName2, isPaused, isPaused2, err := lastBlock.GetSigNames()
 	if err != nil {
 		// AC-M6: previously the fmt.Errorf result was discarded, swallowing the
 		// GetSigNames failure and proceeding with zero-value sig names.
@@ -637,7 +659,20 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 		return err
 	}
 	head := newBlock.GetHeader()
-	sigName, sigName2, isPaused, isPaused2, err := newBlock.GetSigNames()
+	// Verify the header against the encryption configuration in force BEFORE
+	// this block — the parent's — not the one this block declares.
+	//
+	// A block that changes the configuration is signed under the OLD rules,
+	// because that is all its producer had when it signed. Judging it by the
+	// rules it introduces makes it invalidate its own signature: a block
+	// announcing "the primary scheme is paused" is signed with the primary
+	// scheme, so verifying it under its own config rejects it, and the pause
+	// can never be recorded. The same holds for a scheme replacement.
+	//
+	// This was masked while two schemes were live at once — there was always a
+	// second, unpaused scheme to sign with — and surfaced as soon as exactly
+	// one scheme could be active.
+	sigName, sigName2, isPaused, isPaused2, err := lastBlock.GetSigNames()
 	if err != nil {
 		return fmt.Errorf("%v: CheckBlockAndTransferFunds", err)
 	}

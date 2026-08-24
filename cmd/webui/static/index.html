@@ -466,8 +466,8 @@
                         Include Public Key
                     </label>
                     <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="usePrimaryEncryption" checked style="width:auto;margin-right:8px;">
-                        Use Primary Encryption
+                        <input type="checkbox" id="usePrimaryEncryption" checked style="width:auto;margin-right:8px;" title="Registers the paused scheme's public key. The signing key is chosen automatically: whichever scheme is currently live.">
+                        Register Paused public key
                     </label>
                 </div>
                 <button class="btn-primary" onclick="sendTransaction()">Send Transaction</button>
@@ -525,8 +525,8 @@
 
                 <div class="form-group" style="display:flex;gap:20px;">
                     <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="stakingUsePrimaryEncryption" checked style="width:auto;margin-right:8px;">
-                        Use Primary Encryption
+                        <input type="checkbox" id="stakingUsePrimaryEncryption" checked style="width:auto;margin-right:8px;" title="Registers the paused scheme's public key. The signing key is chosen automatically: whichever scheme is currently live.">
+                        Register Paused public key
                     </label>
                 </div>
 
@@ -598,8 +598,8 @@
                         Include Public Key
                     </label>
                     <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="escrowUsePrimaryEncryption" checked style="width:auto;margin-right:8px;">
-                        Use Primary Encryption
+                        <input type="checkbox" id="escrowUsePrimaryEncryption" checked style="width:auto;margin-right:8px;" title="Registers the paused scheme's public key. The signing key is chosen automatically: whichever scheme is currently live.">
+                        Register Paused public key
                     </label>
                 </div>
 
@@ -741,9 +741,12 @@ contract Coin {
 
                 <div class="form-group">
                     <label>Secondary Encryption Actions</label>
+                    <p style="color:#888;font-size:12px;margin-bottom:10px;">
+                        The secondary scheme is the spare. It is paused whenever the primary is live and becomes
+                        usable the moment the primary is paused, so there is nothing to pause or unpause here &mdash;
+                        that follows from the primary. Only which algorithm the spare is can be voted on.
+                    </p>
                     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px;">
-                        <button class="btn-secondary" onclick="vote('pauseSecondary')">Pause Secondary</button>
-                        <button class="btn-secondary" onclick="vote('unpauseSecondary')">Unpause Secondary</button>
                         <button class="btn-danger" onclick="vote('replaceSecondary')">Replace Secondary</button>
                     </div>
                 </div>
@@ -830,7 +833,7 @@ contract Coin {
                 <div class="form-group" style="display:flex;gap:20px;">
                     <label style="display:flex;align-items:center;cursor:pointer;">
                         <input type="checkbox" id="dexUsePrimaryEncryption" checked style="width:auto;margin-right:8px;">
-                        Use Primary Encryption
+                        Register Paused public key
                     </label>
                 </div>
 
