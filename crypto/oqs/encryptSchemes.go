@@ -138,6 +138,33 @@ func PubKeyLength(sigName string) (int, error) {
 	return l, nil
 }
 
+var (
+	schemesByPubKeyLenOnce sync.Once
+	schemesByPubKeyLen     map[int][]string
+)
+
+// SchemesForPubKeyLength returns the enabled signature schemes whose public-key
+// length matches. Built once from the liboqs enabled set (an Init per scheme,
+// no keygen); used to judge a self-certifying key under the scheme it actually
+// belongs to when the local configuration does not know it (e.g. a P2P
+// handshake across a voted scheme change).
+func SchemesForPubKeyLength(length int) []string {
+	schemesByPubKeyLenOnce.Do(func() {
+		schemesByPubKeyLen = map[int][]string{}
+		for _, name := range EnabledSigs() {
+			var s Signature
+			if err := s.Init(name, nil); err != nil {
+				s.Clean()
+				continue
+			}
+			l := s.Details().LengthPublicKey
+			schemesByPubKeyLen[l] = append(schemesByPubKeyLen[l], name)
+			s.Clean()
+		}
+	})
+	return schemesByPubKeyLen[length]
+}
+
 func GenerateEncConfig(sigName string) (ConfigEnc, error) {
 	var signer Signature
 	defer signer.Clean()

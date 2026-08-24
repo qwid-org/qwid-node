@@ -13,9 +13,15 @@ import (
 // newTestIdentity builds a real Falcon-512 identity for handshake tests.
 func newTestIdentity(t *testing.T) HandshakeIdentity {
 	t.Helper()
+	return newTestIdentityWith(t, common.SigName())
+}
+
+// newTestIdentityWith builds a handshake identity signing with the named scheme.
+func newTestIdentityWith(t *testing.T, sigName string) HandshakeIdentity {
+	t.Helper()
 	var s oqs.Signature
-	if err := s.Init(common.SigName(), nil); err != nil {
-		t.Skipf("oqs Falcon init unavailable (CGO/liboqs): %v", err)
+	if err := s.Init(sigName, nil); err != nil {
+		t.Skipf("oqs %s init unavailable (CGO/liboqs): %v", sigName, err)
 	}
 	pub, err := s.GenerateKeyPair()
 	if err != nil {
@@ -65,6 +71,41 @@ func TestHandshakeMutualAuth(t *testing.T) {
 	}
 	if initKeys == nil || respKeys == nil {
 		t.Fatal("expected non-nil session keys from both sides")
+	}
+}
+
+// A peer that has already adopted a voted-in scheme this node does not run yet
+// (e.g. Falcon-1024 after a primary-scheme change) must still complete the
+// handshake in BOTH directions: the presented key is self-certifying and the
+// signature is judged under the scheme matching that key, not the local chain
+// configuration — otherwise the lagging node could never connect to sync the
+// very blocks that would teach it the new scheme.
+func TestHandshakeAcrossSchemeChange(t *testing.T) {
+	local := newTestIdentity(t)                       // Falcon-512: local config
+	upgraded := newTestIdentityWith(t, "Falcon-1024") // scheme the local config does not run
+
+	for _, dir := range []struct {
+		name                 string
+		initiator, responder HandshakeIdentity
+	}{
+		{"upgraded responder", local, upgraded},
+		{"upgraded initiator", upgraded, local},
+	} {
+		ca, cb := net.Pipe()
+		var respAddr common.Address
+		var respErr error
+		done := make(chan struct{})
+		go func() { respAddr, _, respErr = HandshakeResponder(cb, dir.responder); close(done) }()
+		initAddr, _, initErr := HandshakeInitiator(ca, dir.initiator)
+		<-done
+		ca.Close()
+		cb.Close()
+		if initErr != nil || respErr != nil {
+			t.Fatalf("%s: handshake failed: init=%v resp=%v", dir.name, initErr, respErr)
+		}
+		if initAddr != dir.responder.Address || respAddr != dir.initiator.Address {
+			t.Fatalf("%s: wrong peer nodeIDs learned", dir.name)
+		}
 	}
 }
 
