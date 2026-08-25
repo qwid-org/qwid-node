@@ -160,7 +160,11 @@ func SampleTransaction(w *wallet.Wallet) transactionsDefinition.Transaction {
 	if err != nil {
 		logger.GetLogger().Println("calc hash error", err)
 	}
-	err = t.Sign(w, true)
+	// Sign with the scheme that is LIVE, not always the primary. A hardcoded
+	// "true" produced transactions signed with a paused algorithm the moment the
+	// chain paused its primary scheme — every one of them rejected, with nothing
+	// in this tool's output to say why.
+	err = t.Sign(w, !common.IsPaused())
 	if err != nil {
 		logger.GetLogger().Println("Signing error", err)
 	}
@@ -179,7 +183,13 @@ func sendTransactions(w *wallet.Wallet) {
 	batchSize := 1
 	count := int64(0)
 	start := common.GetCurrentTimeStampInSecond()
-	for range time.Tick(time.Millisecond * 10000) {
+	for range time.Tick(time.Millisecond * 10) {
+		// Re-read the chain's schemes each cycle: this tool runs for a long time
+		// and the chain can pause or replace a scheme underneath it, after which
+		// everything it signs would be rejected.
+		if _, _, err := qtwidgets.SetCurrentEncryptions(); err != nil {
+			logger.GetLogger().Println("could not refresh encryption config:", err)
+		}
 		var txs []transactionsDefinition.Transaction
 		for i := 0; i < batchSize; i++ {
 			tx := SampleTransaction(w)
