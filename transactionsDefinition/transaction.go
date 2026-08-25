@@ -527,11 +527,44 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 			return false
 		}
 		logger.GetLogger().Println("  Address verification OK")
+
+		// The enclosed key is DATA — the key being registered. What SIGNED the
+		// transaction is a separate question, answered by the signature's own
+		// scheme flag, and the two differ in the case that matters: a key
+		// arrives paused and cannot sign for itself, so the live scheme signs
+		// for it.
+		//
+		// Verify against a key of the SIGNING scheme, therefore, not against
+		// whatever was enclosed. Using the enclosed key produced the misleading
+		// "LengthPublicKey: 66576 len(pubkey): 1793" — a signature made with the
+		// spare checked against the primary's key.
+		if expLen, lerr := oqs.PubKeyLength(signingSchemeName(primary, sigName, sigName2)); lerr == nil && len(pkb) != expLen {
+			signer, serr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen)
+			if serr != nil {
+				logger.GetLogger().Printf("  cannot verify: the transaction is signed with %s but sender %s has no registered %s key (%d bytes): %v",
+					signingSchemeName(primary, sigName, sigName2), senderAddr.GetHex(),
+					signingSchemeName(primary, sigName, sigName2), expLen, serr)
+				return false
+			}
+			logger.GetLogger().Printf("  enclosed key is the one being registered; verifying the signature against the sender's registered %s key",
+				signingSchemeName(primary, sigName, sigName2))
+			pkb = signer.GetBytes()
+		}
 		// Store pubkey immediately so it's available for nonce verification
 		// storePubKeyImmediately(pk, senderAddr)
 	}
 	//logger.GetLogger().Println(sigName, sigName2, isPausedTmp, isPaused2Tmp)
 	return wallet.Verify(b, signature.GetBytes(), pkb, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+}
+
+// signingSchemeName returns the scheme a signature was made under, chosen by
+// the flag the signature carries rather than by anything the transaction body
+// claims.
+func signingSchemeName(primary bool, sigName, sigName2 string) string {
+	if primary {
+		return sigName
+	}
+	return sigName2
 }
 
 func (tx *Transaction) Sign(w *wallet.Wallet, primary bool) error {
