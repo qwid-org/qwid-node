@@ -877,20 +877,9 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 
 	pk := common.PubKey{}
 	if req.IncludePubKey {
-		// "Register Paused public key" means the key of whichever scheme is
-		// currently PAUSED — not Account1. Which slot that is follows from the
-		// pause state: while the primary is live the spare is the paused one,
-		// and after the primary is paused it becomes the paused one itself.
-		//
-		// Tying this to Account1 registered the live scheme's key, which is
-		// already registered and never the one that needs it. The key that
-		// needs registering is always the paused one: a scheme arrives paused
-		// and cannot sign for itself, which is why the live scheme signs for it.
-		registerPrimary := !signPrimary
-		if !req.UsePrimaryEncryption {
-			// Unchecked: register the live scheme's key instead.
-			registerPrimary = signPrimary
-		}
+		// Only the Send form registers a key for a paused scheme; everywhere
+		// else the live scheme is the one in use, so attach its key.
+		registerPrimary := signPrimary
 		if registerPrimary {
 			pk = MainWallet.Account1.PublicKey
 		} else {
@@ -1497,20 +1486,9 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 
 	pk := common.PubKey{}
 	if req.IncludePubKey {
-		// "Register Paused public key" means the key of whichever scheme is
-		// currently PAUSED — not Account1. Which slot that is follows from the
-		// pause state: while the primary is live the spare is the paused one,
-		// and after the primary is paused it becomes the paused one itself.
-		//
-		// Tying this to Account1 registered the live scheme's key, which is
-		// already registered and never the one that needs it. The key that
-		// needs registering is always the paused one: a scheme arrives paused
-		// and cannot sign for itself, which is why the live scheme signs for it.
-		registerPrimary := !signPrimary
-		if !req.UsePrimaryEncryption {
-			// Unchecked: register the live scheme's key instead.
-			registerPrimary = signPrimary
-		}
+		// Only the Send form registers a key for a paused scheme; everywhere
+		// else the live scheme is the one in use, so attach its key.
+		registerPrimary := signPrimary
 		if registerPrimary {
 			pk = MainWallet.Account1.PublicKey
 		} else {
