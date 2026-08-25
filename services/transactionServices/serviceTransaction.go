@@ -84,9 +84,15 @@ func pruneSeen(seen map[common.Hash]struct{}, txs []transactionsDefinition.Trans
 	}
 }
 
+// transactionKeepaliveInterval paces the empty "tx" keepalive below. It must
+// stay well under tcpip's quiet-connection timeout (3 min), or the watchdog
+// keeps killing the idle-but-healthy transaction link.
+const transactionKeepaliveInterval = time.Minute
+
 func broadcastTransactionsMsgInLoop() {
 	seen := make(map[common.Hash]struct{}) // NP-H10: hashes already re-broadcast by this loop (single-goroutine, no mutex)
 	var lastNoPeerLog time.Time            // rate-limits the "nowhere to send" warning below
+	lastOutbound := time.Now()             // last moment anything was sent on the transaction topic
 	for {
 		select {
 		case <-tcpip.Quit:
@@ -95,6 +101,7 @@ func broadcastTransactionsMsgInLoop() {
 		default:
 		}
 
+		sentAnything := false
 		txs := transactionsPool.PoolsTx.PeekTransactions(int(common.MaxTransactionsPerBlock), 0)
 		pruneSeen(seen, txs)                       // NP-H10: drop mined/expired entries
 		newTxs := selectNewTransactions(txs, seen) // NP-H10: send only the delta
@@ -115,17 +122,53 @@ func broadcastTransactionsMsgInLoop() {
 						lastNoPeerLog = time.Now()
 					}
 				}
+				delivered := false
 				for topicip := range peers {
 					var ip [4]byte
 					copy(ip[:], topicip[2:])
 					if !bytes.Equal(ip[:], tcpip.MyIP[:]) {
-						Send(ip, n.GetBytes())
+						if Send(ip, n.GetBytes()) {
+							delivered = true
+						}
 					}
 				}
-				for _, tx := range newTxs {
-					seen[tx.GetHash()] = struct{}{}
+				// Mark as re-broadcast ONLY when at least one remote peer
+				// actually got the message. Marking with zero peers (or with
+				// every Send failing) silenced these transactions forever: once
+				// the transaction-topic connection came back, this loop
+				// considered them already sent, so anything submitted during an
+				// outage stayed pending until manually resubmitted.
+				if delivered {
+					for _, tx := range newTxs {
+						seen[tx.GetHash()] = struct{}{}
+					}
+					sentAnything = true
 				}
 			}
+		}
+
+		// Keepalive: the transaction topic is naturally silent when no
+		// transactions flow, so the quiet-connection watchdog kept killing the
+		// idle-but-healthy link — and a transaction submitted right then found
+		// no peer to go to. An empty, valid "tx" message once a minute keeps
+		// the link demonstrably alive on both ends; receivers process it as a
+		// no-op (no transactions inside), old nodes included.
+		if !sentAnything && time.Since(lastOutbound) >= transactionKeepaliveInterval {
+			if ka, err := GenerateTransactionMsg(nil, []byte("tx"), tcpip.TransactionTopic); err == nil {
+				kb := ka.GetBytes()
+				for topicip := range tcpip.GetPeersConnected(tcpip.TransactionTopic) {
+					var ip [4]byte
+					copy(ip[:], topicip[2:])
+					if !bytes.Equal(ip[:], tcpip.MyIP[:]) {
+						if Send(ip, kb) {
+							sentAnything = true
+						}
+					}
+				}
+			}
+		}
+		if sentAnything {
+			lastOutbound = time.Now()
 		}
 
 		time.Sleep(time.Second)

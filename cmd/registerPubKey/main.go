@@ -95,9 +95,33 @@ func main() {
 		fmt.Println("StorePubKey failed:", err)
 		os.Exit(1)
 	}
-	if err := blocks.StorePubKeyInPatriciaTrie(pk); err != nil {
-		fmt.Println("StorePubKeyInPatriciaTrie failed:", err)
-		os.Exit(1)
+	// Bind the key's address under the main address. Unlike the consensus path
+	// (blocks.StorePubKeyInPatriciaTrie), this recovery tool also handles an
+	// identity with NO trie yet whose key does not derive to the main address —
+	// e.g. an identity created under a superseded scheme that never registered
+	// on this chain: the operator explicitly asserts the binding here.
+	addresses, err := pubkeys.LoadAddresses(mainAddress)
+	if err != nil {
+		addresses = []common.Address{}
+	}
+	present := false
+	for _, a := range addresses {
+		if a.GetHex() == address.GetHex() {
+			present = true
+			break
+		}
+	}
+	if !present {
+		addresses = append(addresses, address)
+		tree, err := pubkeys.BuildMerkleTree(mainAddress, addresses, pubkeys.GlobalMerkleTree.DB)
+		if err != nil {
+			fmt.Println("BuildMerkleTree failed:", err)
+			os.Exit(1)
+		}
+		if err := tree.StoreTree(mainAddress); err != nil {
+			fmt.Println("StoreTree failed:", err)
+			os.Exit(1)
+		}
 	}
 	// Read back through the exact lookup the node's verifier uses.
 	got, err := pubkeys.LoadPubKeyWithPrimaryOfLength(mainAddress, primary, len(keyBytes))
