@@ -588,12 +588,6 @@
                     <textarea id="multiSigAddresses" rows="3" style="width:100%;padding:12px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;font-family:monospace;" placeholder="address1, address2, address3..."></textarea>
                 </div>
 
-                <div class="form-group" style="display:flex;gap:20px;">
-                    <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="escrowIncludePubKey" style="width:auto;margin-right:8px;">
-                        Include Public Key
-                    </label>
-                </div>
 
                 <button class="btn-primary" onclick="modifyAccount()">Modify Account</button>
             </div>
@@ -1715,14 +1709,12 @@ contract Coin {
             const escrowDelay = parseInt(document.getElementById('escrowDelay').value) || 0;
             const multiSigNumber = parseInt(document.getElementById('multiSigNumber').value) || 0;
             const multiSigAddresses = document.getElementById('multiSigAddresses').value;
-            const includePubKey = document.getElementById('escrowIncludePubKey').checked;
 
             try {
                 const res = await api('/api/escrow/modify', 'POST', {
                     escrowDelay,
                     multiSigNumber,
-                    multiSigAddresses,
-                    includePubKey
+                    multiSigAddresses
                 });
                 if (res.error) {
                     showMessage(res.error, 'error');

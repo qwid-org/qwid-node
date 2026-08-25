@@ -1423,11 +1423,9 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		EscrowDelay          int64  `json:"escrowDelay"`
-		MultiSigNumber       int    `json:"multiSigNumber"`
-		MultiSigAddresses    string `json:"multiSigAddresses"`
-		IncludePubKey        bool   `json:"includePubKey"`
-		UsePrimaryEncryption bool   `json:"usePrimaryEncryption"`
+		EscrowDelay       int64  `json:"escrowDelay"`
+		MultiSigNumber    int    `json:"multiSigNumber"`
+		MultiSigAddresses string `json:"multiSigAddresses"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
@@ -1484,21 +1482,11 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	SetCurrentEncryptions()
 	signPrimary := !common.IsPaused()
 
+	// No public key travels with an escrow change. Key registration belongs to
+	// one place — the Send form — so that the operator has a single, obvious
+	// route for it instead of the same option repeated on forms that have
+	// nothing to do with keys.
 	pk := common.PubKey{}
-	if req.IncludePubKey {
-		// Only the Send form registers a key for a paused scheme; everywhere
-		// else the live scheme is the one in use, so attach its key.
-		registerPrimary := signPrimary
-		if registerPrimary {
-			pk = MainWallet.Account1.PublicKey
-		} else {
-			pk = MainWallet.Account2.PublicKey
-		}
-		logger.GetLogger().Printf("including pubkey for registration: %s slot (%s), %d bytes",
-			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
-			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
-			len(pk.GetBytes()))
-	}
 
 	// Build transaction
 	txd := transactionsDefinition.TxData{
