@@ -11,8 +11,8 @@ func TestMaxMessageSizeForTopic(t *testing.T) {
 		topic [2]byte
 		want  int32
 	}{
-		{NonceTopic, common.MaxMsgSizeSmall},
-		{SelfNonceTopic, common.MaxMsgSizeSmall},
+		{NonceTopic, common.MaxMsgSizeNonce},
+		{SelfNonceTopic, common.MaxMsgSizeNonce},
 		{TransactionTopic, common.MaxMessageSizeBytes},
 		{SyncTopic, common.MaxMsgSizeSync},
 		{RPCTopic, common.MaxMsgSizeRPC},

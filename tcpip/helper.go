@@ -229,7 +229,9 @@ func formatIP(ip [4]byte) string {
 func MaxMessageSizeForTopic(topic [2]byte) int32 {
 	switch topic {
 	case NonceTopic, SelfNonceTopic:
-		return common.MaxMsgSizeSmall
+		// Block broadcasts travel on this topic, not just nonces — see
+		// MaxMsgSizeNonce.
+		return common.MaxMsgSizeNonce
 	case TransactionTopic:
 		return common.MaxMessageSizeBytes
 	case SyncTopic:

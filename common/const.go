@@ -72,7 +72,20 @@ var (
 	// un-chunked batches, so a tighter per-message cap would reject legitimate
 	// batches and get honest peers banned. Tightening it requires chunking
 	// those send paths (documented follow-up).
-	MaxMsgSizeSmall int32 = 65536    // 64KB  — Nonce/SelfNonce (tiny fixed messages)
+	MaxMsgSizeSmall int32 = 65536 // 64KB  — default for topics carrying tiny fixed messages
+	// MaxMsgSizeNonce caps the Nonce/SelfNonce topics. They are NOT "tiny fixed
+	// message" topics, which is what the original 64KB cap assumed:
+	// services.BroadcastBlock publishes every newly produced block to peers over
+	// the Nonce topic, and a block carries one 32-byte hash per transaction
+	// (blocks/Block.go GetBytes), so a full block runs to roughly
+	// MaxTransactionsPerBlock*HashLength bytes — around 160KB, far past 64KB.
+	//
+	// Under light load blocks stayed under 64KB and the mismatch was invisible.
+	// Once the pool held enough transactions to fill blocks, every block
+	// broadcast was rejected by every peer as over-long and the chain stopped
+	// advancing. Derived from the block limits rather than hardcoded so that
+	// raising MaxTransactionsPerBlock cannot silently reintroduce the stall.
+	MaxMsgSizeNonce int32 = int32(MaxTransactionsPerBlock)*int32(HashLength) + MaxMsgSizeSmall
 	MaxMsgSizeSync  int32 = 16777216 // 16MB  — Sync (block-header batches, ~3.2MB real max)
 	MaxMsgSizeRPC   int32 = 1048576  // 1MB   — RPC (localhost-bound)
 
