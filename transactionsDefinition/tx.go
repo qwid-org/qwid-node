@@ -101,8 +101,19 @@ func (md TxData) GetBytes() ([]byte, error) {
 	return b, nil
 }
 
+// txDataHeaderBytes is the recipient address (with its leading type byte) plus
+// the 8-byte amount — everything TxData.GetFromBytes reads by fixed offset.
+const txDataHeaderBytes = common.AddressLength + 9
+
 func (TxData) GetFromBytes(data []byte) (TxData, []byte, error) {
 	md := TxData{}
+	// Bounds-check before the fixed-offset reads below. The caller's own length
+	// check no longer covers this: it is a scheme-independent structural floor
+	// (see minTransactionBytes), not a bound on what reaches this decoder after
+	// the variable-length TxParam is consumed.
+	if len(data) < txDataHeaderBytes {
+		return TxData{}, nil, fmt.Errorf("not enough bytes in TxData unmarshaling %v < %v", len(data), txDataHeaderBytes)
+	}
 	address, err := common.BytesToAddress(data[:common.AddressLength+1])
 	if err != nil {
 		return TxData{}, nil, err
@@ -144,10 +155,18 @@ func (TxData) GetFromBytes(data []byte) (TxData, []byte, error) {
 	if err != nil {
 		return TxData{}, nil, err
 	}
+	// GetInt64FromByte panics on a slice shorter than 8, and every length here is
+	// attacker-controlled: the encoder writes 8 bytes, a peer need not.
+	if len(la) < 8 {
+		return TxData{}, nil, fmt.Errorf("not enough bytes for locked amount in TxData: %v", len(la))
+	}
 	md.LockedAmount = common.GetInt64FromByte(la)
 	rpb, left, err := common.BytesWithLenToBytes(left)
 	if err != nil {
 		return TxData{}, nil, err
+	}
+	if len(rpb) < 8 {
+		return TxData{}, nil, fmt.Errorf("not enough bytes for release per block in TxData: %v", len(rpb))
 	}
 	md.ReleasePerBlock = common.GetInt64FromByte(rpb)
 	dal, left, err := common.BytesWithLenToBytes(left)
@@ -163,11 +182,17 @@ func (TxData) GetFromBytes(data []byte) (TxData, []byte, error) {
 	if err != nil {
 		return TxData{}, nil, err
 	}
+	if len(etd) < 8 {
+		return TxData{}, nil, fmt.Errorf("not enough bytes for escrow delay in TxData: %v", len(etd))
+	}
 	md.EscrowTransactionsDelay = common.GetInt64FromByte(etd)
 
 	msn, left, err := common.BytesWithLenToBytes(left)
 	if err != nil {
 		return TxData{}, nil, err
+	}
+	if len(msn) < 1 {
+		return TxData{}, nil, fmt.Errorf("missing multisign number in TxData")
 	}
 	md.MultiSignNumber = msn[0]
 

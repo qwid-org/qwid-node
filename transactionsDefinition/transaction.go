@@ -110,10 +110,35 @@ func (tx *Transaction) GetSenderAddress() common.Address {
 	return tx.TxParam.Sender
 }
 
+// txFixedFieldsBytes is what Transaction.GetFromBytes reads by fixed offset once
+// TxParam and TxData are consumed: height, gas price, gas usage (8 each) and the
+// transaction hash (32).
+const txFixedFieldsBytes = 24 + common.HashLength
+
+// minTransactionBytes is the structural lower bound on a serialised transaction,
+// independent of ANY signature scheme: TxParam (43) + TxData (33) + the fixed
+// fields above (56) + the signature length header (4) + the contract address
+// (20) + the output-log length header (4).
+//
+// The bound deliberately excludes the signature body. It used to be derived from
+// common.SignatureLength(true)/SignatureLength2(true) — the schemes THIS node
+// currently runs — which made decoding depend on local state that a syncing node
+// has wrong by definition: a node behind the chain still holds the schemes from
+// its own height, so every transaction signed under a newer (and possibly much
+// shorter) scheme was rejected here before it was ever parsed. That is fatal
+// during sync, because this same decoder handles the "bx" answers carrying the
+// very transactions the node is missing, and because a rejected transaction
+// never enters the pool the peer re-gossips it forever.
+//
+// Whether the signature is well-formed is the signature check's business
+// (Transaction.Verify), which resolves the scheme from the block being verified
+// rather than from local configuration.
+const minTransactionBytes = 43 + 33 + txFixedFieldsBytes + 4 + common.AddressLength + 4
+
 func (tx *Transaction) GetFromBytes(b []byte) (Transaction, []byte, error) {
 
-	if len(b) < 76+common.SignatureLength(true)+1 && len(b) < 76+common.SignatureLength2(true)+1 {
-		return Transaction{}, nil, fmt.Errorf("Not enough bytes for transaction unmarshal len bytes %v", len(b))
+	if len(b) < minTransactionBytes {
+		return Transaction{}, nil, fmt.Errorf("Not enough bytes for transaction unmarshal len bytes %v < %v", len(b), minTransactionBytes)
 	}
 	tp := TxParam{}
 	tp, b, err := tp.GetFromBytes(b)
@@ -125,6 +150,11 @@ func (tx *Transaction) GetFromBytes(b []byte) (Transaction, []byte, error) {
 	if err != nil {
 		return Transaction{}, nil, err
 	}
+	// TxParam/TxData are variable-length, so the top-level bound above says
+	// nothing about what is left for the fixed fields read by offset below.
+	if len(b) < txFixedFieldsBytes {
+		return Transaction{}, nil, fmt.Errorf("not enough bytes for transaction fixed fields %v < %v", len(b), txFixedFieldsBytes)
+	}
 	at := Transaction{
 		TxData:    adata,
 		TxParam:   tp,
@@ -134,8 +164,8 @@ func (tx *Transaction) GetFromBytes(b []byte) (Transaction, []byte, error) {
 		GasPrice:  common.GetInt64FromByte(b[8:16]),
 		GasUsage:  common.GetInt64FromByte(b[16:24]),
 	}
-	at.Hash = common.GetHashFromBytes(b[24:56])
-	vb, leftb, err := common.BytesWithLenToBytes(b[56:])
+	at.Hash = common.GetHashFromBytes(b[24:txFixedFieldsBytes])
+	vb, leftb, err := common.BytesWithLenToBytes(b[txFixedFieldsBytes:])
 	if err != nil {
 		return Transaction{}, nil, err
 	}
@@ -144,11 +174,14 @@ func (tx *Transaction) GetFromBytes(b []byte) (Transaction, []byte, error) {
 		return Transaction{}, nil, err
 	}
 	at.Signature = signature
-	err = at.ContractAddress.Init(leftb[:20])
+	if len(leftb) < common.AddressLength {
+		return Transaction{}, nil, fmt.Errorf("not enough bytes for contract address %v < %v", len(leftb), common.AddressLength)
+	}
+	err = at.ContractAddress.Init(leftb[:common.AddressLength])
 	if err != nil {
 		return Transaction{}, nil, err
 	}
-	toBytes, leftb2, err := common.BytesWithLenToBytes(leftb[20:])
+	toBytes, leftb2, err := common.BytesWithLenToBytes(leftb[common.AddressLength:])
 	if err != nil {
 		return Transaction{}, nil, err
 	}
