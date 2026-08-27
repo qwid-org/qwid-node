@@ -183,7 +183,7 @@ func sendTransactions(w *wallet.Wallet) {
 	batchSize := 1
 	count := int64(0)
 	start := common.GetCurrentTimeStampInSecond()
-	for range time.Tick(time.Millisecond * 1) {
+	for range time.Tick(time.Millisecond * 100) {
 		// Re-read the chain's schemes each cycle: this tool runs for a long time
 		// and the chain can pause or replace a scheme underneath it, after which
 		// everything it signs would be rejected.

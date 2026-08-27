@@ -112,14 +112,47 @@ func StorePubKeyInPatriciaTrie(pk common.PubKey) error {
 		addresses = []common.Address{}
 	}
 	if len(addresses) == 0 {
-		mainAddress, err2 := pubkeys.CreateAddressFromFirstPubKey(pk)
-		if err2 != nil {
-			return err2
+		// This identity has no trie yet, so this key is its first. There are two
+		// shapes of "first key" and only one of them may go through
+		// CreateAddressFromFirstPubKey.
+		//
+		// That helper bootstraps an identity OUT OF the key: it derives an
+		// address from the key bytes and makes that address the identity. It is
+		// therefore correct only when the key actually derives MainAddress —
+		// the classic case of a primary key registering itself.
+		//
+		// A key whose derived address differs from MainAddress (any secondary
+		// key, and any key of a newly voted-in scheme) cannot bootstrap an
+		// identity it does not derive. Transaction verification already permits
+		// exactly this case: its bootstrap rule accepts a non-primary key when
+		// pk.MainAddress equals the sender, without requiring the key to derive
+		// it. Sending such a key down the helper's path made verification and
+		// application disagree — the block was accepted into the chain and then
+		// refused when applied, so the node rewound and retried it forever.
+		//
+		// Worse, the helper stores the derived-address trie BEFORE its caller
+		// checks the identity matches, so the first failed attempt left that
+		// trie behind and every retry then failed with a different error
+		// ("there are just generated markle trie for given pubkey") — a block
+		// the node could never get past.
+		derived, derr := common.PubKeyToAddress(pk.GetBytes(), pk.Primary)
+		if derr != nil {
+			return derr
 		}
-		if !bytes.Equal(pk.MainAddress.GetBytes(), mainAddress.GetBytes()) {
-			return fmt.Errorf("error with creation of address from first pub key %v != %v", pk.MainAddress.GetHex(), mainAddress.GetHex())
+		if bytes.Equal(derived.GetBytes(), pk.MainAddress.GetBytes()) {
+			mainAddress, err2 := pubkeys.CreateAddressFromFirstPubKey(pk)
+			if err2 != nil {
+				return err2
+			}
+			if !bytes.Equal(pk.MainAddress.GetBytes(), mainAddress.GetBytes()) {
+				return fmt.Errorf("error with creation of address from first pub key %v != %v", pk.MainAddress.GetHex(), mainAddress.GetHex())
+			}
+			return nil
 		}
-		return nil
+		// The identity is the one the key names, not one derived from it: open
+		// its trie with this key's address as the sole entry. This is the same
+		// construction the append path below performs, from an empty start.
+		addresses = []common.Address{}
 	}
 	exist := false
 	for _, a := range addresses {
