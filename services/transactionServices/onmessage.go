@@ -35,16 +35,31 @@ func OnMessage(addr [4]byte, m []byte) {
 	switch string(amsg.GetHead()) {
 	case "tx":
 
+		// Backpressure BEFORE the expensive work, not after it.
+		//
+		// GetTransactionsFromBytes verifies the post-quantum signature of every
+		// transaction in the batch, and a batch runs to MaxTransactionsPerBlock.
+		// With this check below the decode, a node whose pool was full verified
+		// thousands of signatures per gossip message and then dropped the whole
+		// batch unused — burning the CPU that block processing and sync need,
+		// exactly while it was least able to spare it. The cost scales with the
+		// scheme in force, and a voted-in scheme can be far dearer than the one
+		// this was written under.
+		//
+		// This affects gossip only. The sync answers "bx"/"bt"/"st" carry no
+		// such check and must not gain one: a node catching up has to accept the
+		// transactions of every block it is importing, whatever its pool holds.
+		if transactionsPool.PoolsTx.NumberOfTransactions() > common.MaxTransactionInPool {
+			logger.GetLogger().Println("no more transactions can be accepted to the pool")
+			return
+		}
+
 		msg := amsg.(message.TransactionsMessage)
 		txn, err := msg.GetTransactionsFromBytes(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
 		if err != nil {
 			return
 		}
 		//logger.GetLogger().Println("get tx from ", addr[:])
-		if transactionsPool.PoolsTx.NumberOfTransactions() > common.MaxTransactionInPool {
-			logger.GetLogger().Println("no more transactions can be accepted to the pool")
-			return
-		}
 		// need to check transactions
 		for _, v := range txn {
 			for _, t := range v {
