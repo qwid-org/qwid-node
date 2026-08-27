@@ -80,8 +80,16 @@ func TestPruneRateLimitsOnBan(t *testing.T) {
 	AllowMessageFromIP(ip)
 	AllowConnectionFromIP(ip)
 	pruneRateLimits(ip)
+	// msgRate is keyed by IP *and* traffic class, so a ban must clear every
+	// class for that IP, not just the one this test happened to exercise.
 	msgRateMutex.Lock()
-	_, m := msgRate[ip]
+	m := false
+	for k := range msgRate {
+		if k.ip == ip {
+			m = true
+			break
+		}
+	}
 	msgRateMutex.Unlock()
 	connRateMutex.Lock()
 	_, c := connRate[ip]

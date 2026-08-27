@@ -241,6 +241,24 @@ func ProcessBlockPubKey(block Block) error {
 			pk.MainAddress = pk.Address
 			logger.GetLogger().Println("  MainAddress set to:", pk.MainAddress.GetHex())
 		}
+		// Defence in depth. Verify() is the consensus gate and now requires the
+		// enclosed key to name its sender as its identity, so this cannot fire
+		// for a transaction that passed it. It is here because the binding
+		// written below is what LoadPubKey later reports as "this key belongs
+		// to X", and a signature made with the key then spends X's coins: any
+		// future gap in Verify would become a permanent on-chain account
+		// takeover the moment the block applied.
+		//
+		// Skipping rather than rejecting the block is deliberate. Refusing the
+		// block would stall the node on a rewind-and-reapply loop — the failure
+		// mode that stalled it once already — whereas skipping leaves the key
+		// simply unbound, which is what an unproven claim deserves.
+		if !bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes()) {
+			logger.GetLogger().Printf("WARNING: refusing to register a key that names identity %s while sent by %s; key not bound",
+				pk.MainAddress.GetHex(), senderAddr.GetHex())
+			continue
+		}
+
 		err = StorePubKey(pk)
 		if err != nil {
 			logger.GetLogger().Println("  ERROR: StorePubKey failed:", err)

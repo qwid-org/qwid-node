@@ -540,14 +540,50 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 			if !authorised {
 				// Nothing is registered for this sender yet, so there is no
 				// identity to authorise anything: the very first key can only
-				// vouch for itself, and its address IS the identity.
-				logger.GetLogger().Println("  sender has no registered key for the signing scheme; bootstrap rule applies (key address must equal the sender)")
-				if pkPrimary {
-					addressMatch = bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes())
-				} else {
-					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
+				// vouch for itself, and the sole claim a key can prove on its
+				// own is to the address it derives.
+				//
+				// The previous rule let a NON-DERIVING key bootstrap an
+				// identity on the strength of pk.MainAddress alone. That field
+				// is an assertion carried inside the transaction and proved by
+				// nothing, so enclosing your own spare key while naming
+				// somebody else's address bound your key to their identity:
+				// from then on LoadPubKey resolved it to them and your
+				// signature spent their coins. Registration is not a
+				// prerequisite for holding a balance, so every funded account
+				// that had not yet registered a key was takeable by anyone who
+				// knew its address.
+				//
+				// One consequence is deliberate and worth stating: an
+				// identity's FIRST on-chain key must be the key that derives
+				// it. A spare cannot open an account. Because the spare is live
+				// exactly while the primary is paused, no identity can be
+				// bootstrapped during a pause — a transient governance state,
+				// and the alternative is an unprovable claim. Every LATER key,
+				// including an entire new scheme's after a replacement, arrives
+				// through the authorised path above: signed by a key already
+				// registered to that identity.
+				logger.GetLogger().Println("  sender has no registered key for the signing scheme; bootstrap rule applies (the key must derive the sender address)")
+				addressMatch = bootstrapBindsKey(pkAddr, senderAddr)
+				if !addressMatch && !pkPrimary {
+					logger.GetLogger().Println("  a spare key cannot open an account: register the key that derives this address first, " +
+						"while its scheme is not paused, then introduce further keys by signing with it")
 				}
 			}
+		}
+
+		// Whichever branch established authority, the key must also NAME the
+		// sender as its identity. This is a separate question from who is
+		// allowed to register it, and it needs its own check because
+		// ProcessBlockPubKey stores pk.MainAddress verbatim without consulting
+		// the sender: a key admitted while naming somebody else would be
+		// recorded against them, which is the same account takeover by a
+		// different route.
+		if addressMatch && !keyNamesSender(pk.MainAddress, senderAddr) {
+			logger.GetLogger().Println("  ERROR: the enclosed key names an identity other than the sender")
+			logger.GetLogger().Println("  PubKey.MainAddress:", pk.MainAddress.GetHex())
+			logger.GetLogger().Println("  Expected (sender):", senderAddr.GetHex())
+			return false
 		}
 
 		if !addressMatch {
@@ -588,6 +624,27 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 	}
 	//logger.GetLogger().Println(sigName, sigName2, isPausedTmp, isPaused2Tmp)
 	return wallet.Verify(b, signature.GetBytes(), pkb, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+}
+
+// bootstrapBindsKey reports whether a key with no on-chain history may open the
+// identity that sent it. Only a key that DERIVES that address can: the address
+// is a hash of the key, so holding the key is itself the proof, and no other
+// claim a first key could make is backed by anything.
+//
+// In particular a spare key cannot open an account. Its address differs from
+// the identity by construction, so accepting it would mean believing the
+// transaction's own assertion about whose key it is.
+func bootstrapBindsKey(pkAddr, senderAddr common.Address) bool {
+	return bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes())
+}
+
+// keyNamesSender reports whether an enclosed key claims the sender as its
+// identity. Required however the key earned the right to be registered:
+// ProcessBlockPubKey stores the claimed identity verbatim, so a key admitted
+// while naming somebody else is recorded against them and its holder can then
+// sign as them.
+func keyNamesSender(pkMainAddress, senderAddr common.Address) bool {
+	return bytes.Equal(pkMainAddress.GetBytes(), senderAddr.GetBytes())
 }
 
 // signingSchemeName returns the scheme a signature was made under, chosen by
