@@ -1,6 +1,8 @@
 package transactionServices
 
 import (
+	"fmt"
+
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
@@ -122,14 +124,33 @@ func OnMessage(addr [4]byte, m []byte) {
 		msg := amsg.(message.TransactionsMessage)
 		rawTxn := msg.GetTransactionsBytes()
 
+		// One bx answer carries a whole block's worth of transactions, and a node
+		// catching up receives one per block. Logging a line per transaction made
+		// the log — and the sync it was supposed to describe — crawl, so the loop
+		// only counts. A single line per answer reports the batch and names the
+		// FIRST failure of each kind, because a transaction dropped here is a block
+		// that cannot be applied: the count alone would say sync is stuck without
+		// saying why.
 		storedCount := 0
 		skippedExisting := 0
+		undecodable := 0
+		droppedCount := 0
+		storeFailures := 0
+		var firstDecodeErr error
+		var firstDropReason string
+		var firstStoreErr error
 		for _, v := range rawTxn {
 			for _, tb := range v {
 				tx := transactionsDefinition.Transaction{}
 				t, rest, err := tx.GetFromBytes(tb)
 				if err != nil || len(rest) > 0 {
-					logger.GetLogger().Println("bx: parse error:", err)
+					undecodable++
+					if firstDecodeErr == nil {
+						if err == nil {
+							err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
+						}
+						firstDecodeErr = err
+					}
 					continue
 				}
 				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
@@ -147,7 +168,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				// the referencing block is later validated.
 				sigBytes := t.GetSignature().GetBytes()
 				if len(sigBytes) == 0 {
-					logger.GetLogger().Printf("bx: dropping tx %x with empty signature", t.Hash.GetBytes()[:8])
+					droppedCount++
+					if firstDropReason == "" {
+						firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
+					}
 					continue
 				}
 				canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
@@ -157,19 +181,33 @@ func OnMessage(addr [4]byte, m []byte) {
 					}
 				}
 				if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
-					logger.GetLogger().Printf("bx: signature verification failed, dropping tx %x", t.Hash.GetBytes()[:8])
+					droppedCount++
+					if firstDropReason == "" {
+						firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+					}
 					continue
 				}
-				err = t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:])
-				if err != nil {
-					logger.GetLogger().Printf("bx: FAILED to store transaction %x: %v", t.Hash.GetBytes()[:8], err)
-				} else {
-					logger.GetLogger().Printf("bx: stored tx %x", t.Hash.GetBytes()[:8])
-					storedCount++
+				if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
+					storeFailures++
+					if firstStoreErr == nil {
+						firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
+					}
+					continue
 				}
+				storedCount++
 			}
 		}
-		logger.GetLogger().Printf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
+		summary := fmt.Sprintf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
+		if undecodable > 0 {
+			summary += fmt.Sprintf("; %d undecodable (first: %v)", undecodable, firstDecodeErr)
+		}
+		if droppedCount > 0 {
+			summary += fmt.Sprintf("; %d dropped (first: %s)", droppedCount, firstDropReason)
+		}
+		if storeFailures > 0 {
+			summary += fmt.Sprintf("; %d store failure(s) (first: %v)", storeFailures, firstStoreErr)
+		}
+		logger.GetLogger().Println(summary)
 	case "st":
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {

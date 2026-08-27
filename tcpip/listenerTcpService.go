@@ -559,8 +559,18 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			if bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
 				if len(r) > 4 {
 					if bytes.Equal(r[:4], common.MessageInitialization[:]) {
-						if !AllowMessageFromIP(ip) {
-							logger.GetLogger().Println("message rate limit exceeded for", ip)
+						// The message head is the first two bytes of the body,
+						// straight after the 4-byte initialization marker
+						// (message.BaseMessage.GetBytes). Reading it here — before
+						// any parsing — is what lets the limiter tell sync traffic
+						// from gossip. A frame too short to hold a head charges the
+						// gossip budget, which is where junk belongs.
+						var head [2]byte
+						if len(r) >= 6 {
+							copy(head[:], r[4:6])
+						}
+						if !AllowMessageFromIPForHead(ip, head) {
+							logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
 							PeersMutex.Lock()
 							ReduceTrustRegisterPeer(ip)
 							trust, ok := validPeersConnected[ip]
