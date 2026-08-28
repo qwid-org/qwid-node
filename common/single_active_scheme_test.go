@@ -13,7 +13,9 @@ import "testing"
 // schemes live at once, or neither, and "neither" freezes the chain with no way
 // back.
 func TestExactlyOneSchemeIsActive(t *testing.T) {
-	initEncryptionConfigInstance()
+	// Reset to the starting configuration so the assertions below describe a
+	// fresh node rather than whatever an earlier test left behind.
+	encryptionConfigInstance = newEncryptionConfig()
 
 	if IsPaused() {
 		t.Fatal("a fresh node starts with the primary scheme paused")
@@ -46,7 +48,9 @@ func TestExactlyOneSchemeIsActive(t *testing.T) {
 // Whatever is written into the secondary slot, the invariant holds — the slot
 // carries WHICH algorithm the spare is, never WHETHER it is live.
 func TestSecondarySlotCannotTurnItselfOn(t *testing.T) {
-	initEncryptionConfigInstance()
+	// Reset to the starting configuration so the assertions below describe a
+	// fresh node rather than whatever an earlier test left behind.
+	encryptionConfigInstance = newEncryptionConfig()
 
 	GetEncryptionConfigInstance().SetEncryption("Falcon-1024", 1793, 2305, 1280, false, false)
 
