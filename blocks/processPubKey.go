@@ -220,31 +220,27 @@ func ProcessBlockPubKey(block Block) error {
 		if len(pk.GetBytes()) == 0 {
 			continue
 		}
-		logger.GetLogger().Println("ProcessBlockPubKey: pubkey found in transaction", txh.GetHex())
-		logger.GetLogger().Println("  PubKey bytes length:", len(pk.GetBytes()))
-		logger.GetLogger().Println("  PubKey.Address:", pk.Address.GetHex())
-		logger.GetLogger().Println("  PubKey.MainAddress:", pk.MainAddress.GetHex())
-		logger.GetLogger().Println("  PubKey.Primary:", pk.Primary)
+		// One line per registration, not the fifteen this used to emit. Every
+		// fact those lines carried is either in the summary below or in the
+		// error that reports the failure, and each error names the transaction
+		// and the addresses itself so nothing depends on a preceding line
+		// having survived. Registrations are rare on a live chain but arrive
+		// back to back while syncing one, which is where the volume hurt.
 		senderAddr := t.GetSenderAddress()
-		logger.GetLogger().Println("  Transaction sender:", senderAddr.GetHex())
 
 		zeroBytes := make([]byte, common.AddressLength)
 		// Derive address from pubkey bytes if not set
 		if bytes.Equal(pk.Address.GetBytes(), zeroBytes) {
-			logger.GetLogger().Println("  PubKey.Address is empty, deriving from pubkey bytes...")
 			derivedAddr, err := common.PubKeyToAddress(pk.GetBytes(), pk.Primary)
 			if err != nil {
-				logger.GetLogger().Println("  ERROR: cannot derive address from pubkey:", err)
+				logger.GetLogger().Printf("ERROR: tx %s carries a pubkey whose address cannot be derived: %v", txh.GetHex(), err)
 				continue
 			}
 			pk.Address = derivedAddr
-			logger.GetLogger().Println("  Derived address:", pk.Address.GetHex())
 		}
 		// Set MainAddress if not set
 		if bytes.Equal(pk.MainAddress.GetBytes(), zeroBytes) {
-			logger.GetLogger().Println("  PubKey.MainAddress is empty, setting to pk.Address")
 			pk.MainAddress = pk.Address
-			logger.GetLogger().Println("  MainAddress set to:", pk.MainAddress.GetHex())
 		}
 		// Defence in depth. Verify() is the consensus gate and now requires the
 		// enclosed key to name its sender as its identity, so this cannot fire
@@ -266,16 +262,19 @@ func ProcessBlockPubKey(block Block) error {
 
 		err = StorePubKey(pk)
 		if err != nil {
-			logger.GetLogger().Println("  ERROR: StorePubKey failed:", err)
+			logger.GetLogger().Printf("ERROR: storing the key %s of identity %s from tx %s failed: %v",
+				pk.Address.GetHex(), pk.MainAddress.GetHex(), txh.GetHex(), err)
 			return err
 		}
-		logger.GetLogger().Println("  StorePubKey success")
 		err = StorePubKeyInPatriciaTrie(pk)
 		if err != nil {
-			logger.GetLogger().Println("  ERROR: StorePubKeyInPatriciaTrie failed:", err)
+			logger.GetLogger().Printf("ERROR: recording the key %s under identity %s from tx %s failed: %v",
+				pk.Address.GetHex(), pk.MainAddress.GetHex(), txh.GetHex(), err)
 			return err
 		}
-		logger.GetLogger().Println("  StorePubKeyInPatriciaTrie success")
+		logger.GetLogger().Printf("registered %s key %s (%d bytes) for identity %s from tx %s",
+			map[bool]string{true: "primary", false: "secondary"}[pk.Primary],
+			pk.Address.GetHex(), len(pk.GetBytes()), pk.MainAddress.GetHex(), txh.GetHex())
 	}
 	return nil
 }

@@ -2,6 +2,8 @@ package transactionServices
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
@@ -50,7 +52,17 @@ func OnMessage(addr [4]byte, m []byte) {
 		// such check and must not gain one: a node catching up has to accept the
 		// transactions of every block it is importing, whatever its pool holds.
 		if transactionsPool.PoolsTx.NumberOfTransactions() > common.MaxTransactionInPool {
-			logger.GetLogger().Println("no more transactions can be accepted to the pool")
+			// A full pool is a STATE that persists for as long as it takes the
+			// chain to drain it, not an event. Logging it on every gossip
+			// message meant one line per message from every peer for minutes on
+			// end; the logger writes synchronously to file and stdout, so under
+			// load that write became the slowest thing in the receive path and
+			// stalled the loop that also carries sync and nonce traffic —
+			// which is block production. Report it periodically, with the
+			// number of messages dropped meanwhile so the rate stays visible.
+			if dropped := notePoolFullDrop(); dropped > 0 {
+				logger.GetLogger().Printf("no more transactions can be accepted to the pool (%d gossip message(s) dropped since the last report)", dropped)
+			}
 			return
 		}
 
@@ -59,6 +71,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		if err != nil {
 			return
 		}
+		belowMinStaking := 0
 		//logger.GetLogger().Println("get tx from ", addr[:])
 		// need to check transactions
 		for _, v := range txn {
@@ -100,7 +113,12 @@ func OnMessage(addr [4]byte, m []byte) {
 					// Reject non-staking transactions to delegated accounts
 				if n, err := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); err == nil && n > 0 && n < 256 {
 					if t.TxData.Amount > 0 && t.TxData.Amount < common.MinStakingUser && t.GetLockedAmount() == 0 {
-						logger.GetLogger().Println("Rejected: transfer to delegated account below minimum staking amount")
+						// Counted, not logged: this sat in the per-transaction
+						// loop, so a sender emitting these at 500 TPS produced
+						// 500 synchronous log writes per second in the receive
+						// path. One line per message carries the same
+						// information.
+						belowMinStaking++
 						continue
 					}
 				}
@@ -131,6 +149,9 @@ func OnMessage(addr [4]byte, m []byte) {
 					}
 				}
 			}
+		}
+		if belowMinStaking > 0 {
+			logger.GetLogger().Printf("rejected %d transfer(s) to a delegated account below the minimum staking amount", belowMinStaking)
 		}
 	case "bx":
 		// transaction in sync - during sync, skip signature verification because
@@ -300,4 +321,30 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 	default:
 	}
+}
+
+// poolFullDrops counts gossip messages refused because the pool is full, and
+// notePoolFullDrop reports how many have accumulated when it is time to log
+// again. Returning the count rather than a bare bool keeps the suppressed
+// volume visible: "dropped 4200 messages" and "dropped 3" describe very
+// different situations and must not look alike in the log.
+var (
+	poolFullMutex     sync.Mutex
+	poolFullDrops     int
+	poolFullLastLog   time.Time
+	poolFullLogPeriod = 10 * time.Second
+)
+
+func notePoolFullDrop() int {
+	poolFullMutex.Lock()
+	defer poolFullMutex.Unlock()
+	poolFullDrops++
+	now := time.Now()
+	if !poolFullLastLog.IsZero() && now.Sub(poolFullLastLog) < poolFullLogPeriod {
+		return 0
+	}
+	poolFullLastLog = now
+	n := poolFullDrops
+	poolFullDrops = 0
+	return n
 }
