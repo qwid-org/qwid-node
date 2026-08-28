@@ -3,6 +3,7 @@ package syncServices
 import (
 	"bytes"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/qwid-org/qwid-node/blocks"
@@ -176,7 +177,38 @@ func SendHeaders(addr [4]byte, bHeight int64, height int64) {
 	}
 }
 
+// headerRequestMinInterval bounds how often ONE peer is asked for headers.
+//
+// 'hi' messages pile up in the receive queue behind a multi-second batch apply
+// (the queue keeps filling while syncProcessMutex is held), and each one used
+// to trigger its own header request - ~90 requests fired in a single second.
+// That salvo tripped the peer's per-IP message rate limiter, which reduced
+// trust and banned this node, so its 'hi' stopped arriving, every claim
+// expired, and sync died precisely after it had sped up. One request a second
+// is plenty: applying the answered batch takes far longer than that anyway.
+const headerRequestMinInterval = time.Second
+
+var (
+	lastHeaderRequest      = map[[4]byte]time.Time{}
+	lastHeaderRequestMutex sync.Mutex
+)
+
+// allowHeaderRequest reports whether a header request to addr may go out now,
+// and if so records it. Bounded by the peer set, so the map cannot grow.
+func allowHeaderRequest(addr [4]byte) bool {
+	lastHeaderRequestMutex.Lock()
+	defer lastHeaderRequestMutex.Unlock()
+	if t, ok := lastHeaderRequest[addr]; ok && time.Since(t) < headerRequestMinInterval {
+		return false
+	}
+	lastHeaderRequest[addr] = time.Now()
+	return true
+}
+
 func SendGetHeaders(addr [4]byte, height int64) {
+	if !allowHeaderRequest(addr) {
+		return
+	}
 	n := generateSyncMsgGetHeaders(height)
 	if len(n) == 0 {
 		return

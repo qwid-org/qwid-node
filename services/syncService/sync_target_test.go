@@ -296,3 +296,26 @@ func TestShouldSyncToHeightTrustsOperatorHint(t *testing.T) {
 		}
 	})
 }
+
+// TestAllowHeaderRequestThrottlesBursts: a burst of queued 'hi' messages must
+// not turn into a burst of header requests - that salvo trips the peer's
+// per-IP rate limiter and gets this node banned by its only sync source.
+func TestAllowHeaderRequestThrottlesBursts(t *testing.T) {
+	addr := [4]byte{9, 9, 9, 9}
+	lastHeaderRequestMutex.Lock()
+	delete(lastHeaderRequest, addr)
+	lastHeaderRequestMutex.Unlock()
+
+	if !allowHeaderRequest(addr) {
+		t.Fatal("first request must pass")
+	}
+	if allowHeaderRequest(addr) {
+		t.Fatal("second request within the interval must be dropped")
+	}
+	lastHeaderRequestMutex.Lock()
+	lastHeaderRequest[addr] = time.Now().Add(-2 * headerRequestMinInterval)
+	lastHeaderRequestMutex.Unlock()
+	if !allowHeaderRequest(addr) {
+		t.Fatal("request after the interval must pass")
+	}
+}
