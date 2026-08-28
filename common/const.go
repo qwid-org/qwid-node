@@ -67,6 +67,14 @@ var (
 	// service, which resolves forks against live peers.
 	MaxStartupRewind int64 = 128
 
+	// MinPeersForLargeSync is how many live peers must confirm a large height
+	// claim before the node syncs straight to it (claims within
+	// HEIGHT_OF_NETWORK skip the check entirely). Overridable with
+	// MIN_PEERS_FOR_LARGE_SYNC in ~/.qwid/.env. The effective quorum is
+	// additionally capped at the number of actually connected sync peers, so a
+	// small network is never asked for confirmations it cannot have.
+	MinPeersForLargeSync int = 3
+
 	// Per-topic inbound message-size caps (bytes) — DoS hardening (sub-project A).
 	// Replace the single 151MB MaxMessageSizeBytes ENFORCEMENT (the wire marker
 	// MessageInitialization/MaxMessageSizeBytes are unchanged). Sized generously
@@ -275,5 +283,14 @@ func init() {
 		logger.GetLogger().Panicln("Warning no declaration of HEIGHT_OF_NETWORK")
 	} else {
 		CurrentHeightOfNetwork = int64(ch)
+	}
+	// Optional operator override of the large-sync confirmation quorum.
+	if raw := os.Getenv("MIN_PEERS_FOR_LARGE_SYNC"); raw != "" {
+		if v, err := strconv.Atoi(raw); err != nil || v < 1 {
+			logger.GetLogger().Println("MIN_PEERS_FOR_LARGE_SYNC must be an integer >= 1, got",
+				raw, "- keeping default", MinPeersForLargeSync)
+		} else {
+			MinPeersForLargeSync = v
+		}
 	}
 }

@@ -59,10 +59,6 @@ var (
 	// MaxHeightJumpWithoutConsensus - if a peer claims height more than this ahead,
 	// require multiple peers to confirm before syncing
 	MaxHeightJumpWithoutConsensus int64 = 4
-	// MinPeersForLargeSync - minimum peers that must agree on height for large syncs.
-	// NP-H13: must be >= 2 so a single malicious peer cannot drive a large sync to
-	// a fabricated height.
-	MinPeersForLargeSync = 2
 	// ClaimExpiryDuration - how long before a height claim expires
 	ClaimExpiryDuration = 30 * time.Second
 	// SyncStallTimeout - how long the local height may stay put while syncing
@@ -185,14 +181,16 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		return true, claimedHeight
 	}
 
-	// For large height differences, require multiple peers to agree — but never
-	// more peers than are actually connected on the sync topic. On a small
-	// network (two nodes: exactly one peer) a fixed quorum of two can never be
-	// met, so a lagging node crawled one bucket per round toward a height its
-	// only peer kept honestly reporting, and any hiccup in 'hi' delivery turned
-	// the crawl into a full stall. Blocks are fully verified regardless; this
-	// quorum only rate-limits how fast we ask.
-	required := MinPeersForLargeSync
+	// For large height differences, require multiple peers to agree — the base
+	// quorum comes from common.MinPeersForLargeSync (operator-tunable via
+	// MIN_PEERS_FOR_LARGE_SYNC in ~/.qwid/.env, default 3) — but never more
+	// peers than are actually connected on the sync topic. On a small network
+	// (two nodes: exactly one peer) a fixed quorum can never be met, so a
+	// lagging node crawled one bucket per round toward a height its only peer
+	// kept honestly reporting, and any hiccup in 'hi' delivery turned the crawl
+	// into a full stall. Blocks are fully verified regardless; this quorum only
+	// rate-limits how fast we ask.
+	required := common.MinPeersForLargeSync
 	if peers := syncPeerCount(); peers < required {
 		required = peers
 	}
@@ -219,7 +217,7 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	}
 
 	if peersAtOrAboveHeight >= required {
-		if required < MinPeersForLargeSync {
+		if required < common.MinPeersForLargeSync {
 			logger.GetLogger().Printf("Large sync approved: %d/%d connected sync peer(s) confirm height >= %d", peersAtOrAboveHeight, required, claimedHeight)
 		} else {
 			logger.GetLogger().Printf("Large sync approved: %d peers confirm height >= %d", peersAtOrAboveHeight, claimedHeight)

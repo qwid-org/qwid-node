@@ -159,6 +159,11 @@ HEIGHT_OF_NETWORK=<current_height>  # Sync target while the local chain is BELOW
                                     # throttle in shouldSyncToHeight, so a node with a single
                                     # peer syncs toward it at full speed (blocks are still
                                     # fully verified).
+MIN_PEERS_FOR_LARGE_SYNC=3   # Optional, integer >= 1, default 3. How many live peers must confirm a large height
+                             # claim before syncing straight to it (claims within HEIGHT_OF_NETWORK skip the check).
+                             # The effective quorum is capped at the number of actually connected sync peers, so a
+                             # two-node network syncs at full speed with the default; set 1 to always trust a single
+                             # peer's claim (blocks are fully verified regardless — this only rate-limits sync).
 RPC_BIND_ADDRESS=<host>      # Optional. wallet<->node RPC bind host; default 127.0.0.1 (loopback only, NP-C4). Override only if wallet/UI runs on a different host — exposes unauthenticated RPC (e.g. TRAN).
 NODE_IP_SELF_NONCE=<ip>      # Optional. IP for the self-nonce connection; unset = default local behaviour.
 ```

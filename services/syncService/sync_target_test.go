@@ -23,12 +23,20 @@ func withClaims(t *testing.T, claims map[[4]byte]peerHeightClaim, fn func()) {
 }
 
 // withSyncPeers pins the connected-sync-peer count the large-sync quorum sees,
-// since tests have no real tcpip connections.
+// since tests have no real tcpip connections. It also pins the base quorum to
+// its default: the test binary loads the real ~/.qwid/.env, so an operator's
+// MIN_PEERS_FOR_LARGE_SYNC would otherwise leak into these tests (the same
+// reason the tests pin HEIGHT_OF_NETWORK).
 func withSyncPeers(t *testing.T, n int, fn func()) {
 	t.Helper()
 	saved := syncPeerCount
 	syncPeerCount = func() int { return n }
-	defer func() { syncPeerCount = saved }()
+	savedQuorum := common.MinPeersForLargeSync
+	common.MinPeersForLargeSync = 3
+	defer func() {
+		syncPeerCount = saved
+		common.MinPeersForLargeSync = savedQuorum
+	}()
 	fn()
 }
 
