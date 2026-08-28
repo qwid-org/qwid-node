@@ -43,7 +43,7 @@ go test -v ./wallet       # verbose output
 ## Required System Dependencies
 
 - RocksDB v10.2.1 (build from source, install with `make static_lib && sudo make install-static`)
-- liboqs (commit 8ee6039) for post-quantum cryptography
+- liboqs 0.16.0 for post-quantum cryptography (release tag, not a commit)
 - Qt5 for GUI (qtbase5-dev) - optional, only for GUI wallet
 - ZMQ (libzmq3-dev)
 - Compression libs: libsnappy, liblz4, libzstd, libbz2
