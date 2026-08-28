@@ -22,6 +22,16 @@ func withClaims(t *testing.T, claims map[[4]byte]peerHeightClaim, fn func()) {
 	fn()
 }
 
+// withSyncPeers pins the connected-sync-peer count the large-sync quorum sees,
+// since tests have no real tcpip connections.
+func withSyncPeers(t *testing.T, n int, fn func()) {
+	t.Helper()
+	saved := syncPeerCount
+	syncPeerCount = func() int { return n }
+	defer func() { syncPeerCount = saved }()
+	fn()
+}
+
 func claim(height int64, age time.Duration) peerHeightClaim {
 	return peerHeightClaim{height: height, timestamp: time.Now().Add(-age)}
 }
@@ -229,14 +239,37 @@ func TestShouldSyncToHeightStepsByBucket(t *testing.T) {
 	common.CurrentHeightOfNetwork = 23
 	defer func() { common.CurrentHeightOfNetwork = savedHint }()
 
-	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
-		ok, target := shouldSyncToHeight(105000, 500)
-		if !ok {
-			t.Fatal("shouldSyncToHeight returned false for a higher claim")
-		}
-		if want := int64(500) + common.NumberOfHashesInBucket; target != want {
-			t.Fatalf("throttled target = %d, want %d", target, want)
-		}
+	// Two connected sync peers but only one claim at the height: the fixed
+	// quorum of two applies and throttles the step.
+	withSyncPeers(t, 2, func() {
+		withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
+			ok, target := shouldSyncToHeight(105000, 500)
+			if !ok {
+				t.Fatal("shouldSyncToHeight returned false for a higher claim")
+			}
+			if want := int64(500) + common.NumberOfHashesInBucket; target != want {
+				t.Fatalf("throttled target = %d, want %d", target, want)
+			}
+		})
+	})
+}
+
+// TestShouldSyncToHeightSinglePeerFullSpeed: with a single connected sync peer
+// the quorum adapts to the network size — that peer's own claim approves the
+// full target, so a two-node network syncs at full speed instead of one bucket
+// per round (and instead of stalling entirely when a round's 'hi' is missed).
+func TestShouldSyncToHeightSinglePeerFullSpeed(t *testing.T) {
+	savedHint := common.CurrentHeightOfNetwork
+	common.CurrentHeightOfNetwork = 23
+	defer func() { common.CurrentHeightOfNetwork = savedHint }()
+
+	withSyncPeers(t, 1, func() {
+		withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
+			ok, target := shouldSyncToHeight(105000, 500)
+			if !ok || target != 105000 {
+				t.Fatalf("shouldSyncToHeight = %v, %d; expected full approval to 105000 with the quorum adapted to one peer", ok, target)
+			}
+		})
 	})
 }
 

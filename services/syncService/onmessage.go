@@ -49,6 +49,10 @@ type peerHeightClaim struct {
 	timestamp time.Time
 }
 
+// syncPeerCount reports how many real peers are connected on the sync topic.
+// A function variable so tests can pin the peer count.
+var syncPeerCount = func() int { return tcpip.CountPeersOnTopic(tcpip.SyncTopic) }
+
 var (
 	peerHeightClaims      = make(map[[4]byte]peerHeightClaim)
 	peerHeightClaimsMutex sync.RWMutex
@@ -181,7 +185,21 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		return true, claimedHeight
 	}
 
-	// For large height differences, require multiple peers to agree
+	// For large height differences, require multiple peers to agree — but never
+	// more peers than are actually connected on the sync topic. On a small
+	// network (two nodes: exactly one peer) a fixed quorum of two can never be
+	// met, so a lagging node crawled one bucket per round toward a height its
+	// only peer kept honestly reporting, and any hiccup in 'hi' delivery turned
+	// the crawl into a full stall. Blocks are fully verified regardless; this
+	// quorum only rate-limits how fast we ask.
+	required := MinPeersForLargeSync
+	if peers := syncPeerCount(); peers < required {
+		required = peers
+	}
+	if required < 1 {
+		required = 1
+	}
+
 	now := time.Now()
 	peersAtOrAboveHeight := 0
 	maxConfirmedHeight := localHeight
@@ -200,8 +218,12 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		}
 	}
 
-	if peersAtOrAboveHeight >= MinPeersForLargeSync {
-		logger.GetLogger().Printf("Large sync approved: %d peers confirm height >= %d", peersAtOrAboveHeight, claimedHeight)
+	if peersAtOrAboveHeight >= required {
+		if required < MinPeersForLargeSync {
+			logger.GetLogger().Printf("Large sync approved: %d/%d connected sync peer(s) confirm height >= %d", peersAtOrAboveHeight, required, claimedHeight)
+		} else {
+			logger.GetLogger().Printf("Large sync approved: %d peers confirm height >= %d", peersAtOrAboveHeight, claimedHeight)
+		}
 		return true, claimedHeight
 	}
 
@@ -213,7 +235,7 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	safeHeight := localHeight + common.NumberOfHashesInBucket
 	if safeHeight < claimedHeight {
 		logger.GetLogger().Printf("Large height claim %d not confirmed by enough peers (%d/%d), limiting to %d",
-			claimedHeight, peersAtOrAboveHeight, MinPeersForLargeSync, safeHeight)
+			claimedHeight, peersAtOrAboveHeight, required, safeHeight)
 		return true, safeHeight
 	}
 

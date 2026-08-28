@@ -277,9 +277,30 @@ func checkSyncStall(now time.Time) {
 		// syncPeers counts real peers only, so the log separates "nobody is
 		// connected on the sync topic" from "connected, but their 'hi' is not
 		// arriving" - the two need different fixes.
+		syncPeers := tcpip.CountPeersOnTopic(tcpip.SyncTopic)
 		logger.GetLogger().Printf("sync stalled at height %d for %s, but no live peer is ahead of us "+
 			"(livePeerClaims=%d syncPeers=%d) - not rewinding, waiting for a peer that can serve the batch",
-			h, now.Sub(progress.since).Truncate(time.Second), live, tcpip.CountPeersOnTopic(tcpip.SyncTopic))
+			h, now.Sub(progress.since).Truncate(time.Second), live, syncPeers)
+		// A connected sync peer whose 'hi' is not reaching us (half-dead link,
+		// throttling, a lost message) still answers header requests. Ask blindly
+		// for the next bucket instead of waiting for a claim that may never
+		// come: a peer that is behind us simply ignores the request, while an
+		// ahead peer's 'sh' answer both advances the chain and gives the
+		// quiet-connection watchdog the inbound data it watches for.
+		if syncPeers > 0 {
+			sent := 0
+			for topicip := range tcpip.GetPeersConnected(tcpip.SyncTopic) {
+				var ip [4]byte
+				copy(ip[:], topicip[2:])
+				if tcpip.IsSelfIP(ip) {
+					continue
+				}
+				SendGetHeaders(ip, h+common.NumberOfHashesInBucket)
+				sent++
+			}
+			logger.GetLogger().Printf("sync stall recovery: blind header request up to height %d sent to %d sync peer(s)",
+				h+common.NumberOfHashesInBucket, sent)
+		}
 		// Pace this message by SyncStallTimeout rather than repeating it every second.
 		progress.since = now
 		return
