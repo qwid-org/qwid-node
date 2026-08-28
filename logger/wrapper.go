@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 // Logger wraps log.Logger so that the calls which END the process flush the
@@ -29,10 +30,39 @@ func (lg *Logger) flush() {
 	}
 }
 
-func (lg *Logger) Println(v ...interface{}) { lg.l.Println(v...) }
-func (lg *Logger) Print(v ...interface{})   { lg.l.Print(v...) }
+// blank reports whether a formatted message carries nothing. A line that is
+// only a timestamp costs a reader attention and gives back nothing, and the
+// usual source is a variable that happened to be empty rather than a
+// deliberate separator — so it is dropped at the one place that sees every
+// message, instead of being chased through a thousand call sites.
+//
+// Note this suppresses the LINE, not just its content: the timestamp prefix is
+// added by log.Logger after this point, so a skipped message produces no
+// output at all rather than a bare prefix.
+func blank(s string) bool {
+	return strings.TrimSpace(s) == ""
+}
 
-func (lg *Logger) Printf(format string, v ...interface{}) { lg.l.Printf(format, v...) }
+// The Print family reproduces log.Logger's own formatting exactly — Println
+// uses Sprintln, Print uses Sprint, Printf uses Sprintf — because the message
+// has to be built here in order to be judged empty.
+func (lg *Logger) Println(v ...interface{}) {
+	if s := fmt.Sprintln(v...); !blank(s) {
+		lg.l.Output(2, s)
+	}
+}
+
+func (lg *Logger) Print(v ...interface{}) {
+	if s := fmt.Sprint(v...); !blank(s) {
+		lg.l.Output(2, s)
+	}
+}
+
+func (lg *Logger) Printf(format string, v ...interface{}) {
+	if s := fmt.Sprintf(format, v...); !blank(s) {
+		lg.l.Output(2, s)
+	}
+}
 
 func (lg *Logger) Fatal(v ...interface{}) {
 	lg.l.Output(2, fmt.Sprint(v...))

@@ -124,3 +124,41 @@ func TestFlushIsRepeatable(t *testing.T) {
 		t.Fatal("logging stopped working after a flush")
 	}
 }
+
+// A line carrying only a timestamp costs a reader attention and returns
+// nothing. Suppression happens before log.Logger adds its prefix, so a blank
+// message must produce no output at all — not a bare timestamp.
+func TestBlankMessagesProduceNoLine(t *testing.T) {
+	out := &safeBuffer{}
+	w := newAsyncWriter(out)
+	lg := &Logger{l: log.New(w, "", log.LstdFlags), w: w}
+
+	lg.Println()
+	lg.Println("")
+	lg.Println("   ")
+	lg.Print("")
+	lg.Printf("")
+	lg.Printf("%s", "")
+	w.Flush()
+
+	if got := out.String(); got != "" {
+		t.Fatalf("blank messages still produced output: %q", got)
+	}
+
+	// Real messages must be unaffected, including ones that merely contain
+	// blank operands.
+	lg.Println("real message")
+	lg.Println("", "kept")
+	w.Flush()
+
+	got := out.String()
+	if !strings.Contains(got, "real message") {
+		t.Fatal("a real message was suppressed")
+	}
+	if !strings.Contains(got, "kept") {
+		t.Fatal("a message with a blank operand was suppressed even though it carries text")
+	}
+	if strings.Count(got, "\n") != 2 {
+		t.Fatalf("expected exactly two lines, got %q", got)
+	}
+}
