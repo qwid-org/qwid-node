@@ -30,7 +30,7 @@ Install OQS library:
 
     git clone https://github.com/open-quantum-safe/liboqs.git
     cd liboqs/
-    git checkout 8ee6039 
+    git checkout 0.16.0
     
 Compile OQS with `-DBUILD_SHARED_LIBS=ON` and install
     
