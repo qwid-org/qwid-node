@@ -71,7 +71,25 @@ func NewConfigEnc2() *ConfigEnc {
 	}
 }
 
+var (
+	encConfigCacheMu sync.RWMutex
+	encConfigCache   = map[string]ConfigEnc{}
+)
+
 func FromBytesToEncryptionConfig(bb []byte) (ConfigEnc, error) {
+	// VerifyEncConfig below generates a KEYPAIR to validate the scheme — 20ms
+	// for Falcon-1024 — and this function runs several times per applied block
+	// on byte-identical header configs. Cache validated configs; only configs
+	// that PASSED the (expensive) validation are cached, and the set of valid
+	// ones is bounded by the enabled schemes, so the map cannot be grown by a
+	// hostile peer.
+	key := string(bb)
+	encConfigCacheMu.RLock()
+	cached, ok := encConfigCache[key]
+	encConfigCacheMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
 	sigName, pubKeyLength, privateKeyLength, signatureLength, isPaused, err := GenerateParamsEncryptionSchemesFromBytes(bb)
 	if err != nil || sigName == "" {
 		return ConfigEnc{}, err
@@ -80,6 +98,9 @@ func FromBytesToEncryptionConfig(bb []byte) (ConfigEnc, error) {
 	if !VerifyEncConfig(encConfig) {
 		return ConfigEnc{}, errors.New("encryption scheme is invalid")
 	}
+	encConfigCacheMu.Lock()
+	encConfigCache[key] = encConfig
+	encConfigCacheMu.Unlock()
 	return encConfig, nil
 }
 
