@@ -98,6 +98,11 @@ func StorePubKey(pk common.PubKey) error {
 		return err
 	}
 	err = database.MainDB.Put(append(common.PubKeyMarshalDBPrefix[:], a.GetBytes()...), pkm)
+	// Invalidate AFTER the write, so the database already holds the new record
+	// when the cached decode is dropped. A reader that fetched the old record
+	// just before this Put is handled by the cache's generation counter, which
+	// makes it discard what it read rather than cache a superseded key.
+	pubkeys.InvalidatePubKeyCache(a.GetBytes())
 	return err
 }
 

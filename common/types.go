@@ -54,13 +54,13 @@ func initEncryptionConfigInstance() {
 	encryptionConfigInstance = &EncryptionConfig{
 		pubKeyLength:      897,
 		privateKeyLength:  1281,
-		signatureLength:   752,
-		sigName:           "Falcon-512",
+		signatureLength:   666,
+		sigName:           "Falcon-padded-512",
 		isPaused:          0,
-		pubKeyLength2:     5554,
-		privateKeyLength2: 40,
-		signatureLength2:  964,
-		sigName2:          "MAYO-5",
+		pubKeyLength2:     4912,
+		privateKeyLength2: 24,
+		signatureLength2:  186,
+		sigName2:          "MAYO-2",
 		isPaused2:         0,
 	}
 }
@@ -69,13 +69,13 @@ func initEncryptionConfigInstanceOld() {
 	encryptionConfigInstanceOld = &EncryptionConfig{
 		pubKeyLength:      897,
 		privateKeyLength:  1281,
-		signatureLength:   752,
-		sigName:           "Falcon-512",
+		signatureLength:   666,
+		sigName:           "Falcon-padded-512",
 		isPaused:          0,
-		pubKeyLength2:     5554,
-		privateKeyLength2: 40,
-		signatureLength2:  964,
-		sigName2:          "MAYO-5",
+		pubKeyLength2:     4912,
+		privateKeyLength2: 24,
+		signatureLength2:  186,
+		sigName2:          "MAYO-2",
 		isPaused2:         0,
 	}
 }
