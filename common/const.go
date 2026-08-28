@@ -41,7 +41,12 @@ var (
 	VotingHeightDistance           int64   = 60           // 60 => ten minute on average
 	MaxTransactionDelay            int64   = 60480        // one week
 	MaxTransactionInMultiSigPool   int64   = 60480        //one week
-	MaxNumberTransactionInChunk            = 100
+	// MaxNumberTransactionInChunk sizes one bt request / bx answer during
+	// missing-transaction recovery. 500 txs ≈ up to ~3MB with embedded pubkeys,
+	// comfortably under the TransactionTopic message cap; the request itself is
+	// 500 hashes = 16KB. Was 100, which - paced at one chunk per 500ms - capped
+	// sync transaction transfer at 200 tx/s.
+	MaxNumberTransactionInChunk = 500
 	ConnectionMaxTries                     = 10
 	BannedTimeSeconds              int64   = 60                  // DoS hardening: was 2s; ~6 block intervals
 	MessageInitialization                  = [4]byte{2, 0, 2, 9} // will be overwrite in init() by MaxMessageSizeBytes

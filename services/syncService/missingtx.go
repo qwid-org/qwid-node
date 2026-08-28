@@ -111,6 +111,12 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %v, first: %x",
 		len(due), addr, due[0][:8])
 
+	// Pacing: 5 chunks/s of MaxNumberTransactionInChunk txs each (~2500 tx/s).
+	// The ceiling is the peer's per-IP sync-class message budget
+	// (MessageRateLimit per MessageRateWindowSeconds = 10 msgs/s), shared with
+	// hi/gh/sh - 5 bt requests a second leaves half the budget for those. The
+	// previous 100-tx chunks at one per 500ms capped recovery at 200 tx/s,
+	// which a network doing 100 TPS could never catch up through.
 	maxChunk := common.MaxNumberTransactionInChunk
 	for i := 0; i < len(due); i += maxChunk {
 		end := i + maxChunk
@@ -119,7 +125,7 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 		}
 		transactionServices.SendGT(addr, due[i:end], "bt")
 		if end < len(due) {
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 	}
 
