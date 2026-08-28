@@ -88,7 +88,12 @@ func RecycleTopicConnection(topic [2]byte, ip [4]byte) {
 // ours has nothing we want, now or on retry. Recycling such a peer would dial it
 // straight back and spin.
 func DropTopicConnection(topic [2]byte, ip [4]byte) {
-	logger.GetLogger().Printf("dropping connection to %v on topic %c%c", ip, topic[0], topic[1])
+	// Deliberately silent. The only caller drops a peer once per rejected
+	// message — roughly once a second for a peer that keeps reconnecting —
+	// while the line explaining WHY is throttled to once per ten minutes. That
+	// left the log full of unexplained drops and the explanation almost never
+	// visible: the noise was unthrottled and the signal was not. The caller now
+	// logs both together, under one throttle.
 	closeAndRemovePeerTopic(topic, ip)
 }
 

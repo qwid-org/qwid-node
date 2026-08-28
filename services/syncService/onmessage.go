@@ -438,7 +438,14 @@ func OnMessage(addr [4]byte, m []byte) {
 		// but adopt its network first.
 		if ok, reason := peerGenesisAccepted(txn); !ok {
 			if shouldLogRejection(addr) {
-				logger.GetLogger().Printf("WARNING: refusing sync with %v: %s", addr, reason)
+				// One line carrying both the action and its reason. Reporting
+				// the drop without the reason — which is what happened while
+				// DropTopicConnection logged for itself — reads as a network
+				// fault and sends the operator looking at connectivity, when
+				// the peer is simply on another chain and the fix is to reset
+				// its database.
+				logger.GetLogger().Printf("WARNING: dropping sync connection to %v: %s "+
+					"(further drops of this peer are not logged for %v)", addr, reason, genesisRejectionLogInterval)
 			}
 			tcpip.DropTopicConnection(tcpip.SyncTopic, addr)
 			return
