@@ -40,11 +40,17 @@ func (c ConfigEnc) ToString() string {
 
 // NewConfig creates a Config with default values.
 func NewConfigEnc1() *ConfigEnc {
+	// Falcon-padded-512 rather than plain Falcon-512: same key sizes (897/1281)
+	// and the same verify cost measured at 23.7us against 23.9us, but the
+	// signature is a FIXED 666 bytes instead of a variable one declared as 752
+	// and typically 656. Fixed length removes a whole class of confusion in
+	// this codebase, where the gap between declared maximum and actual length
+	// surfaced as "incorrect signature size" errors that named neither.
 	return &ConfigEnc{
 		PubKeyLength:     897,
 		PrivateKeyLength: 1281,
-		SignatureLength:  752,
-		SigName:          "Falcon-512",
+		SignatureLength:  666,
+		SigName:          "Falcon-padded-512",
 		IsPaused:         false,
 	}
 }
@@ -62,16 +68,41 @@ func NewConfigEnc1() *ConfigEnc {
 
 // NewConfig creates a Config with default values.
 func NewConfigEnc2() *ConfigEnc {
+	// MAYO-2 rather than MAYO-5: measured on liboqs 0.16.0, MAYO-5 verifies in
+	// 214us against MAYO-2's 13.4us — sixteen times slower, and the slowest of
+	// every scheme benchmarked — while carrying a 964-byte signature against
+	// 186. Since the spare is live exactly while the primary is paused, that
+	// cost lands on the whole network precisely when it is mid-governance.
+	// Sizes are identical in the installed liboqs 0.13.0-dev, so this needs no
+	// library upgrade.
 	return &ConfigEnc{
-		PubKeyLength:     5554,
-		PrivateKeyLength: 40,
-		SignatureLength:  964,
-		SigName:          "MAYO-5",
+		PubKeyLength:     4912,
+		PrivateKeyLength: 24,
+		SignatureLength:  186,
+		SigName:          "MAYO-2",
 		IsPaused:         false,
 	}
 }
 
+var (
+	encConfigCacheMu sync.RWMutex
+	encConfigCache   = map[string]ConfigEnc{}
+)
+
 func FromBytesToEncryptionConfig(bb []byte) (ConfigEnc, error) {
+	// VerifyEncConfig below generates a KEYPAIR to validate the scheme — 20ms
+	// for Falcon-1024 — and this function runs several times per applied block
+	// on byte-identical header configs. Cache validated configs; only configs
+	// that PASSED the (expensive) validation are cached, and the set of valid
+	// ones is bounded by the enabled schemes, so the map cannot be grown by a
+	// hostile peer.
+	key := string(bb)
+	encConfigCacheMu.RLock()
+	cached, ok := encConfigCache[key]
+	encConfigCacheMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
 	sigName, pubKeyLength, privateKeyLength, signatureLength, isPaused, err := GenerateParamsEncryptionSchemesFromBytes(bb)
 	if err != nil || sigName == "" {
 		return ConfigEnc{}, err
@@ -80,6 +111,9 @@ func FromBytesToEncryptionConfig(bb []byte) (ConfigEnc, error) {
 	if !VerifyEncConfig(encConfig) {
 		return ConfigEnc{}, errors.New("encryption scheme is invalid")
 	}
+	encConfigCacheMu.Lock()
+	encConfigCache[key] = encConfig
+	encConfigCacheMu.Unlock()
 	return encConfig, nil
 }
 

@@ -3,6 +3,7 @@ package syncServices
 import (
 	"bytes"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/qwid-org/qwid-node/blocks"
@@ -176,7 +177,38 @@ func SendHeaders(addr [4]byte, bHeight int64, height int64) {
 	}
 }
 
+// headerRequestMinInterval bounds how often ONE peer is asked for headers.
+//
+// 'hi' messages pile up in the receive queue behind a multi-second batch apply
+// (the queue keeps filling while syncProcessMutex is held), and each one used
+// to trigger its own header request - ~90 requests fired in a single second.
+// That salvo tripped the peer's per-IP message rate limiter, which reduced
+// trust and banned this node, so its 'hi' stopped arriving, every claim
+// expired, and sync died precisely after it had sped up. One request a second
+// is plenty: applying the answered batch takes far longer than that anyway.
+const headerRequestMinInterval = time.Second
+
+var (
+	lastHeaderRequest      = map[[4]byte]time.Time{}
+	lastHeaderRequestMutex sync.Mutex
+)
+
+// allowHeaderRequest reports whether a header request to addr may go out now,
+// and if so records it. Bounded by the peer set, so the map cannot grow.
+func allowHeaderRequest(addr [4]byte) bool {
+	lastHeaderRequestMutex.Lock()
+	defer lastHeaderRequestMutex.Unlock()
+	if t, ok := lastHeaderRequest[addr]; ok && time.Since(t) < headerRequestMinInterval {
+		return false
+	}
+	lastHeaderRequest[addr] = time.Now()
+	return true
+}
+
 func SendGetHeaders(addr [4]byte, height int64) {
+	if !allowHeaderRequest(addr) {
+		return
+	}
 	n := generateSyncMsgGetHeaders(height)
 	if len(n) == 0 {
 		return
@@ -277,9 +309,30 @@ func checkSyncStall(now time.Time) {
 		// syncPeers counts real peers only, so the log separates "nobody is
 		// connected on the sync topic" from "connected, but their 'hi' is not
 		// arriving" - the two need different fixes.
+		syncPeers := tcpip.CountPeersOnTopic(tcpip.SyncTopic)
 		logger.GetLogger().Printf("sync stalled at height %d for %s, but no live peer is ahead of us "+
 			"(livePeerClaims=%d syncPeers=%d) - not rewinding, waiting for a peer that can serve the batch",
-			h, now.Sub(progress.since).Truncate(time.Second), live, tcpip.CountPeersOnTopic(tcpip.SyncTopic))
+			h, now.Sub(progress.since).Truncate(time.Second), live, syncPeers)
+		// A connected sync peer whose 'hi' is not reaching us (half-dead link,
+		// throttling, a lost message) still answers header requests. Ask blindly
+		// for the next bucket instead of waiting for a claim that may never
+		// come: a peer that is behind us simply ignores the request, while an
+		// ahead peer's 'sh' answer both advances the chain and gives the
+		// quiet-connection watchdog the inbound data it watches for.
+		if syncPeers > 0 {
+			sent := 0
+			for topicip := range tcpip.GetPeersConnected(tcpip.SyncTopic) {
+				var ip [4]byte
+				copy(ip[:], topicip[2:])
+				if tcpip.IsSelfIP(ip) {
+					continue
+				}
+				SendGetHeaders(ip, h+common.NumberOfHashesInBucket)
+				sent++
+			}
+			logger.GetLogger().Printf("sync stall recovery: blind header request up to height %d sent to %d sync peer(s)",
+				h+common.NumberOfHashesInBucket, sent)
+		}
 		// Pace this message by SyncStallTimeout rather than repeating it every second.
 		progress.since = now
 		return

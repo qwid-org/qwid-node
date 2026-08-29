@@ -22,6 +22,24 @@ func withClaims(t *testing.T, claims map[[4]byte]peerHeightClaim, fn func()) {
 	fn()
 }
 
+// withSyncPeers pins the connected-sync-peer count the large-sync quorum sees,
+// since tests have no real tcpip connections. It also pins the base quorum to
+// its default: the test binary loads the real ~/.qwid/.env, so an operator's
+// MIN_PEERS_FOR_LARGE_SYNC would otherwise leak into these tests (the same
+// reason the tests pin HEIGHT_OF_NETWORK).
+func withSyncPeers(t *testing.T, n int, fn func()) {
+	t.Helper()
+	saved := syncPeerCount
+	syncPeerCount = func() int { return n }
+	savedQuorum := common.MinPeersForLargeSync
+	common.MinPeersForLargeSync = 3
+	defer func() {
+		syncPeerCount = saved
+		common.MinPeersForLargeSync = savedQuorum
+	}()
+	fn()
+}
+
 func claim(height int64, age time.Duration) peerHeightClaim {
 	return peerHeightClaim{height: height, timestamp: time.Now().Add(-age)}
 }
@@ -229,14 +247,37 @@ func TestShouldSyncToHeightStepsByBucket(t *testing.T) {
 	common.CurrentHeightOfNetwork = 23
 	defer func() { common.CurrentHeightOfNetwork = savedHint }()
 
-	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
-		ok, target := shouldSyncToHeight(105000, 500)
-		if !ok {
-			t.Fatal("shouldSyncToHeight returned false for a higher claim")
-		}
-		if want := int64(500) + common.NumberOfHashesInBucket; target != want {
-			t.Fatalf("throttled target = %d, want %d", target, want)
-		}
+	// Two connected sync peers but only one claim at the height: the fixed
+	// quorum of two applies and throttles the step.
+	withSyncPeers(t, 2, func() {
+		withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
+			ok, target := shouldSyncToHeight(105000, 500)
+			if !ok {
+				t.Fatal("shouldSyncToHeight returned false for a higher claim")
+			}
+			if want := int64(500) + common.NumberOfHashesInBucket; target != want {
+				t.Fatalf("throttled target = %d, want %d", target, want)
+			}
+		})
+	})
+}
+
+// TestShouldSyncToHeightSinglePeerFullSpeed: with a single connected sync peer
+// the quorum adapts to the network size — that peer's own claim approves the
+// full target, so a two-node network syncs at full speed instead of one bucket
+// per round (and instead of stalling entirely when a round's 'hi' is missed).
+func TestShouldSyncToHeightSinglePeerFullSpeed(t *testing.T) {
+	savedHint := common.CurrentHeightOfNetwork
+	common.CurrentHeightOfNetwork = 23
+	defer func() { common.CurrentHeightOfNetwork = savedHint }()
+
+	withSyncPeers(t, 1, func() {
+		withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
+			ok, target := shouldSyncToHeight(105000, 500)
+			if !ok || target != 105000 {
+				t.Fatalf("shouldSyncToHeight = %v, %d; expected full approval to 105000 with the quorum adapted to one peer", ok, target)
+			}
+		})
 	})
 }
 
@@ -262,4 +303,27 @@ func TestShouldSyncToHeightTrustsOperatorHint(t *testing.T) {
 				"expected throttling to %d", ok, target, 500+common.NumberOfHashesInBucket)
 		}
 	})
+}
+
+// TestAllowHeaderRequestThrottlesBursts: a burst of queued 'hi' messages must
+// not turn into a burst of header requests - that salvo trips the peer's
+// per-IP rate limiter and gets this node banned by its only sync source.
+func TestAllowHeaderRequestThrottlesBursts(t *testing.T) {
+	addr := [4]byte{9, 9, 9, 9}
+	lastHeaderRequestMutex.Lock()
+	delete(lastHeaderRequest, addr)
+	lastHeaderRequestMutex.Unlock()
+
+	if !allowHeaderRequest(addr) {
+		t.Fatal("first request must pass")
+	}
+	if allowHeaderRequest(addr) {
+		t.Fatal("second request within the interval must be dropped")
+	}
+	lastHeaderRequestMutex.Lock()
+	lastHeaderRequest[addr] = time.Now().Add(-2 * headerRequestMinInterval)
+	lastHeaderRequestMutex.Unlock()
+	if !allowHeaderRequest(addr) {
+		t.Fatal("request after the interval must pass")
+	}
 }

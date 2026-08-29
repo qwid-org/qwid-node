@@ -42,6 +42,25 @@ func main() {
 
 	handlers.NodeIP = ip
 
+	// Adopt the chain's signature schemes before serving anything, then keep
+	// following them. This process holds its own copy of the encryption config,
+	// starting at the build's compiled defaults; without this it decodes blocks
+	// and transactions with the wrong key and signature lengths as soon as the
+	// chain votes in a different scheme, and a restart does not help because it
+	// never asks.
+	if err := handlers.SyncEncryptionFromNode(); err != nil {
+		fmt.Println("could not read the encryption config from the node:", err)
+	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := handlers.SyncEncryptionFromNode(); err != nil {
+				fmt.Println("could not refresh the encryption config:", err)
+			}
+		}
+	}()
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/stats", corsMiddleware(handlers.GetStats))

@@ -140,8 +140,16 @@ func (db *BlockchainDB) Put(k []byte, v []byte) error {
 		return errors.New("key cannot be empty")
 	}
 
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+	// RLock, not Lock: the mutex guards the LIFECYCLE of the db handle (Close
+	// nil-ing db.db under the write lock, DB-H4), not the database contents —
+	// RocksDB is internally thread-safe for concurrent Put/Get/Delete. Taking
+	// the exclusive lock here serialized every DB operation in the process
+	// behind every write: during sync catch-up the incoming "bx" transaction
+	// stream (hundreds of Puts per second) starved the block-apply goroutine's
+	// thousands of reads (Go's RWMutex is writer-preferring), slowing block
+	// application ~60x until the receive loops stopped.
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
 
 	if db.db == nil {
 		return fmt.Errorf("database is closed")
@@ -290,8 +298,11 @@ func (db *BlockchainDB) Delete(key []byte) error {
 	if len(key) == 0 {
 		return errors.New("key cannot be empty")
 	}
-	db.mutex.Lock() // DB-H5: write lock (was RLock)
-	defer db.mutex.Unlock()
+	// RLock for the same reason as Put: the mutex only protects the handle
+	// against Close/Init, and RocksDB deletes are thread-safe. (The DB-H5 fix
+	// this line carried was the missing closed-DB guard below, which stays.)
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
 	if db.db == nil { // DB-H5: guard closed DB (was missing)
 		return fmt.Errorf("database is closed")
 	}

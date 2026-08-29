@@ -609,6 +609,40 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		} else {
 			pk = MainWallet.Account2.PublicKey
 		}
+
+		// Bootstrap overrides that choice, because for an identity with NOTHING
+		// registered on-chain the choice does not exist.
+		//
+		// The reasoning above concerns a scheme REPLACEMENT: the incoming key
+		// arrives paused and the already-registered live key vouches for it. An
+		// identity with no registered key has nothing to vouch for anything, so
+		// consensus accepts exactly one key from it — the one that DERIVES its
+		// address. The address is a hash of that key, so holding it is the only
+		// self-evident proof a first key can offer.
+		//
+		// Without this, a new node could not register through this form at all:
+		// with the box ticked it offered the spare, which cannot open an
+		// account, and the transaction died at the far end reporting only that
+		// the sender had no registered key.
+		if !identityHasRegisteredKey() {
+			switch {
+			case bytes.Equal(MainWallet.Account1.Address.GetBytes(), MainWallet.MainAddress.GetBytes()):
+				pk = MainWallet.Account1.PublicKey
+				registerPrimary = true
+			case bytes.Equal(MainWallet.Account2.Address.GetBytes(), MainWallet.MainAddress.GetBytes()):
+				pk = MainWallet.Account2.PublicKey
+				registerPrimary = false
+			default:
+				jsonError(w, "Nothing is registered on-chain for this wallet yet, and neither of its keys derives "+
+					"its own address ("+MainWallet.MainAddress.GetHex()+"). An identity's first key must be the one "+
+					"its address comes from, so no key here can open this account — restore the wallet that owns it.",
+					http.StatusBadRequest)
+				return
+			}
+			logger.GetLogger().Printf("nothing registered for %s yet: sending the key that derives it, "+
+				"the only key consensus accepts as an identity's first",
+				MainWallet.MainAddress.GetHex())
+		}
 		logger.GetLogger().Printf("including pubkey for registration: %s slot (%s), %d bytes",
 			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
 			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
@@ -877,20 +911,9 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 
 	pk := common.PubKey{}
 	if req.IncludePubKey {
-		// "Register Paused public key" means the key of whichever scheme is
-		// currently PAUSED — not Account1. Which slot that is follows from the
-		// pause state: while the primary is live the spare is the paused one,
-		// and after the primary is paused it becomes the paused one itself.
-		//
-		// Tying this to Account1 registered the live scheme's key, which is
-		// already registered and never the one that needs it. The key that
-		// needs registering is always the paused one: a scheme arrives paused
-		// and cannot sign for itself, which is why the live scheme signs for it.
-		registerPrimary := !signPrimary
-		if !req.UsePrimaryEncryption {
-			// Unchecked: register the live scheme's key instead.
-			registerPrimary = signPrimary
-		}
+		// Only the Send form registers a key for a paused scheme; everywhere
+		// else the live scheme is the one in use, so attach its key.
+		registerPrimary := signPrimary
 		if registerPrimary {
 			pk = MainWallet.Account1.PublicKey
 		} else {
@@ -1291,6 +1314,31 @@ func Trade(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "not implemented"})
 }
 
+// identityHasRegisteredKey reports whether the active wallet's identity already
+// has any key recorded on-chain. It decides between the two registration
+// regimes: bootstrap, where only the address-deriving key is admissible, and
+// every later registration, which an existing key authorises.
+//
+// A node that cannot be asked is treated as "already registered", so a failed
+// query cannot silently rewrite which key the operator is sending; the
+// transaction is then judged by consensus, as it would have been anyway.
+func identityHasRegisteredKey() bool {
+	reply := clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...)))
+	if bytes.Equal(reply, []byte("Timeout")) {
+		logger.GetLogger().Println("could not ask the node which keys are registered; assuming the identity is known")
+		return true
+	}
+	var resp struct {
+		HasPrimary   bool `json:"hasPrimary"`
+		HasSecondary bool `json:"hasSecondary"`
+	}
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		logger.GetLogger().Println("could not read the registered-key reply; assuming the identity is known:", err)
+		return true
+	}
+	return resp.HasPrimary || resp.HasSecondary
+}
+
 func GetPubKeyInfo(w http.ResponseWriter, r *http.Request) {
 	if !walletReady() {
 		jsonError(w, "Load wallet first", http.StatusBadRequest)
@@ -1434,11 +1482,9 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		EscrowDelay          int64  `json:"escrowDelay"`
-		MultiSigNumber       int    `json:"multiSigNumber"`
-		MultiSigAddresses    string `json:"multiSigAddresses"`
-		IncludePubKey        bool   `json:"includePubKey"`
-		UsePrimaryEncryption bool   `json:"usePrimaryEncryption"`
+		EscrowDelay       int64  `json:"escrowDelay"`
+		MultiSigNumber    int    `json:"multiSigNumber"`
+		MultiSigAddresses string `json:"multiSigAddresses"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
@@ -1495,32 +1541,11 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	SetCurrentEncryptions()
 	signPrimary := !common.IsPaused()
 
+	// No public key travels with an escrow change. Key registration belongs to
+	// one place — the Send form — so that the operator has a single, obvious
+	// route for it instead of the same option repeated on forms that have
+	// nothing to do with keys.
 	pk := common.PubKey{}
-	if req.IncludePubKey {
-		// "Register Paused public key" means the key of whichever scheme is
-		// currently PAUSED — not Account1. Which slot that is follows from the
-		// pause state: while the primary is live the spare is the paused one,
-		// and after the primary is paused it becomes the paused one itself.
-		//
-		// Tying this to Account1 registered the live scheme's key, which is
-		// already registered and never the one that needs it. The key that
-		// needs registering is always the paused one: a scheme arrives paused
-		// and cannot sign for itself, which is why the live scheme signs for it.
-		registerPrimary := !signPrimary
-		if !req.UsePrimaryEncryption {
-			// Unchecked: register the live scheme's key instead.
-			registerPrimary = signPrimary
-		}
-		if registerPrimary {
-			pk = MainWallet.Account1.PublicKey
-		} else {
-			pk = MainWallet.Account2.PublicKey
-		}
-		logger.GetLogger().Printf("including pubkey for registration: %s slot (%s), %d bytes",
-			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
-			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
-			len(pk.GetBytes()))
-	}
 
 	// Build transaction
 	txd := transactionsDefinition.TxData{

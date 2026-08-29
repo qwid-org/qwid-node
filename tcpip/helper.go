@@ -229,7 +229,9 @@ func formatIP(ip [4]byte) string {
 func MaxMessageSizeForTopic(topic [2]byte) int32 {
 	switch topic {
 	case NonceTopic, SelfNonceTopic:
-		return common.MaxMsgSizeSmall
+		// Block broadcasts travel on this topic, not just nonces — see
+		// MaxMsgSizeNonce.
+		return common.MaxMsgSizeNonce
 	case TransactionTopic:
 		return common.MaxMessageSizeBytes
 	case SyncTopic:
@@ -246,8 +248,37 @@ type rateWindow struct {
 	count       int
 }
 
+// msgRateKey buckets a peer's message budget by IP *and* traffic class, so one
+// class cannot consume another's allowance. See AllowMessageFromIPForHead.
+type msgRateKey struct {
+	ip    [4]byte
+	class uint8
+}
+
+const (
+	// msgClassGossip is best-effort traffic: transaction and block propagation.
+	// Losing a message here costs nothing — it will be re-gossiped.
+	msgClassGossip uint8 = 0
+	// msgClassSync is the request/answer traffic sync depends on. A dropped
+	// message here is NOT re-sent by the protocol on its own: the node waits for
+	// an answer that will never come, and the stall watchdog eventually rewinds
+	// the chain.
+	msgClassSync uint8 = 1
+)
+
+// syncCriticalHeads are the message heads that carry sync forward: height
+// exchange, header request/answer, and the missing-transaction request/answer.
+var syncCriticalHeads = map[[2]byte]bool{
+	{'h', 'i'}: true, // height advertisement
+	{'g', 'h'}: true, // get headers
+	{'s', 'h'}: true, // send headers
+	{'b', 't'}: true, // request transactions of a block being synced
+	{'b', 'x'}: true, // the answer to bt
+	{'s', 't'}: true, // sync transactions
+}
+
 var (
-	msgRate       = map[[4]byte]*rateWindow{}
+	msgRate       = map[msgRateKey]*rateWindow{}
 	msgRateMutex  sync.Mutex
 	connRate      = map[[4]byte]*rateWindow{}
 	connRateMutex sync.Mutex
@@ -267,18 +298,45 @@ func allowInWindow(w *rateWindow, now int64, limit int, windowSecs int64) bool {
 
 // AllowMessageFromIP reports whether ip may send another message now, throttling
 // at MessageRateLimit per MessageRateWindowSeconds. Whitelisted IPs always pass
-// and are not counted.
+// and are not counted. It charges the gossip budget; use
+// AllowMessageFromIPForHead when the message head is known.
 func AllowMessageFromIP(ip [4]byte) bool {
+	return AllowMessageFromIPForHead(ip, [2]byte{})
+}
+
+// AllowMessageFromIPForHead is AllowMessageFromIP with the message head taken
+// into account, so sync traffic and gossip are throttled against SEPARATE
+// budgets of MessageRateLimit per MessageRateWindowSeconds each.
+//
+// The single shared budget was a sync deadlock waiting to happen. A peer far
+// ahead of us gossips its whole transaction pool; if this node cannot decode or
+// accept those transactions, they never enter its pool, so the peer re-gossips
+// them every round, indefinitely. That flood alone exceeds the per-IP budget —
+// which is keyed by IP, not by connection, so it drains the allowance for EVERY
+// topic from that peer — and the "bx" answer carrying the one transaction the
+// node needs to apply the next block is dropped along with it. The node then
+// waits, the stall watchdog rewinds, and the chain walks backwards while the
+// link looks healthy.
+//
+// Splitting the budgets keeps the flood protection (a flooder is still throttled
+// in its own class) while guaranteeing that best-effort traffic cannot starve
+// the path sync actually depends on.
+func AllowMessageFromIPForHead(ip [4]byte, head [2]byte) bool {
 	if isWhitelisted(ip) {
 		return true
 	}
+	class := msgClassGossip
+	if syncCriticalHeads[head] {
+		class = msgClassSync
+	}
+	key := msgRateKey{ip: ip, class: class}
 	now := common.GetCurrentTimeStampInSecond()
 	msgRateMutex.Lock()
 	defer msgRateMutex.Unlock()
-	w, ok := msgRate[ip]
+	w, ok := msgRate[key]
 	if !ok {
 		w = &rateWindow{windowStart: now}
-		msgRate[ip] = w
+		msgRate[key] = w
 	}
 	return allowInWindow(w, now, common.MessageRateLimit, common.MessageRateWindowSeconds)
 }
@@ -305,7 +363,9 @@ func AllowConnectionFromIP(ip [4]byte) bool {
 // to bound long-run map growth.
 func pruneRateLimits(ip [4]byte) {
 	msgRateMutex.Lock()
-	delete(msgRate, ip)
+	for _, class := range []uint8{msgClassGossip, msgClassSync} {
+		delete(msgRate, msgRateKey{ip: ip, class: class})
+	}
 	msgRateMutex.Unlock()
 	connRateMutex.Lock()
 	delete(connRate, ip)

@@ -19,7 +19,7 @@ func TestAnyNonceMessage_GetTransactions(t *testing.T) {
 		TransactionsBytes: nonceBytes,
 	}
 	// Call GetTransactionsBytes method
-	transactions, err := anyNonceMessage.GetTransactionsFromBytes()
+	transactions, err := anyNonceMessage.GetTransactionsFromBytes("Falcon-512", "MAYO-5", false, false)
 	if err != nil {
 		return
 	}

@@ -98,6 +98,11 @@ func StorePubKey(pk common.PubKey) error {
 		return err
 	}
 	err = database.MainDB.Put(append(common.PubKeyMarshalDBPrefix[:], a.GetBytes()...), pkm)
+	// Invalidate AFTER the write, so the database already holds the new record
+	// when the cached decode is dropped. A reader that fetched the old record
+	// just before this Put is handled by the cache's generation counter, which
+	// makes it discard what it read rather than cache a superseded key.
+	pubkeys.InvalidatePubKeyCache(a.GetBytes())
 	return err
 }
 
@@ -112,14 +117,47 @@ func StorePubKeyInPatriciaTrie(pk common.PubKey) error {
 		addresses = []common.Address{}
 	}
 	if len(addresses) == 0 {
-		mainAddress, err2 := pubkeys.CreateAddressFromFirstPubKey(pk)
-		if err2 != nil {
-			return err2
+		// This identity has no trie yet, so this key is its first. There are two
+		// shapes of "first key" and only one of them may go through
+		// CreateAddressFromFirstPubKey.
+		//
+		// That helper bootstraps an identity OUT OF the key: it derives an
+		// address from the key bytes and makes that address the identity. It is
+		// therefore correct only when the key actually derives MainAddress —
+		// the classic case of a primary key registering itself.
+		//
+		// A key whose derived address differs from MainAddress (any secondary
+		// key, and any key of a newly voted-in scheme) cannot bootstrap an
+		// identity it does not derive. Transaction verification already permits
+		// exactly this case: its bootstrap rule accepts a non-primary key when
+		// pk.MainAddress equals the sender, without requiring the key to derive
+		// it. Sending such a key down the helper's path made verification and
+		// application disagree — the block was accepted into the chain and then
+		// refused when applied, so the node rewound and retried it forever.
+		//
+		// Worse, the helper stores the derived-address trie BEFORE its caller
+		// checks the identity matches, so the first failed attempt left that
+		// trie behind and every retry then failed with a different error
+		// ("there are just generated markle trie for given pubkey") — a block
+		// the node could never get past.
+		derived, derr := common.PubKeyToAddress(pk.GetBytes(), pk.Primary)
+		if derr != nil {
+			return derr
 		}
-		if !bytes.Equal(pk.MainAddress.GetBytes(), mainAddress.GetBytes()) {
-			return fmt.Errorf("error with creation of address from first pub key %v != %v", pk.MainAddress.GetHex(), mainAddress.GetHex())
+		if bytes.Equal(derived.GetBytes(), pk.MainAddress.GetBytes()) {
+			mainAddress, err2 := pubkeys.CreateAddressFromFirstPubKey(pk)
+			if err2 != nil {
+				return err2
+			}
+			if !bytes.Equal(pk.MainAddress.GetBytes(), mainAddress.GetBytes()) {
+				return fmt.Errorf("error with creation of address from first pub key %v != %v", pk.MainAddress.GetHex(), mainAddress.GetHex())
+			}
+			return nil
 		}
-		return nil
+		// The identity is the one the key names, not one derived from it: open
+		// its trie with this key's address as the sole entry. This is the same
+		// construction the append path below performs, from an empty start.
+		addresses = []common.Address{}
 	}
 	exist := false
 	for _, a := range addresses {
@@ -182,44 +220,61 @@ func ProcessBlockPubKey(block Block) error {
 		if len(pk.GetBytes()) == 0 {
 			continue
 		}
-		logger.GetLogger().Println("ProcessBlockPubKey: pubkey found in transaction", txh.GetHex())
-		logger.GetLogger().Println("  PubKey bytes length:", len(pk.GetBytes()))
-		logger.GetLogger().Println("  PubKey.Address:", pk.Address.GetHex())
-		logger.GetLogger().Println("  PubKey.MainAddress:", pk.MainAddress.GetHex())
-		logger.GetLogger().Println("  PubKey.Primary:", pk.Primary)
+		// One line per registration, not the fifteen this used to emit. Every
+		// fact those lines carried is either in the summary below or in the
+		// error that reports the failure, and each error names the transaction
+		// and the addresses itself so nothing depends on a preceding line
+		// having survived. Registrations are rare on a live chain but arrive
+		// back to back while syncing one, which is where the volume hurt.
 		senderAddr := t.GetSenderAddress()
-		logger.GetLogger().Println("  Transaction sender:", senderAddr.GetHex())
 
 		zeroBytes := make([]byte, common.AddressLength)
 		// Derive address from pubkey bytes if not set
 		if bytes.Equal(pk.Address.GetBytes(), zeroBytes) {
-			logger.GetLogger().Println("  PubKey.Address is empty, deriving from pubkey bytes...")
 			derivedAddr, err := common.PubKeyToAddress(pk.GetBytes(), pk.Primary)
 			if err != nil {
-				logger.GetLogger().Println("  ERROR: cannot derive address from pubkey:", err)
+				logger.GetLogger().Printf("ERROR: tx %s carries a pubkey whose address cannot be derived: %v", txh.GetHex(), err)
 				continue
 			}
 			pk.Address = derivedAddr
-			logger.GetLogger().Println("  Derived address:", pk.Address.GetHex())
 		}
 		// Set MainAddress if not set
 		if bytes.Equal(pk.MainAddress.GetBytes(), zeroBytes) {
-			logger.GetLogger().Println("  PubKey.MainAddress is empty, setting to pk.Address")
 			pk.MainAddress = pk.Address
-			logger.GetLogger().Println("  MainAddress set to:", pk.MainAddress.GetHex())
 		}
+		// Defence in depth. Verify() is the consensus gate and now requires the
+		// enclosed key to name its sender as its identity, so this cannot fire
+		// for a transaction that passed it. It is here because the binding
+		// written below is what LoadPubKey later reports as "this key belongs
+		// to X", and a signature made with the key then spends X's coins: any
+		// future gap in Verify would become a permanent on-chain account
+		// takeover the moment the block applied.
+		//
+		// Skipping rather than rejecting the block is deliberate. Refusing the
+		// block would stall the node on a rewind-and-reapply loop — the failure
+		// mode that stalled it once already — whereas skipping leaves the key
+		// simply unbound, which is what an unproven claim deserves.
+		if !bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes()) {
+			logger.GetLogger().Printf("WARNING: refusing to register a key that names identity %s while sent by %s; key not bound",
+				pk.MainAddress.GetHex(), senderAddr.GetHex())
+			continue
+		}
+
 		err = StorePubKey(pk)
 		if err != nil {
-			logger.GetLogger().Println("  ERROR: StorePubKey failed:", err)
+			logger.GetLogger().Printf("ERROR: storing the key %s of identity %s from tx %s failed: %v",
+				pk.Address.GetHex(), pk.MainAddress.GetHex(), txh.GetHex(), err)
 			return err
 		}
-		logger.GetLogger().Println("  StorePubKey success")
 		err = StorePubKeyInPatriciaTrie(pk)
 		if err != nil {
-			logger.GetLogger().Println("  ERROR: StorePubKeyInPatriciaTrie failed:", err)
+			logger.GetLogger().Printf("ERROR: recording the key %s under identity %s from tx %s failed: %v",
+				pk.Address.GetHex(), pk.MainAddress.GetHex(), txh.GetHex(), err)
 			return err
 		}
-		logger.GetLogger().Println("  StorePubKeyInPatriciaTrie success")
+		logger.GetLogger().Printf("registered %s key %s (%d bytes) for identity %s from tx %s",
+			map[bool]string{true: "primary", false: "secondary"}[pk.Primary],
+			pk.Address.GetHex(), len(pk.GetBytes()), pk.MainAddress.GetHex(), txh.GetHex())
 	}
 	return nil
 }

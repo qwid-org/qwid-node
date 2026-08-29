@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
@@ -600,14 +601,33 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	return nil
 }
 
+// slowApplyThreshold is the per-block apply wall time above which the sub-phase
+// breakdown below is logged. The sync batch summary only splits verify/funds;
+// this names WHERE inside the funds phase a slow block spends its time.
+const slowApplyThreshold = 300 * time.Millisecond
+
 func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *transactionsPool.MerkleTree, checkWhenNotSync bool) error {
+
+	applyStart := time.Now()
+	var tStakeDep, tTransfers, tSC, tSupply, tPubKeys, tHeader, tProcess, tTxStore time.Duration
+	defer func() {
+		if total := time.Since(applyStart); total > slowApplyThreshold {
+			logger.GetLogger().Printf("slow block apply %d (%d txs): total=%v stakeDep=%v transfers=%v evalSC=%v supply=%v pubkeys=%v headerVerify=%v processTransfers=%v txStore=%v",
+				newBlock.GetHeader().Height, len(newBlock.TransactionsHashes),
+				total.Truncate(time.Millisecond), tStakeDep.Truncate(time.Millisecond), tTransfers.Truncate(time.Millisecond),
+				tSC.Truncate(time.Millisecond), tSupply.Truncate(time.Millisecond), tPubKeys.Truncate(time.Millisecond),
+				tHeader.Truncate(time.Millisecond), tProcess.Truncate(time.Millisecond), tTxStore.Truncate(time.Millisecond))
+		}
+	}()
 
 	defer RemoveAllTransactionsRelatedToBlock(*newBlock)
 	// Stake-snapshot-dependent checks, run against the parent (height-1) state
 	// that is in memory before this block's transactions are applied.
+	phase := time.Now()
 	if err := VerifyStakeDependent(*newBlock); err != nil {
 		return err
 	}
+	tStakeDep = time.Since(phase)
 	n, err := account.IntDelegatedAccountFromAddress(newBlock.GetHeader().DelegatedAccount)
 	if err != nil || n < 1 || n > 255 {
 		return fmt.Errorf("wrong delegated account: CheckBlockAndTransferFunds")
@@ -617,16 +637,21 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 		return fmt.Errorf("not enough staked coins to be a node or not valid operetional account: CheckBlockAndTransferFunds %v %v %v %v", int64(sumStaked), common.MinStakingForNode, opAcc.Address[:5], opAccBlockAddr.GetBytes()[:5])
 	}
 
+	phase = time.Now()
 	reward, totalFee, err := CheckBlockTransfers(*newBlock, lastBlock, merkleTrie, false)
 	if err != nil {
 		return err
 	}
+	tTransfers = time.Since(phase)
 	newBlock.BlockFee = totalFee + lastBlock.BlockFee
 
+	phase = time.Now()
 	if EvaluateSmartContracts(newBlock) == false {
 		return fmt.Errorf("evaluation of smart contracts in block fails: CheckBlockAndTransferFunds")
 	}
+	tSC = time.Since(phase)
 
+	phase = time.Now()
 	staked, rewarded := GetSupplyInStakedAccounts()
 	//coinsInDex := account.GetCoinLiquidityInDex()
 	supplyInAccounts := GetSupplyInAccounts()
@@ -652,12 +677,16 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 		logger.GetLogger().Println("=== END SUPPLY MISMATCH DEBUG ===")
 		return fmt.Errorf("block supply checking fails vs account balances: CheckBlockAndTransferFunds")
 	}
+	tSupply = time.Since(phase)
 	hashes := newBlock.GetBlockTransactionsHashes()
 	logger.GetLogger().Println("Number of transactions in block: ", len(hashes))
+	phase = time.Now()
 	err = ProcessBlockPubKey(*newBlock)
 	if err != nil {
 		return err
 	}
+	tPubKeys = time.Since(phase)
+	phase = time.Now()
 	head := newBlock.GetHeader()
 	// Verify the header against the encryption configuration in force BEFORE
 	// this block — the parent's — not the one this block declares.
@@ -679,7 +708,9 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	if head.Verify(sigName, sigName2, isPaused, isPaused2) == false {
 		return fmt.Errorf("header fails to verify: CheckBlockAndTransferFunds")
 	}
+	tHeader = time.Since(phase)
 
+	phase = time.Now()
 	err = merkleTrie.StoreTree(newBlock.GetHeader().Height)
 	if err != nil {
 		return err
@@ -688,6 +719,8 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	if err != nil {
 		return err
 	}
+	tProcess = time.Since(phase)
+	phase = time.Now()
 	for _, h := range hashes {
 		tx, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], h.GetBytes())
 		if err != nil {
@@ -704,6 +737,7 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 			logger.GetLogger().Println(err)
 		}
 	}
+	tTxStore = time.Since(phase)
 	err = ProcessBlockEncryption(*newBlock, lastBlock)
 	if err != nil {
 		// Deliberately logged and not returned: the block itself is valid and has

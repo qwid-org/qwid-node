@@ -49,16 +49,16 @@ type peerHeightClaim struct {
 	timestamp time.Time
 }
 
+// syncPeerCount reports how many real peers are connected on the sync topic.
+// A function variable so tests can pin the peer count.
+var syncPeerCount = func() int { return tcpip.CountPeersOnTopic(tcpip.SyncTopic) }
+
 var (
 	peerHeightClaims      = make(map[[4]byte]peerHeightClaim)
 	peerHeightClaimsMutex sync.RWMutex
 	// MaxHeightJumpWithoutConsensus - if a peer claims height more than this ahead,
 	// require multiple peers to confirm before syncing
 	MaxHeightJumpWithoutConsensus int64 = 4
-	// MinPeersForLargeSync - minimum peers that must agree on height for large syncs.
-	// NP-H13: must be >= 2 so a single malicious peer cannot drive a large sync to
-	// a fabricated height.
-	MinPeersForLargeSync = 2
 	// ClaimExpiryDuration - how long before a height claim expires
 	ClaimExpiryDuration = 30 * time.Second
 	// SyncStallTimeout - how long the local height may stay put while syncing
@@ -181,7 +181,23 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		return true, claimedHeight
 	}
 
-	// For large height differences, require multiple peers to agree
+	// For large height differences, require multiple peers to agree — the base
+	// quorum comes from common.MinPeersForLargeSync (operator-tunable via
+	// MIN_PEERS_FOR_LARGE_SYNC in ~/.qwid/.env, default 3) — but never more
+	// peers than are actually connected on the sync topic. On a small network
+	// (two nodes: exactly one peer) a fixed quorum can never be met, so a
+	// lagging node crawled one bucket per round toward a height its only peer
+	// kept honestly reporting, and any hiccup in 'hi' delivery turned the crawl
+	// into a full stall. Blocks are fully verified regardless; this quorum only
+	// rate-limits how fast we ask.
+	required := common.MinPeersForLargeSync
+	if peers := syncPeerCount(); peers < required {
+		required = peers
+	}
+	if required < 1 {
+		required = 1
+	}
+
 	now := time.Now()
 	peersAtOrAboveHeight := 0
 	maxConfirmedHeight := localHeight
@@ -200,8 +216,12 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		}
 	}
 
-	if peersAtOrAboveHeight >= MinPeersForLargeSync {
-		logger.GetLogger().Printf("Large sync approved: %d peers confirm height >= %d", peersAtOrAboveHeight, claimedHeight)
+	if peersAtOrAboveHeight >= required {
+		if required < common.MinPeersForLargeSync {
+			logger.GetLogger().Printf("Large sync approved: %d/%d connected sync peer(s) confirm height >= %d", peersAtOrAboveHeight, required, claimedHeight)
+		} else {
+			logger.GetLogger().Printf("Large sync approved: %d peers confirm height >= %d", peersAtOrAboveHeight, claimedHeight)
+		}
 		return true, claimedHeight
 	}
 
@@ -213,7 +233,7 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	safeHeight := localHeight + common.NumberOfHashesInBucket
 	if safeHeight < claimedHeight {
 		logger.GetLogger().Printf("Large height claim %d not confirmed by enough peers (%d/%d), limiting to %d",
-			claimedHeight, peersAtOrAboveHeight, MinPeersForLargeSync, safeHeight)
+			claimedHeight, peersAtOrAboveHeight, required, safeHeight)
 		return true, safeHeight
 	}
 
@@ -418,7 +438,14 @@ func OnMessage(addr [4]byte, m []byte) {
 		// but adopt its network first.
 		if ok, reason := peerGenesisAccepted(txn); !ok {
 			if shouldLogRejection(addr) {
-				logger.GetLogger().Printf("WARNING: refusing sync with %v: %s", addr, reason)
+				// One line carrying both the action and its reason. Reporting
+				// the drop without the reason — which is what happened while
+				// DropTopicConnection logged for itself — reads as a network
+				// fault and sends the operator looking at connectivity, when
+				// the peer is simply on another chain and the fix is to reset
+				// its database.
+				logger.GetLogger().Printf("WARNING: dropping sync connection to %v: %s "+
+					"(further drops of this peer are not logged for %v)", addr, reason, genesisRejectionLogInterval)
 			}
 			tcpip.DropTopicConnection(tcpip.SyncTopic, addr)
 			return

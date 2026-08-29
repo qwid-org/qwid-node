@@ -1,6 +1,10 @@
 package transactionServices
 
 import (
+	"fmt"
+	"sync"
+	"time"
+
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
@@ -33,16 +37,42 @@ func OnMessage(addr [4]byte, m []byte) {
 	switch string(amsg.GetHead()) {
 	case "tx":
 
+		// Backpressure BEFORE the expensive work, not after it.
+		//
+		// GetTransactionsFromBytes verifies the post-quantum signature of every
+		// transaction in the batch, and a batch runs to MaxTransactionsPerBlock.
+		// With this check below the decode, a node whose pool was full verified
+		// thousands of signatures per gossip message and then dropped the whole
+		// batch unused — burning the CPU that block processing and sync need,
+		// exactly while it was least able to spare it. The cost scales with the
+		// scheme in force, and a voted-in scheme can be far dearer than the one
+		// this was written under.
+		//
+		// This affects gossip only. The sync answers "bx"/"bt"/"st" carry no
+		// such check and must not gain one: a node catching up has to accept the
+		// transactions of every block it is importing, whatever its pool holds.
+		if transactionsPool.PoolsTx.NumberOfTransactions() > common.MaxTransactionInPool {
+			// A full pool is a STATE that persists for as long as it takes the
+			// chain to drain it, not an event. Logging it on every gossip
+			// message meant one line per message from every peer for minutes on
+			// end; the logger writes synchronously to file and stdout, so under
+			// load that write became the slowest thing in the receive path and
+			// stalled the loop that also carries sync and nonce traffic —
+			// which is block production. Report it periodically, with the
+			// number of messages dropped meanwhile so the rate stays visible.
+			if dropped := notePoolFullDrop(); dropped > 0 {
+				logger.GetLogger().Printf("no more transactions can be accepted to the pool (%d gossip message(s) dropped since the last report)", dropped)
+			}
+			return
+		}
+
 		msg := amsg.(message.TransactionsMessage)
 		txn, err := msg.GetTransactionsFromBytes(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
 		if err != nil {
 			return
 		}
+		belowMinStaking := 0
 		//logger.GetLogger().Println("get tx from ", addr[:])
-		if transactionsPool.PoolsTx.NumberOfTransactions() > common.MaxTransactionInPool {
-			logger.GetLogger().Println("no more transactions can be accepted to the pool")
-			return
-		}
 		// need to check transactions
 		for _, v := range txn {
 			for _, t := range v {
@@ -83,7 +113,12 @@ func OnMessage(addr [4]byte, m []byte) {
 					// Reject non-staking transactions to delegated accounts
 				if n, err := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); err == nil && n > 0 && n < 256 {
 					if t.TxData.Amount > 0 && t.TxData.Amount < common.MinStakingUser && t.GetLockedAmount() == 0 {
-						logger.GetLogger().Println("Rejected: transfer to delegated account below minimum staking amount")
+						// Counted, not logged: this sat in the per-transaction
+						// loop, so a sender emitting these at 500 TPS produced
+						// 500 synchronous log writes per second in the receive
+						// path. One line per message carries the same
+						// information.
+						belowMinStaking++
 						continue
 					}
 				}
@@ -115,6 +150,9 @@ func OnMessage(addr [4]byte, m []byte) {
 				}
 			}
 		}
+		if belowMinStaking > 0 {
+			logger.GetLogger().Printf("rejected %d transfer(s) to a delegated account below the minimum staking amount", belowMinStaking)
+		}
 	case "bx":
 		// transaction in sync - during sync, skip signature verification because
 		// the syncing node may not have sender pubkeys yet (stored during block processing).
@@ -122,14 +160,33 @@ func OnMessage(addr [4]byte, m []byte) {
 		msg := amsg.(message.TransactionsMessage)
 		rawTxn := msg.GetTransactionsBytes()
 
+		// One bx answer carries a whole block's worth of transactions, and a node
+		// catching up receives one per block. Logging a line per transaction made
+		// the log — and the sync it was supposed to describe — crawl, so the loop
+		// only counts. A single line per answer reports the batch and names the
+		// FIRST failure of each kind, because a transaction dropped here is a block
+		// that cannot be applied: the count alone would say sync is stuck without
+		// saying why.
 		storedCount := 0
 		skippedExisting := 0
+		undecodable := 0
+		droppedCount := 0
+		storeFailures := 0
+		var firstDecodeErr error
+		var firstDropReason string
+		var firstStoreErr error
 		for _, v := range rawTxn {
 			for _, tb := range v {
 				tx := transactionsDefinition.Transaction{}
 				t, rest, err := tx.GetFromBytes(tb)
 				if err != nil || len(rest) > 0 {
-					logger.GetLogger().Println("bx: parse error:", err)
+					undecodable++
+					if firstDecodeErr == nil {
+						if err == nil {
+							err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
+						}
+						firstDecodeErr = err
+					}
 					continue
 				}
 				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
@@ -147,7 +204,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				// the referencing block is later validated.
 				sigBytes := t.GetSignature().GetBytes()
 				if len(sigBytes) == 0 {
-					logger.GetLogger().Printf("bx: dropping tx %x with empty signature", t.Hash.GetBytes()[:8])
+					droppedCount++
+					if firstDropReason == "" {
+						firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
+					}
 					continue
 				}
 				canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
@@ -157,19 +217,33 @@ func OnMessage(addr [4]byte, m []byte) {
 					}
 				}
 				if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
-					logger.GetLogger().Printf("bx: signature verification failed, dropping tx %x", t.Hash.GetBytes()[:8])
+					droppedCount++
+					if firstDropReason == "" {
+						firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+					}
 					continue
 				}
-				err = t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:])
-				if err != nil {
-					logger.GetLogger().Printf("bx: FAILED to store transaction %x: %v", t.Hash.GetBytes()[:8], err)
-				} else {
-					logger.GetLogger().Printf("bx: stored tx %x", t.Hash.GetBytes()[:8])
-					storedCount++
+				if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
+					storeFailures++
+					if firstStoreErr == nil {
+						firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
+					}
+					continue
 				}
+				storedCount++
 			}
 		}
-		logger.GetLogger().Printf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
+		summary := fmt.Sprintf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
+		if undecodable > 0 {
+			summary += fmt.Sprintf("; %d undecodable (first: %v)", undecodable, firstDecodeErr)
+		}
+		if droppedCount > 0 {
+			summary += fmt.Sprintf("; %d dropped (first: %s)", droppedCount, firstDropReason)
+		}
+		if storeFailures > 0 {
+			summary += fmt.Sprintf("; %d store failure(s) (first: %v)", storeFailures, firstStoreErr)
+		}
+		logger.GetLogger().Println(summary)
 	case "st":
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {
@@ -247,4 +321,30 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 	default:
 	}
+}
+
+// poolFullDrops counts gossip messages refused because the pool is full, and
+// notePoolFullDrop reports how many have accumulated when it is time to log
+// again. Returning the count rather than a bare bool keeps the suppressed
+// volume visible: "dropped 4200 messages" and "dropped 3" describe very
+// different situations and must not look alike in the log.
+var (
+	poolFullMutex     sync.Mutex
+	poolFullDrops     int
+	poolFullLastLog   time.Time
+	poolFullLogPeriod = 10 * time.Second
+)
+
+func notePoolFullDrop() int {
+	poolFullMutex.Lock()
+	defer poolFullMutex.Unlock()
+	poolFullDrops++
+	now := time.Now()
+	if !poolFullLastLog.IsZero() && now.Sub(poolFullLastLog) < poolFullLogPeriod {
+		return 0
+	}
+	poolFullLastLog = now
+	n := poolFullDrops
+	poolFullDrops = 0
+	return n
 }

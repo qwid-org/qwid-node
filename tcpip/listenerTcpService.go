@@ -88,7 +88,12 @@ func RecycleTopicConnection(topic [2]byte, ip [4]byte) {
 // ours has nothing we want, now or on retry. Recycling such a peer would dial it
 // straight back and spin.
 func DropTopicConnection(topic [2]byte, ip [4]byte) {
-	logger.GetLogger().Printf("dropping connection to %v on topic %c%c", ip, topic[0], topic[1])
+	// Deliberately silent. The only caller drops a peer once per rejected
+	// message — roughly once a second for a peer that keeps reconnecting —
+	// while the line explaining WHY is throttled to once per ten minutes. That
+	// left the log full of unexplained drops and the explanation almost never
+	// visible: the noise was unthrottled and the signal was not. The caller now
+	// logs both together, under one throttle.
 	closeAndRemovePeerTopic(topic, ip)
 }
 
@@ -384,6 +389,12 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	}()
 
 	rTopic := map[[2]byte][]byte{}
+	// Topics currently discarding the tail of an over-long message. Dropping the
+	// accumulated prefix is not enough: the rest of that message keeps arriving,
+	// and without this the next fragment is mistaken for the start of a new one,
+	// which is what produced "wrong MessageInitialization" and left the
+	// connection permanently desynchronised.
+	discardingTopic := map[[2]byte]bool{}
 
 	// lastData tracks the last moment ANY bytes arrived on this connection, so a
 	// silently dead peer (NAT drop, hard reboot - no EOF, no error, only read
@@ -509,6 +520,16 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			//	continue
 			//}
 
+			if discardingTopic[topic] {
+				// Still inside the over-long message: swallow fragments until its
+				// end marker, then resume framing on a real boundary.
+				if len(r) >= 7 && bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
+					discardingTopic[topic] = false
+					logger.GetLogger().Printf("resynchronised on topic %c%c after discarding an over-long message", topic[0], topic[1])
+				}
+				continue
+			}
+
 			rt, ok := rTopic[topic]
 			if ok {
 				r = append(rt, r...)
@@ -522,7 +543,13 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			}
 
 			if int32(len(r)) > MaxMessageSizeForTopic(topic) {
-				logger.GetLogger().Println("error: too long message received: ", len(r))
+				logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
+					topic[0], topic[1], len(r), MaxMessageSizeForTopic(topic))
+				// Unless this fragment already ended the message, the rest of it
+				// is still in flight and must be skipped rather than parsed.
+				if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
+					discardingTopic[topic] = true
+				}
 				PeersMutex.Lock()
 				ReduceTrustRegisterPeer(ip)
 				PeersMutex.Unlock()
@@ -537,8 +564,18 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			if bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
 				if len(r) > 4 {
 					if bytes.Equal(r[:4], common.MessageInitialization[:]) {
-						if !AllowMessageFromIP(ip) {
-							logger.GetLogger().Println("message rate limit exceeded for", ip)
+						// The message head is the first two bytes of the body,
+						// straight after the 4-byte initialization marker
+						// (message.BaseMessage.GetBytes). Reading it here — before
+						// any parsing — is what lets the limiter tell sync traffic
+						// from gossip. A frame too short to hold a head charges the
+						// gossip budget, which is where junk belongs.
+						var head [2]byte
+						if len(r) >= 6 {
+							copy(head[:], r[4:6])
+						}
+						if !AllowMessageFromIPForHead(ip, head) {
+							logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
 							PeersMutex.Lock()
 							ReduceTrustRegisterPeer(ip)
 							trust, ok := validPeersConnected[ip]

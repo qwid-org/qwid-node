@@ -43,7 +43,7 @@ go test -v ./wallet       # verbose output
 ## Required System Dependencies
 
 - RocksDB v10.2.1 (build from source, install with `make static_lib && sudo make install-static`)
-- liboqs (commit 8ee6039) for post-quantum cryptography
+- liboqs 0.16.0 for post-quantum cryptography (release tag, not a commit)
 - Qt5 for GUI (qtbase5-dev) - optional, only for GUI wallet
 - ZMQ (libzmq3-dev)
 - Compression libs: libsnappy, liblz4, libzstd, libbz2
@@ -159,8 +159,18 @@ HEIGHT_OF_NETWORK=<current_height>  # Sync target while the local chain is BELOW
                                     # throttle in shouldSyncToHeight, so a node with a single
                                     # peer syncs toward it at full speed (blocks are still
                                     # fully verified).
+MIN_PEERS_FOR_LARGE_SYNC=3   # Optional, integer >= 1, default 3. How many live peers must confirm a large height
+                             # claim before syncing straight to it (claims within HEIGHT_OF_NETWORK skip the check).
+                             # The effective quorum is capped at the number of actually connected sync peers, so a
+                             # two-node network syncs at full speed with the default; set 1 to always trust a single
+                             # peer's claim (blocks are fully verified regardless — this only rate-limits sync).
 RPC_BIND_ADDRESS=<host>      # Optional. wallet<->node RPC bind host; default 127.0.0.1 (loopback only, NP-C4). Override only if wallet/UI runs on a different host — exposes unauthenticated RPC (e.g. TRAN).
-NODE_IP_SELF_NONCE=<ip>      # Optional. IP for the self-nonce connection; unset = default local behaviour.
+NODE_IP_SELF_NONCE=<ip>      # IP the node uses to connect to ITSELF on the self-nonce topic (port 17023).
+                             # UNSET DOES NOT MEAN LOOPBACK: it falls back to NODE_IP, i.e. the node dials its
+                             # own EXTERNAL address (tcpip/recieverTcpService.go:90). That only works where the
+                             # router supports hairpin NAT. Behind CGNAT — mobile internet in particular — the
+                             # connection can never be made and the node never receives its own nonce. Set it to
+                             # 127.0.0.1 on any host that cannot reach its own public address.
 ```
 
 Service/web env vars (read by `cmd/website` / `cmd/explorer` handlers, not from `.env`):

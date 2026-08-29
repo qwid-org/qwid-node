@@ -59,14 +59,18 @@ func TestNextBatchTarget(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			withClaims(t, tc.claims, func() {
-				target, ok := nextBatchTarget(peer, tc.height)
-				if ok != tc.wantOK {
-					t.Fatalf("nextBatchTarget ok = %v, expected %v", ok, tc.wantOK)
-				}
-				if ok && target != tc.wantTarget {
-					t.Fatalf("nextBatchTarget = %d, expected %d", target, tc.wantTarget)
-				}
+			// Two connected sync peers, so the fixed large-sync quorum applies
+			// (the adaptive single-peer quorum has its own test).
+			withSyncPeers(t, 2, func() {
+				withClaims(t, tc.claims, func() {
+					target, ok := nextBatchTarget(peer, tc.height)
+					if ok != tc.wantOK {
+						t.Fatalf("nextBatchTarget ok = %v, expected %v", ok, tc.wantOK)
+					}
+					if ok && target != tc.wantTarget {
+						t.Fatalf("nextBatchTarget = %d, expected %d", target, tc.wantTarget)
+					}
+				})
 			})
 		})
 	}

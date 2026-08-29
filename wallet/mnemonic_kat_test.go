@@ -19,9 +19,19 @@ const katPhrase = "abandon abandon abandon abandon abandon abandon abandon aband
 // The usual causes are a liboqs upgrade that alters how a scheme consumes its
 // keygen seed, a change to hkdfSalt or detKeygenInfo, or a different active
 // signature scheme in the test environment.
+// Re-recorded once, on 2026-08-28, when the default schemes changed from
+// Falcon-512/MAYO-5 to Falcon-padded-512/MAYO-2. That re-recording was only
+// permissible because derivation was first PROVEN unchanged: run under the old
+// pair, the code still produced the previous constants exactly —
+// b0d5c129b78983f33c5e256aaaa4cb8de9191fa2 and
+// e3e10a9738ed934220871e9cdc5a13a5cdcc36c0. Any future scheme change must clear
+// the same bar before these values are touched: derive under the OLD pair,
+// confirm the OLD constants still come out, and only then record the new ones.
+// If the old pair no longer reproduces them, derivation has broken and no new
+// constant may be written.
 const (
-	katPrimaryAddress   = "b0d5c129b78983f33c5e256aaaa4cb8de9191fa2"
-	katSecondaryAddress = "e3e10a9738ed934220871e9cdc5a13a5cdcc36c0"
+	katPrimaryAddress   = "8a1ded4643b82f4667535bf0e86489b672c61446"
+	katSecondaryAddress = "facd5d2e4d0dd671bd93936918fba513ba87c24e"
 )
 
 // The schemes the pinned addresses above were recorded under. The addresses are
@@ -32,8 +42,8 @@ const (
 // different scheme" instead of the address mismatch below, which claims the
 // derivation changed when it did not.
 const (
-	katPrimaryScheme   = "Falcon-512"
-	katSecondaryScheme = "MAYO-5"
+	katPrimaryScheme   = "Falcon-padded-512"
+	katSecondaryScheme = "MAYO-2"
 )
 
 func TestKnownAnswerDerivation(t *testing.T) {

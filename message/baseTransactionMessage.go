@@ -22,30 +22,41 @@ func (a TransactionsMessage) GetTransactionsBytes() map[[2]byte][][]byte {
 
 func (a TransactionsMessage) GetTransactionsFromBytes(sigName, sigName2 string, isPaused, isPaused2 bool) (map[[2]byte][]transactionsDefinition.Transaction, error) {
 	txn := map[[2]byte][]transactionsDefinition.Transaction{}
+	// One message can carry thousands of transactions, and a peer whose
+	// transactions this node cannot accept re-gossips them every round. Counting
+	// the rejects and logging one line per MESSAGE keeps that visible without
+	// letting a single unhealthy peer own the log.
+	var tooShort, failedVerify int
+	var firstErr error
 	for _, topic := range validTopics {
 		if _, ok := a.TransactionsBytes[topic]; ok {
 			for _, tb := range a.TransactionsBytes[topic] {
 				tx := transactionsDefinition.Transaction{}
-				if len(tb) < 33+76 { // min transaction bytes length
-					logger.GetLogger().Printf("warning: %v bytes of transaction", len(tb))
-					continue
-				}
 				at, rest, err := tx.GetFromBytes(tb)
 				if err != nil || len(rest) > 0 {
-					logger.GetLogger().Println("warning: ", err)
-					// continue
-					return nil, err
+					tooShort++
+					if firstErr == nil {
+						if err != nil {
+							firstErr = err
+						} else {
+							firstErr = fmt.Errorf("%v trailing bytes after transaction", len(rest))
+						}
+					}
+					continue
 				}
 				if topic == tcpip.NonceTopic || topic == tcpip.SelfNonceTopic {
 					txn[topic] = append(txn[topic], at)
 				} else if at.Verify(sigName, sigName2, isPaused, isPaused2) {
 					txn[topic] = append(txn[topic], at)
 				} else {
-					logger.GetLogger().Println("warning: transaction fail to verify")
-					// return nil, fmt.Errorf("transaction fail to verify")
+					failedVerify++
 				}
 			}
 		}
+	}
+	if tooShort > 0 || failedVerify > 0 {
+		logger.GetLogger().Printf("warning: dropped %d undecodable and %d unverifiable transaction(s) from this message; first decode error: %v",
+			tooShort, failedVerify, firstErr)
 	}
 
 	return txn, nil

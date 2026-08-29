@@ -17,7 +17,8 @@ var LoggingEnabled = true
 var (
 	logFile *os.File
 	mw      *MultiWriter
-	logger  *log.Logger
+	logger  *Logger
+	async   *asyncWriter
 	once    sync.Once
 )
 
@@ -46,7 +47,7 @@ func InitLogger() {
 			mw = &MultiWriter{
 				writers: []io.Writer{io.Discard},
 			}
-			logger = log.New(io.Discard, "", 0)
+			logger = &Logger{l: log.New(io.Discard, "", 0)}
 			log.SetOutput(io.Discard)
 			return
 		}
@@ -73,20 +74,28 @@ func InitLogger() {
 				logFile,
 			},
 		}
-		logger = log.New(mw, "", log.LstdFlags)
-		log.SetOutput(mw)
+		// Everything below writes through the async queue, so no log call can
+		// put file or terminal latency into the node's network path.
+		async = newAsyncWriter(mw)
+		logger = &Logger{l: log.New(async, "", log.LstdFlags), w: async}
+		log.SetOutput(async)
 		log.SetFlags(log.LstdFlags)
 		// Start cleanup routine
 		go cleanupOldLogs(logsDir)
 	})
 }
 
-func GetLogger() *log.Logger {
+func GetLogger() *Logger {
 	InitLogger()
 	return logger
 }
 
 func CloseLogger() {
+	// Order matters: drain the queue into the file before closing it, or a
+	// clean shutdown loses whatever was still in flight.
+	if async != nil {
+		async.Flush()
+	}
 	if logFile != nil {
 		logFile.Close()
 	}

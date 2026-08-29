@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/qwid-org/qwid-node/crypto/blake2b"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
 	"sync"
 	"sync/atomic"
@@ -31,53 +32,55 @@ type EncryptionConfig struct {
 	isPaused2         int32
 }
 
-var encryptionConfigInstance *EncryptionConfig
-var encryptionConfigInstanceOld *EncryptionConfig
+// Initialised at package-variable initialisation, which Go runs before any
+// init() and before any caller can reach an accessor. This is what makes the
+// direct dereferences throughout this file safe: SigName, PrivateKeyLength and
+// the twenty-odd accessors beside them read the pointer WITHOUT going through
+// GetEncryptionConfigInstance, so a nil here would be a panic rather than the
+// lazy initialisation the getter suggests. Eager initialisation removes that
+// whole class of bug at once, and removes the data race the getter's
+// check-then-assign would otherwise have if two goroutines found it nil.
+var encryptionConfigInstance = newEncryptionConfig()
+var encryptionConfigInstanceOld = newEncryptionConfig()
 
 func GetEncryptionConfigInstance() *EncryptionConfig {
-	if encryptionConfigInstance == nil {
-		// Initialize with a function to avoid init() if not needed immediately
-		initEncryptionConfigInstance()
-	}
 	return encryptionConfigInstance
 }
 
 func GetEncryptionConfigInstanceOld() *EncryptionConfig {
-	if encryptionConfigInstanceOld == nil {
-		// Initialize with a function to avoid init() if not needed immediately
-		initEncryptionConfigInstanceOld()
-	}
 	return encryptionConfigInstanceOld
 }
 
-func initEncryptionConfigInstance() {
-	encryptionConfigInstance = &EncryptionConfig{
-		pubKeyLength:      897,
-		privateKeyLength:  1281,
-		signatureLength:   752,
-		sigName:           "Falcon-512",
-		isPaused:          0,
-		pubKeyLength2:     5554,
-		privateKeyLength2: 40,
-		signatureLength2:  964,
-		sigName2:          "MAYO-5",
-		isPaused2:         0,
+// newEncryptionConfig builds the starting configuration from the scheme
+// definitions in crypto/oqs, which are the single source of truth for them.
+//
+// These values used to be written out again here as literals. They were dead:
+// init() in const.go overwrites both instances from oqs.NewConfigEnc1/2 before
+// anything reads them, so the copy here could only ever disagree silently with
+// the definition that actually takes effect — and it would disagree the first
+// time somebody changed the scheme in one place and not the other.
+func newEncryptionConfig() *EncryptionConfig {
+	enc1 := oqs.NewConfigEnc1()
+	enc2 := oqs.NewConfigEnc2()
+	return &EncryptionConfig{
+		pubKeyLength:      int32(enc1.PubKeyLength),
+		privateKeyLength:  int32(enc1.PrivateKeyLength),
+		signatureLength:   int32(enc1.SignatureLength),
+		sigName:           enc1.SigName,
+		isPaused:          boolToInt32(enc1.IsPaused),
+		pubKeyLength2:     int32(enc2.PubKeyLength),
+		privateKeyLength2: int32(enc2.PrivateKeyLength),
+		signatureLength2:  int32(enc2.SignatureLength),
+		sigName2:          enc2.SigName,
+		isPaused2:         boolToInt32(enc2.IsPaused),
 	}
 }
 
-func initEncryptionConfigInstanceOld() {
-	encryptionConfigInstanceOld = &EncryptionConfig{
-		pubKeyLength:      897,
-		privateKeyLength:  1281,
-		signatureLength:   752,
-		sigName:           "Falcon-512",
-		isPaused:          0,
-		pubKeyLength2:     5554,
-		privateKeyLength2: 40,
-		signatureLength2:  964,
-		sigName2:          "MAYO-5",
-		isPaused2:         0,
+func boolToInt32(b bool) int32 {
+	if b {
+		return 1
 	}
+	return 0
 }
 
 func SetEncryption(sigName string, pubKeyLength, privateKeyLength, signatureLength int, isPaused, primary bool) {

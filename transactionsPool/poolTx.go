@@ -97,6 +97,11 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 		} else if tp.typePool == uint8(2) {
 			item = NewItem(tx, common.GetInt64FromByte(hash2check.GetBytes()))
 		} else {
+			// Unlock before returning: this branch used to return while still
+			// holding the write lock, which left the pool permanently locked
+			// and froze every later pool operation — including the block
+			// producer's PeekTransactions.
+			tp.rwmutex.Unlock()
 			logger.GetLogger().Println("not implemented, AddTransaction")
 			return false
 		}
