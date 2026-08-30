@@ -139,18 +139,17 @@ func OnMessage(addr [4]byte, m []byte) {
 						logger.GetLogger().Println(err)
 						continue
 					}
-					// Store pubkey immediately so it's available for nonce verification
-					// pk := t.TxData.Pubkey
-					// if len(pk.GetBytes()) > 0 {
-					// 	//logger.GetLogger().Println("Storing pubkey from transaction immediately")
-					// 	storePubKeyFromTransaction(pk, t.GetSenderAddress())
-					// }
-					// Always broadcast local transactions (from RPC/wallet with addr 0.0.0.0)
-					// For remote transactions, only broadcast if not syncing
-					isLocalTx := addr == [4]byte{0, 0, 0, 0}
-					if isLocalTx { // || !common.IsSyncing.Load() {
-						BroadcastTxn(addr, m)
-					}
+					// Deliberately NOT broadcast here. Locally submitted
+					// transactions used to be forwarded immediately — one
+					// outbound message PER TRANSACTION — while the delta loop
+					// (broadcastTransactionsMsgInLoop) re-sent the same
+					// transactions batched a second later. At 100 TPS that was a
+					// hundred redundant messages a second into a 100-slot send
+					// channel, which is what the "could not broadcast
+					// transaction" noise was: the channel full with duplicates
+					// of what the next delta batch carried anyway. The delta
+					// loop propagates a new transaction within a second, which
+					// against a 10-second block interval costs nothing.
 				}
 			}
 		}

@@ -281,9 +281,9 @@ func Send(addr [4]byte, nb []byte) bool {
 			return true
 		default:
 			// NP-M10: best-effort gossip — the send channel is full, so drop this
-			// message (propagation is still covered by on-arrival BroadcastTxn,
-			// the periodic delta loop, and the requester's bt retry). Blocking
-			// here would push backpressure into the caller.
+			// message (propagation is still covered by the periodic delta loop
+			// and the requester's bt retry). Blocking here would push
+			// backpressure into the caller.
 			//
 			// Logged as a once-a-minute summary: under sustained load (serving
 			// multi-MB bx answers over a link slower than they are produced) the
@@ -294,26 +294,6 @@ func Send(addr [4]byte, nb []byte) bool {
 		}
 	}
 	return false
-}
-
-func BroadcastTxn(ignoreAddr [4]byte, nb []byte) {
-	var ip [4]byte
-	var peers = tcpip.GetPeersConnected(tcpip.TransactionTopic)
-	num_peers := len(peers)
-	if num_peers == 0 {
-		return
-	}
-	for topicip := range peers {
-		// Send to all peers to ensure transactions reach mining nodes
-		// Previously was randomly selecting ~1 peer which caused transactions to not propagate properly
-		copy(ip[:], topicip[2:])
-		if !bytes.Equal(ip[:], ignoreAddr[:]) && !bytes.Equal(ip[:], tcpip.MyIP[:]) {
-			//logger.GetLogger().Println("send transactions to ", int(ip[0]), int(ip[1]), int(ip[2]), int(ip[3]))
-			if !Send(ip, nb) {
-				logger.GetLogger().Println("could not broadcast transaction")
-			}
-		}
-	}
 }
 
 func startPublishingTransactionMsg() {
