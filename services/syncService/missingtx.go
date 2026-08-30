@@ -137,11 +137,13 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 				others = append(others, t)
 			}
 		}
-		for _, h := range escalate {
-			logger.GetLogger().Printf("missing tx %x still unanswered after %d requests to %v - "+
-				"asking %d other peer(s); grep the peer's log for this hash ('bt'/'bx' lines)",
-				h[:8], missingTxEscalateAfter, addr, len(others))
-		}
+		// One summary line, not one line per hash: at high TPS thousands of
+		// hashes cross the escalation threshold in the same round, and writing
+		// a log line for each (to stdout AND the log file) took longer than
+		// the requests themselves and drowned everything else in the log.
+		logger.GetLogger().Printf("%d missing tx(s) still unanswered after %d+ requests to %v - "+
+			"asking %d other peer(s); first: %x (grep the peer's log for 'bt'/'bx' lines)",
+			len(escalate), missingTxEscalateAfter, addr, len(others), escalate[0][:8])
 		for _, t := range others {
 			for i := 0; i < len(escalate); i += maxChunk {
 				end := i + maxChunk
