@@ -48,7 +48,7 @@ func GetWalletInfo(w http.ResponseWriter, r *http.Request) {
 	JsonResponse(w, WalletInfoResponse{
 		Loaded:    true,
 		Address:   wl.MainAddress.GetHex(),
-		PubKeyHex: wl.Account1.PublicKey.GetHex()[:64] + "...",
+		PubKeyHex: common.HexPrefix(wl.Account1.PublicKey.GetHex(), 64),
 		SigName:   wl.GetSigName(true),
 		SigName2:  wl.GetSigName(false),
 	})

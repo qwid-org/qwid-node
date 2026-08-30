@@ -205,9 +205,9 @@ func (w *Wallet) ShowInfo() string {
 	// CW-H4: do not emit private-key metadata (lengths). Public keys and
 	// addresses are public information; secret-key details are omitted and the
 	// result is returned to the caller rather than printed to stdout.
-	s := fmt.Sprintln("Beginning of public key:", w.Account1.PublicKey.GetHex()[:10])
+	s := fmt.Sprintln("Beginning of public key:", common.HexPrefix(w.Account1.PublicKey.GetHex(), 10))
 	s += fmt.Sprintln("Address:", w.Account1.Address.GetHex())
-	s += fmt.Sprintln("Beginning of public key 2:", w.Account2.PublicKey.GetHex()[:10])
+	s += fmt.Sprintln("Beginning of public key 2:", common.HexPrefix(w.Account2.PublicKey.GetHex(), 10))
 	s += fmt.Sprintln("Address 2:", w.Account2.Address.GetHex())
 	s += fmt.Sprintln("MainAddress:", w.MainAddress.GetHex())
 	s += fmt.Sprintln("Wallet location", w.HomePath)

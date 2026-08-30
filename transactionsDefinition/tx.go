@@ -27,8 +27,10 @@ func (td TxData) GetString() string {
 	t := "Recipient: " + td.Recipient.GetHex() + "\n"
 	t += "Amount QWD: " + fmt.Sprintln(account.Int64toFloat64(td.Amount)) + "\n"
 	t += "Opt Data: " + hex.EncodeToString(td.OptData) + "\n"
-	if td.Pubkey.ByteValue != nil {
-		t += "Pubkey: " + td.Pubkey.GetHex()[:20] + "\n"
+	// Length, not nil: a transaction with no key carries an empty slice after a
+	// JSON round-trip, which is not nil and used to reach the truncation below.
+	if len(td.Pubkey.ByteValue) > 0 {
+		t += "Pubkey: " + common.HexPrefix(td.Pubkey.GetHex(), 20) + "\n"
 	}
 	t += "Address: " + td.Pubkey.Address.GetHex() + "\n"
 	if td.LockedAmount > 0 {

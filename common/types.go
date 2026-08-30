@@ -548,3 +548,19 @@ func EmptySignature() Signature {
 	s.Init(tmp, EmptyAddress())
 	return s
 }
+
+// HexPrefix returns at most n characters of a hex string, appending an ellipsis
+// when it had to cut.
+//
+// It exists because truncating with a bare s[:n] panics whenever the value is
+// shorter than expected, and "shorter than expected" is routine here: a
+// transaction without a public key carries an EMPTY byte slice, not a nil one,
+// once it has been through JSON — so a nil check lets it past and the slice
+// expression brings the process down. That is how displaying the details of an
+// ordinary transfer crashed the Web UI.
+func HexPrefix(s string, n int) string {
+	if n < 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
