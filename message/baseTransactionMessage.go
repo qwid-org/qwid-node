@@ -1,6 +1,8 @@
 package message
 
 import (
+	"sync"
+	"time"
 	"fmt"
 
 	"github.com/qwid-org/qwid-node/common"
@@ -55,8 +57,20 @@ func (a TransactionsMessage) GetTransactionsFromBytes(sigName, sigName2 string, 
 		}
 	}
 	if tooShort > 0 || failedVerify > 0 {
-		logger.GetLogger().Printf("warning: dropped %d undecodable and %d unverifiable transaction(s) from this message; first decode error: %v",
-			tooShort, failedVerify, firstErr)
+		// Throttled, and reporting the volume it suppressed. Anyone can send a
+		// message full of transactions this node will refuse, so an untuned
+		// line here is an amplifier: one forged transaction, one guaranteed
+		// write. The decode error is named only when there was one — printing
+		// "first decode error: <nil>" beside a purely unverifiable batch stated
+		// a fact that did not exist.
+		if ok, skipped := shouldLogDropSummary(); ok {
+			detail := ""
+			if tooShort > 0 {
+				detail = fmt.Sprintf("; first decode error: %v", firstErr)
+			}
+			logger.GetLogger().Printf("warning: dropped %d undecodable and %d unverifiable transaction(s) from this message%s%s",
+				tooShort, failedVerify, detail, dropSummarySuppressed(skipped))
+		}
 	}
 
 	return txn, nil
@@ -140,4 +154,36 @@ func (a TransactionsMessage) GetFromBytes(b []byte) (AnyMessage, error) {
 	}
 
 	return AnyMessage(a), nil
+}
+
+// One report per interval for refused transactions, carrying how many messages
+// were suppressed meanwhile. Global rather than per-peer: this decoder does not
+// know which peer sent the message, and the point is to bound the total volume
+// an attacker can force, not to attribute it.
+var (
+	dropLogMutex    sync.Mutex
+	dropLogLast     time.Time
+	dropLogSkipped  int
+	dropLogInterval = 30 * time.Second
+)
+
+func shouldLogDropSummary() (bool, int) {
+	now := time.Now()
+	dropLogMutex.Lock()
+	defer dropLogMutex.Unlock()
+	if !dropLogLast.IsZero() && now.Sub(dropLogLast) < dropLogInterval {
+		dropLogSkipped++
+		return false, 0
+	}
+	dropLogLast = now
+	n := dropLogSkipped
+	dropLogSkipped = 0
+	return true, n
+}
+
+func dropSummarySuppressed(skipped int) string {
+	if skipped == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d further message(s) with refused transactions were suppressed)", skipped)
 }

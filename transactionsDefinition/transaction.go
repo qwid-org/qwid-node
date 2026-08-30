@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
@@ -455,9 +457,12 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 				// only when the operator sends a transaction carrying the
 				// pubkey, and until then nothing this account signs can be
 				// verified by anyone.
-				logger.GetLogger().Printf("Verify: sender %s has no registered %s key (%d bytes) in the %s slot; "+
-					"the key for the current scheme must be registered by sending a transaction that carries the pubkey: %v",
-					senderAddr.GetHex(), schemeName, expLen, map[bool]string{true: "primary", false: "secondary"}[primary], err)
+				if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+					logger.GetLogger().Printf("Verify: sender %s has no registered %s key (%d bytes) in the %s slot; "+
+						"the key for the current scheme must be registered by sending a transaction that carries the pubkey: %v%s",
+						senderAddr.GetHex(), schemeName, expLen, map[bool]string{true: "primary", false: "secondary"}[primary], err,
+						suppressedNote(skipped))
+				}
 				return false
 			}
 		}
@@ -465,27 +470,22 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 	} else {
 		// If pubkey is included in transaction, verify it matches the sender address
 		senderAddr := tx.GetSenderAddress()
-		logger.GetLogger().Println("Verify: pubkey included in transaction")
-		logger.GetLogger().Println("  PubKey bytes length:", len(pkb))
-		logger.GetLogger().Println("  Sender address:", senderAddr.GetHex())
-		logger.GetLogger().Println("  Signature primary flag:", primary)
-		logger.GetLogger().Println("  PubKey.Primary field:", pk.Primary)
-		// PubKey.Primary is DERIVED from the key length by PubKey.Init, so a
-		// "false" on a key that ought to be primary means the key does not
-		// belong to the scheme currently in the primary slot. Print what that
-		// slot expects, so the mismatch is stated instead of inferred.
-		logger.GetLogger().Printf("  schemes in force: primary=%s (%d-byte key), secondary=%s (%d-byte key); paused=[%v/%v]",
-			sigName, common.PubKeyLength(false), sigName2, common.PubKeyLength2(false), isPausedTmp, isPaused2Tmp)
+		// No narration on the way in. This branch runs for every transaction
+		// that carries a key — which any sender may do — and it used to emit
+		// about ten lines before deciding anything. The facts those lines
+		// carried are folded into the single line each failure below reports,
+		// so nothing is lost except the volume an attacker could conjure.
 
 		// Use the pubkey's own Primary flag for address derivation
 		pkPrimary := pk.Primary
 		pkAddr, err := common.PubKeyToAddress(pkb, pkPrimary)
 		if err != nil {
-			logger.GetLogger().Println("  ERROR: cannot derive address from pubkey:", err)
+			if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+				logger.GetLogger().Printf("Verify: sender %s enclosed a key whose address cannot be derived: %v%s",
+					senderAddr.GetHex(), err, suppressedNote(skipped))
+			}
 			return false
 		}
-		logger.GetLogger().Println("  Derived address:", pkAddr.GetHex())
-		logger.GetLogger().Println("  PubKey.MainAddress:", pk.MainAddress.GetHex())
 
 		// Which identity a key belongs to is ON-CHAIN state, so read it from the
 		// key registry rather than believing what the transaction asserts.
@@ -503,10 +503,14 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 		// from the identity it serves, exactly as a secondary key always has.
 		addressMatch := false
 		resolvedFromRegistry := false
+		// Recorded so the single rejection line below can explain WHY, without
+		// the running commentary this branch used to print for every
+		// transaction that carried a key.
+		bootstrapAttempt := false
+		bootstrapSpare := false
 		if stored, lerr := pubkeys.LoadPubKey(pkAddr.GetBytes()); lerr == nil {
 			addressMatch = bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes())
 			resolvedFromRegistry = true
-			logger.GetLogger().Println("  registry says this key belongs to:", stored.MainAddress.GetHex())
 		}
 		if !resolvedFromRegistry {
 			// The key is new: there is no recorded binding, so the transaction
@@ -533,8 +537,6 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 					pkb = existing.GetBytes()
 					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
 					authorised = true
-					logger.GetLogger().Printf("  new key introduced by identity %s, authorised by its registered %s key",
-						senderAddr.GetHex(), signingScheme)
 				}
 			}
 			if !authorised {
@@ -563,12 +565,10 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 				// including an entire new scheme's after a replacement, arrives
 				// through the authorised path above: signed by a key already
 				// registered to that identity.
-				logger.GetLogger().Println("  sender has no registered key for the signing scheme; bootstrap rule applies (the key must derive the sender address)")
+				// Silent when it succeeds; the rejection below explains itself.
 				addressMatch = bootstrapBindsKey(pkAddr, senderAddr)
-				if !addressMatch && !pkPrimary {
-					logger.GetLogger().Println("  a spare key cannot open an account: register the key that derives this address first, " +
-						"while its scheme is not paused, then introduce further keys by signing with it")
-				}
+				bootstrapAttempt = true
+				bootstrapSpare = !addressMatch && !pkPrimary
 			}
 		}
 
@@ -580,22 +580,25 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 		// recorded against them, which is the same account takeover by a
 		// different route.
 		if addressMatch && !keyNamesSender(pk.MainAddress, senderAddr) {
-			logger.GetLogger().Println("  ERROR: the enclosed key names an identity other than the sender")
-			logger.GetLogger().Println("  PubKey.MainAddress:", pk.MainAddress.GetHex())
-			logger.GetLogger().Println("  Expected (sender):", senderAddr.GetHex())
+			if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+				logger.GetLogger().Printf("Verify: rejected a key naming identity %s while sent by %s%s",
+					pk.MainAddress.GetHex(), senderAddr.GetHex(), suppressedNote(skipped))
+			}
 			return false
 		}
 
 		if !addressMatch {
-			logger.GetLogger().Println("  ERROR: pubkey address mismatch!")
-			logger.GetLogger().Println("  Derived:", pkAddr.GetHex())
-			logger.GetLogger().Println("  Expected (sender):", senderAddr.GetHex())
-			if !pkPrimary {
-				logger.GetLogger().Println("  PubKey.MainAddress:", pk.MainAddress.GetHex())
+			if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+				hint := ""
+				if bootstrapAttempt && bootstrapSpare {
+					hint = "; a spare key cannot open an account — register the key that derives this address first, " +
+						"while its scheme is not paused, then introduce further keys by signing with it"
+				}
+				logger.GetLogger().Printf("Verify: key %s does not belong to sender %s (key names %s)%s%s",
+					pkAddr.GetHex(), senderAddr.GetHex(), pk.MainAddress.GetHex(), hint, suppressedNote(skipped))
 			}
 			return false
 		}
-		logger.GetLogger().Println("  Address verification OK")
 
 		// The enclosed key is DATA — the key being registered. What SIGNED the
 		// transaction is a separate question, answered by the signature's own
@@ -650,6 +653,68 @@ func keyNamesSender(pkMainAddress, senderAddr common.Address) bool {
 // signingSchemeName returns the scheme a signature was made under, chosen by
 // the flag the signature carries rather than by anything the transaction body
 // claims.
+// Verification failures are reachable from untrusted network input: anyone can
+// send transactions this node cannot verify, and every one of them used to
+// produce a burst of log lines. That turns one cheap forged transaction into
+// many expensive writes — an amplifier an attacker controls, which is the
+// shape of a denial of service even when the logger itself no longer blocks.
+//
+// Failures are therefore reported at most once per sender per interval, with
+// the number suppressed meanwhile, so a flood costs a constant trickle of log
+// and the first occurrence is still seen immediately.
+var (
+	verifyLogMutex    sync.Mutex
+	verifyLogTimes    = map[[common.AddressLength]byte]time.Time{}
+	verifyLogSkipped  = map[[common.AddressLength]byte]int{}
+	verifyLogInterval = 30 * time.Second
+	// Suppressed reports whose per-sender entry aged out before being read.
+	verifyLogFolded int
+)
+
+// shouldLogVerifyFailure reports whether to log now, and how many reports were
+// suppressed since the last one.
+func suppressedNote(skipped int) string {
+	if skipped == 0 {
+		return ""
+	}
+	// Not attributed to one sender: the tally includes failures whose own
+	// bookkeeping expired, and claiming otherwise would misreport their origin.
+	return fmt.Sprintf(" (%d further verification failure(s) suppressed)", skipped)
+}
+
+func shouldLogVerifyFailure(sender common.Address) (bool, int) {
+	var key [common.AddressLength]byte
+	copy(key[:], sender.GetBytes())
+
+	now := time.Now()
+	verifyLogMutex.Lock()
+	defer verifyLogMutex.Unlock()
+
+	// Bound the maps: a flood from forged senders must not grow them without
+	// limit, which would make the throttle its own memory exhaustion. What an
+	// expiring entry must NOT take with it is its suppressed count — dropping
+	// that reported a silent gap as no gap at all, which is worse than the
+	// noise being throttled. Carry it into a shared tally instead, so the
+	// figure survives without the bookkeeping surviving with it.
+	for a, t := range verifyLogTimes {
+		if now.Sub(t) > verifyLogInterval {
+			verifyLogFolded += verifyLogSkipped[a]
+			delete(verifyLogTimes, a)
+			delete(verifyLogSkipped, a)
+		}
+	}
+
+	if last, ok := verifyLogTimes[key]; ok && now.Sub(last) < verifyLogInterval {
+		verifyLogSkipped[key]++
+		return false, 0
+	}
+	verifyLogTimes[key] = now
+	n := verifyLogSkipped[key] + verifyLogFolded
+	verifyLogSkipped[key] = 0
+	verifyLogFolded = 0
+	return true, n
+}
+
 func signingSchemeName(primary bool, sigName, sigName2 string) string {
 	if primary {
 		return sigName
