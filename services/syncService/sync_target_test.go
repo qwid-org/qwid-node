@@ -18,6 +18,9 @@ func withClaims(t *testing.T, claims map[[4]byte]peerHeightClaim, fn func()) {
 		peerHeightClaimsMutex.Lock()
 		peerHeightClaims = saved
 		peerHeightClaimsMutex.Unlock()
+		// Tests drive the production gate through updateSyncTarget; reset it so a
+		// leftover corroborated height cannot leak into a later test.
+		common.SetProductionTarget(0)
 	}()
 	fn()
 }
@@ -123,13 +126,48 @@ func TestBehindNetworkIgnoresHeightHint(t *testing.T) {
 	common.CurrentHeightOfNetwork = 0
 	common.SetHeight(500)
 
-	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(105000, time.Second)}, func() {
+	// Two distinct peers corroborate the height, so this is a genuine "behind"
+	// (unlike a single unverified claim, which must NOT stop production - see
+	// TestSingleClaimDoesNotStopProduction).
+	withClaims(t, map[[4]byte]peerHeightClaim{
+		{1}: claim(105000, time.Second),
+		{2}: claim(105000, time.Second),
+	}, func() {
 		updateSyncTarget()
 		if got := common.GetSyncTarget(); got != 105000 {
 			t.Fatalf("GetSyncTarget() = %d, want 105000", got)
 		}
 		if !common.IsBehindNetwork() {
-			t.Fatal("node 104500 blocks behind must count as behind the network")
+			t.Fatal("node 104500 blocks behind (corroborated) must count as behind the network")
+		}
+	})
+}
+
+// TestSingleClaimDoesNotStopProduction is the security property behind hardening
+// 2+3: a single peer's height claim — honest, a lie, or two nodes behind one NAT
+// collapsed to one claim — must make this node SYNC but never STOP PRODUCING.
+// syncTarget follows the lone peer (so a two-node network catches up), yet
+// IsBehindNetwork stays false because the height is uncorroborated.
+func TestSingleClaimDoesNotStopProduction(t *testing.T) {
+	savedHint := common.CurrentHeightOfNetwork
+	savedHeight := common.GetHeight()
+	savedTarget := common.GetSyncTarget()
+	defer func() {
+		common.CurrentHeightOfNetwork = savedHint
+		common.SetHeight(savedHeight)
+		common.SetSyncTarget(savedTarget)
+	}()
+
+	common.CurrentHeightOfNetwork = 0
+	common.SetHeight(500)
+
+	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(999999, time.Second)}, func() {
+		updateSyncTarget()
+		if got := common.GetSyncTarget(); got != 999999 {
+			t.Fatalf("GetSyncTarget() = %d, want 999999 (single peer still drives sync)", got)
+		}
+		if common.IsBehindNetwork() {
+			t.Fatal("a single uncorroborated claim must NOT stop block production")
 		}
 	})
 }
@@ -201,13 +239,18 @@ func TestPeersTakeOverAboveHint(t *testing.T) {
 	common.CurrentHeightOfNetwork = 105000
 	common.SetHeight(105000)
 
-	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(200000, time.Second)}, func() {
+	// Two peers corroborate 200000, so the production gate fires once the hint is
+	// spent (a single claim would drive sync but not stop production).
+	withClaims(t, map[[4]byte]peerHeightClaim{
+		{1}: claim(200000, time.Second),
+		{2}: claim(200000, time.Second),
+	}, func() {
 		updateSyncTarget()
 		if got := common.GetSyncTarget(); got != 200000 {
 			t.Fatalf("GetSyncTarget() = %d, want the peer view 200000 once the hint is reached", got)
 		}
 		if !common.IsBehindNetwork() {
-			t.Fatal("node 95000 blocks behind the peer view must count as behind")
+			t.Fatal("node 95000 blocks behind the peer view (corroborated) must count as behind")
 		}
 	})
 }
