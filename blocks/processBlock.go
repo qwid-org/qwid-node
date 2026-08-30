@@ -267,7 +267,15 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	accounts := map[[common.AddressLength]byte]account.Account{}
 	stakingAccounts := map[[common.AddressLength]byte]account.StakingAccount{}
 	totalFee := int64(0)
-	logger.GetLogger().Printf("CheckBlockTransfers: block %d has %d transactions, lastSupply=%d", block.GetHeader().Height, len(txs), lastSupply)
+	// Name the pass. This function runs twice for every block — once to verify
+	// it and once to apply it — and the two lines were identical, so a healthy
+	// block looked like it was being processed twice.
+	pass := "applying"
+	if onlyCheck {
+		pass = "verifying"
+	}
+	logger.GetLogger().Printf("CheckBlockTransfers[%s]: block %d has %d transactions, lastSupply=%d",
+		pass, block.GetHeader().Height, len(txs), lastSupply)
 	for i, tx := range txs {
 		hash := tx.GetBytes()
 		poolTx, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], hash)
