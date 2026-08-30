@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"strconv"
@@ -69,6 +70,15 @@ func main() {
 	}
 	logger.InitLogger()
 	defer logger.CloseLogger()
+	// The net/http/pprof import registers its handlers on the default mux, but
+	// nothing ever served it - the import was dead. Loopback-only, so nothing
+	// is exposed to the network; `go tool pprof http://127.0.0.1:6060/debug/pprof/profile`
+	// answers "what is this node doing right now" definitively.
+	go func() {
+		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+			logger.GetLogger().Println("pprof server:", err)
+		}
+	}()
 	database.InitDB()
 	defer database.CloseDB()
 	pubkeys.InitTrie()

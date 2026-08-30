@@ -238,6 +238,9 @@ func Send(addr [4]byte, nb []byte) bool {
 type syncProgress struct {
 	height int64
 	since  time.Time
+	// noClaimRounds counts consecutive stall rounds with a connected sync peer
+	// but zero live height claims - the signature of a half-dead sync link.
+	noClaimRounds int
 }
 
 var progress = syncProgress{height: -1}
@@ -313,6 +316,29 @@ func checkSyncStall(now time.Time) {
 		logger.GetLogger().Printf("sync stalled at height %d for %s, but no live peer is ahead of us "+
 			"(livePeerClaims=%d syncPeers=%d) - not rewinding, waiting for a peer that can serve the batch",
 			h, now.Sub(progress.since).Truncate(time.Second), live, syncPeers)
+		// A sync peer that is connected yet delivers no 'hi' for two full stall
+		// rounds (and answers no blind header request either) is a half-dead
+		// link - typically the peer's send side still points at a stream from
+		// before our restart, which no timeout on our side can detect. Tear the
+		// sync-topic connection down and re-dial, exactly as the missing-tx
+		// path recycles the transaction topic.
+		if live == 0 && syncPeers > 0 {
+			progress.noClaimRounds++
+			if progress.noClaimRounds >= 2 {
+				progress.noClaimRounds = 0
+				for topicip := range tcpip.GetPeersConnected(tcpip.SyncTopic) {
+					var ip [4]byte
+					copy(ip[:], topicip[2:])
+					if tcpip.IsSelfIP(ip) {
+						continue
+					}
+					logger.GetLogger().Printf("no 'hi' from %v for two stall rounds - recycling the sync-topic connection", ip)
+					tcpip.RecycleTopicConnection(tcpip.SyncTopic, ip)
+				}
+			}
+		} else {
+			progress.noClaimRounds = 0
+		}
 		// A connected sync peer whose 'hi' is not reaching us (half-dead link,
 		// throttling, a lost message) still answers header requests. Ask blindly
 		// for the next bucket instead of waiting for a claim that may never

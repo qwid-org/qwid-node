@@ -20,21 +20,25 @@ import (
 // operator gets one loud line with the hash to grep for on the peer.
 const (
 	// missingTxRetryInterval is the minimum time between two bt requests for
-	// the same hash. The peer either answers within a round trip or something
-	// is wrong - asking twice a second only floods both logs.
-	missingTxRetryInterval = 5 * time.Second
+	// the same hash. It must comfortably cover transferring AND processing a
+	// full backlog: with tens of thousands of transactions in flight the
+	// answers take a dozen seconds to arrive and be verified, and a 5s retry
+	// re-requested hashes whose answers were still queued — the peer then sent
+	// every batch again, the duplicate flood kept the receive loop pinned, and
+	// block application starved on CPU (the "speeds up after Ctrl+C" symptom).
+	missingTxRetryInterval = 30 * time.Second
 	// missingTxEscalateAfter is how many unanswered requests it takes before
 	// the request is broadcast to every live peer ahead and the operator is
-	// pointed at the hash. 6 tries * 5s = ~30s of silence.
-	missingTxEscalateAfter = 6
+	// pointed at the hash. 3 tries * 30s = ~1.5 min of silence.
+	missingTxEscalateAfter = 3
 	// missingTxRecycleAfter is how many unanswered requests it takes before
 	// the transaction-topic connection to the unresponsive peer is torn down
 	// and re-dialed. The bt requests demonstrably leave this node while
 	// nothing comes back, which is the signature of a half-dead link: OUR
 	// receive loop is fine, but the peer's send side points at a stale stream
 	// (typically left over from our earlier restart) that no timeout on our
-	// side can detect. 12 tries * 5s = ~1 minute of silence.
-	missingTxRecycleAfter = 12
+	// side can detect. 5 tries * 30s = ~2.5 minutes of silence.
+	missingTxRecycleAfter = 5
 	// missingTxForget drops bookkeeping for hashes not asked about for this
 	// long, so the map cannot grow without bound across a long sync.
 	missingTxForget = 10 * time.Minute

@@ -2,6 +2,7 @@ package transactionServices
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -175,64 +176,99 @@ func OnMessage(addr [4]byte, m []byte) {
 		var firstDecodeErr error
 		var firstDropReason string
 		var firstStoreErr error
+
+		// The whole per-transaction pipeline (decode, dedup, signature verify,
+		// store) runs in a small worker pool. One bx answer carries up to
+		// MaxNumberTransactionInChunk transactions and signature verification
+		// dominates the cost; processing them serially kept the receive loop
+		// pinned to one core, the inbound queue backed up faster than it
+		// drained, and block application starved for CPU. Two cores are left
+		// free for the apply path and the other services.
+		var resMutex sync.Mutex
+		var wg sync.WaitGroup
+		jobs := make(chan []byte, 2*common.MaxNumberTransactionInChunk)
+		workers := runtime.NumCPU() - 2
+		if workers < 2 {
+			workers = 2
+		}
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for tb := range jobs {
+					tx := transactionsDefinition.Transaction{}
+					t, rest, err := tx.GetFromBytes(tb)
+					if err != nil || len(rest) > 0 {
+						resMutex.Lock()
+						undecodable++
+						if firstDecodeErr == nil {
+							if err == nil {
+								err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
+							}
+							firstDecodeErr = err
+						}
+						resMutex.Unlock()
+						continue
+					}
+					if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) ||
+						transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
+						resMutex.Lock()
+						skippedExisting++
+						resMutex.Unlock()
+						continue
+					}
+					// NP-C6: verify the signature whenever the sender's public key is
+					// available (embedded in the tx, or already registered). Only skip
+					// verification when the pubkey is genuinely not yet known during
+					// sync — the signed block merkle root still enforces integrity when
+					// the referencing block is later validated.
+					sigBytes := t.GetSignature().GetBytes()
+					if len(sigBytes) == 0 {
+						resMutex.Lock()
+						droppedCount++
+						if firstDropReason == "" {
+							firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
+						}
+						resMutex.Unlock()
+						continue
+					}
+					canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
+					if !canVerify {
+						if _, perr := pubkeys.LoadPubKeyWithPrimary(t.GetSenderAddress(), sigBytes[0] == 0); perr == nil {
+							canVerify = true
+						}
+					}
+					if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+						resMutex.Lock()
+						droppedCount++
+						if firstDropReason == "" {
+							firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+						}
+						resMutex.Unlock()
+						continue
+					}
+					if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
+						resMutex.Lock()
+						storeFailures++
+						if firstStoreErr == nil {
+							firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
+						}
+						resMutex.Unlock()
+						continue
+					}
+					resMutex.Lock()
+					storedCount++
+					resMutex.Unlock()
+				}
+			}()
+		}
 		for _, v := range rawTxn {
 			for _, tb := range v {
-				tx := transactionsDefinition.Transaction{}
-				t, rest, err := tx.GetFromBytes(tb)
-				if err != nil || len(rest) > 0 {
-					undecodable++
-					if firstDecodeErr == nil {
-						if err == nil {
-							err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
-						}
-						firstDecodeErr = err
-					}
-					continue
-				}
-				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
-					skippedExisting++
-					continue
-				}
-				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
-					skippedExisting++
-					continue
-				}
-				// NP-C6: verify the signature whenever the sender's public key is
-				// available (embedded in the tx, or already registered). Only skip
-				// verification when the pubkey is genuinely not yet known during
-				// sync — the signed block merkle root still enforces integrity when
-				// the referencing block is later validated.
-				sigBytes := t.GetSignature().GetBytes()
-				if len(sigBytes) == 0 {
-					droppedCount++
-					if firstDropReason == "" {
-						firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
-					}
-					continue
-				}
-				canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
-				if !canVerify {
-					if _, perr := pubkeys.LoadPubKeyWithPrimary(t.GetSenderAddress(), sigBytes[0] == 0); perr == nil {
-						canVerify = true
-					}
-				}
-				if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
-					droppedCount++
-					if firstDropReason == "" {
-						firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
-					}
-					continue
-				}
-				if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
-					storeFailures++
-					if firstStoreErr == nil {
-						firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
-					}
-					continue
-				}
-				storedCount++
+				jobs <- tb
 			}
 		}
+		close(jobs)
+		wg.Wait()
 		summary := fmt.Sprintf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
 		if undecodable > 0 {
 			summary += fmt.Sprintf("; %d undecodable (first: %v)", undecodable, firstDecodeErr)
