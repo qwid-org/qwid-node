@@ -120,6 +120,15 @@ var (
 	WalletDBPrefix                     = [2]byte{'W', '0'}
 	PubKeyDBPrefix                     = [2]byte{'P', 'K'}
 	PubKeyMarshalDBPrefix              = [2]byte{'P', 'M'}
+	// VoidedTxDBPrefix marks a transaction that is recorded on the chain but
+	// whose value never moved. Nothing else records this: both ways it can
+	// happen — an escrow cancellation, or a multisig transaction that expired
+	// without collecting its signatures — end by removing the transaction from
+	// its pool, after which it is indistinguishable from an ordinary settled
+	// one. That is how a reversed 20M QWD transfer came to be listed as
+	// "Confirmed". The stored value is the height it was voided at followed by
+	// one reason byte.
+	VoidedTxDBPrefix = [2]byte{'C', 'X'}
 	PubKeyMerkleTrieDBPrefix           = [2]byte{'M', 'K'}
 	PubKeyRootHashMerkleTreeDBPrefix   = [2]byte{'R', 'K'}
 	PubKeyBytesMerkleTrieDBPrefix      = [2]byte{'B', 'K'}
@@ -293,4 +302,32 @@ func init() {
 			MinPeersForLargeSync = v
 		}
 	}
+}
+
+// Reasons a transaction was voided, stored as the last byte of a
+// VoidedTxDBPrefix record. The names double as the state reported to clients.
+const (
+	VoidedCancelled byte = 0 // an escrow transfer its owner cancelled before it matured
+	VoidedExpired   byte = 1 // a multisig transaction that never collected enough signatures
+)
+
+// VoidedRecord builds the stored value for a voided transaction.
+func VoidedRecord(height int64, reason byte) []byte {
+	return append(GetByteInt64(height), reason)
+}
+
+// VoidedReason reads the reason back, returning the empty string when the
+// record is missing or malformed — an unreadable marker must not be reported as
+// some arbitrary state.
+func VoidedReason(record []byte) string {
+	if len(record) == 0 {
+		return ""
+	}
+	switch record[len(record)-1] {
+	case VoidedCancelled:
+		return "cancelled"
+	case VoidedExpired:
+		return "expired"
+	}
+	return ""
 }

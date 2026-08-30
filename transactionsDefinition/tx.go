@@ -29,10 +29,16 @@ func (td TxData) GetString() string {
 	t += "Opt Data: " + hex.EncodeToString(td.OptData) + "\n"
 	// Length, not nil: a transaction with no key carries an empty slice after a
 	// JSON round-trip, which is not nil and used to reach the truncation below.
+	// Both lines describe the enclosed key, so both are omitted when there is
+	// none. Address used to print unconditionally, and for a transaction
+	// carrying no key it showed the address derived from an EMPTY key —
+	// 3345524abf6bbe1809449224b5972c41790b6cf2, the same constant on every such
+	// transaction. It names no account and reads as though the transfer touched
+	// a third party.
 	if len(td.Pubkey.ByteValue) > 0 {
 		t += "Pubkey: " + common.HexPrefix(td.Pubkey.GetHex(), 20) + "\n"
+		t += "Address derived from that key: " + td.Pubkey.Address.GetHex() + "\n"
 	}
-	t += "Address: " + td.Pubkey.Address.GetHex() + "\n"
 	if td.LockedAmount > 0 {
 		t += "Locked Amount: " + fmt.Sprintln(account.Int64toFloat64(td.LockedAmount)) + "\n"
 		t += "Release Per Block: " + fmt.Sprintln(account.Int64toFloat64(td.ReleasePerBlock)) + "\n"

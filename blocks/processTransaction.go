@@ -7,6 +7,7 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
@@ -21,6 +22,18 @@ var ZerosHash = make([]byte, common.HashLength)
 // from the pool rather than retried. Every other failure may be transient —
 // the target's block might simply not have been processed here yet.
 var ErrEscrowAlreadyMatured = errors.New("escrow transaction has already matured")
+
+// markVoided records that a transaction is on the chain but its value never
+// moved. Failure to store is logged rather than returned: this is a record kept
+// for readers, not consensus state, and refusing the block over it would be a
+// far worse outcome than a transaction displayed with the wrong label.
+func markVoided(hash []byte, height int64, reason byte) {
+	if err := database.MainDB.Put(append(common.VoidedTxDBPrefix[:], hash...),
+		common.VoidedRecord(height, reason)); err != nil {
+		logger.GetLogger().Printf("WARNING: transaction %x was voided but the marker could not be stored: %v",
+			hash[:8], err)
+	}
+}
 
 func validateEscrowCancellation(tx transactionsDefinition.Transaction, height int64) (transactionsDefinition.Transaction, error) {
 	targetHash, ok := tx.CancellationTarget()
@@ -404,6 +417,11 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 		}
 		transactionsPool.RemoveEscrowTransaction(targetHash.GetBytes())
 		transactionsPool.PoolTxEscrow.BanTransactionByHash(targetHash.GetBytes())
+		// Record that the target was annulled. Removing it from the escrow pool
+		// makes it indistinguishable from a settled transfer afterwards, so
+		// without this marker the reversed amount keeps being reported as
+		// confirmed and the account's history does not add up.
+		markVoided(targetHash.GetBytes(), height, common.VoidedCancelled)
 		return nil
 	}
 	var n int
@@ -604,6 +622,11 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 	if height-mainTx.GetHeight() > common.MaxTransactionInMultiSigPool {
 		for _, t := range txs {
 			transactionsPool.RemoveMultiSignTransaction(t.Hash.GetBytes())
+			// Mark every entry, the main transaction and its approvals alike.
+			// Once they leave the pool nothing distinguishes them from settled
+			// transactions, and an approval for a transfer that never happened
+			// has no more effect than the transfer itself.
+			markVoided(t.Hash.GetBytes(), height, common.VoidedExpired)
 		}
 		return fmt.Errorf("main transaction %x expired in multi signature pool", mainTx.Hash.GetBytes()[:8])
 	}
