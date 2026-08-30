@@ -309,6 +309,7 @@ func OnMessage(addr [4]byte, m []byte) {
 					tcpip.ReduceAndCheckIfBanIP(addr)
 					continue
 				}
+				logger.GetLogger().Printf("bz: inflated %d -> %d bytes", len(zb), len(raw))
 				OnMessage(addr, raw)
 			}
 		}
