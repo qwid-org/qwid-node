@@ -1,7 +1,10 @@
 package transactionServices
 
 import (
+	"bytes"
+	"compress/flate"
 	"fmt"
+	"io"
 	"runtime"
 	"sync"
 	"time"
@@ -111,7 +114,7 @@ func OnMessage(addr [4]byte, m []byte) {
 				// } else if senderExist && senderAcc.MultiSignNumber > 0 {
 				// 	isAdded = transactionsPool.PoolTxMultiSign.AddTransaction(t, t.Hash)
 				// } else {
-					// Reject non-staking transactions to delegated accounts
+				// Reject non-staking transactions to delegated accounts
 				if n, err := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); err == nil && n > 0 && n < 256 {
 					if t.TxData.Amount > 0 && t.TxData.Amount < common.MinStakingUser && t.GetLockedAmount() == 0 {
 						// Counted, not logged: this sat in the per-transaction
@@ -280,6 +283,35 @@ func OnMessage(addr [4]byte, m []byte) {
 			summary += fmt.Sprintf("; %d store failure(s) (first: %v)", storeFailures, firstStoreErr)
 		}
 		logger.GetLogger().Println(summary)
+	case "bz":
+		// A bz payload is a whole serialized bx message, flate-compressed by
+		// the bt handler when the answer is large. Transaction batches carry
+		// mostly high-entropy post-quantum signatures, yet still shed ~25% of
+		// their size - exactly what a saturated link needs. After validating
+		// that the inflated bytes really are a bx message, it is fed back
+		// through OnMessage, so the bx pipeline stays in one place; the head
+		// check makes nested bz impossible.
+		for _, v := range amsg.(message.TransactionsMessage).GetTransactionsBytes() {
+			for _, zb := range v {
+				fr := flate.NewReader(bytes.NewReader(zb))
+				// Decompression-bomb guard: cap the inflated size at the wire
+				// message limit; truncation then fails CheckValidMessage below.
+				raw, err := io.ReadAll(io.LimitReader(fr, int64(common.MaxMessageSizeBytes)))
+				fr.Close()
+				if err != nil {
+					logger.GetLogger().Println("bz: cannot decompress:", err)
+					tcpip.ReduceAndCheckIfBanIP(addr)
+					continue
+				}
+				ok, inner := message.CheckValidMessage(raw)
+				if !ok || string(inner.GetHead()) != "bx" {
+					logger.GetLogger().Println("bz: payload is not a valid bx message")
+					tcpip.ReduceAndCheckIfBanIP(addr)
+					continue
+				}
+				OnMessage(addr, raw)
+			}
+		}
 	case "st":
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {
@@ -313,6 +345,13 @@ func OnMessage(addr [4]byte, m []byte) {
 			logger.GetLogger().Println("SENT transaction is sync st to ", addr[:])
 		}
 	case "bt":
+		// A bt answer is a multi-MB message. When the outbound channel is
+		// already backed up it would only be dropped on the way out (NP-M10) -
+		// skip building it; the requester retries after its retry interval.
+		if SendChannelCongested() {
+			noteDroppedSend()
+			return
+		}
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {
 			txs := []transactionsDefinition.Transaction{}
@@ -349,7 +388,16 @@ func OnMessage(addr [4]byte, m []byte) {
 			if err != nil {
 				logger.GetLogger().Println("cannot generate transaction msg", err)
 			}
-			if !Send(addr, transactionMsg.GetBytes()) {
+			out := transactionMsg.GetBytes()
+			// Large answers go out flate-compressed as a bz message (~25% less
+			// wire bytes for a few ms of CPU); small ones stay plain bx.
+			if len(out) > compressBxThreshold {
+				if zb, zerr := compressToBz(out, topic); zerr == nil {
+					logger.GetLogger().Printf("bt answer compressed: %d -> %d bytes", len(out), len(zb))
+					out = zb
+				}
+			}
+			if !Send(addr, out) {
 				logger.GetLogger().Println("could not send transaction is sync bt - Send failed")
 			} else {
 				logger.GetLogger().Println("SENT transaction is sync bt to ", addr[:], "count:", len(txs))

@@ -1,9 +1,9 @@
 package message
 
 import (
+	"fmt"
 	"sync"
 	"time"
-	"fmt"
 
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"

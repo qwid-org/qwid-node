@@ -7,7 +7,9 @@ import (
 )
 
 // tx - transaction, gt - get transaction, st - sync transaction, "nn" - nonce, "bl" - block, "rb" - reject block, "hi" - GetHeight, "gh" - GetHeaders, "sh" - SendHeaders
-var validHead = []string{"nn", "bl", "rb", "tx", "gt", "st", "bt", "hi", "gh", "sh", "bx"}
+// "bz" is a flate-compressed "bx" (a large missing-transaction answer); the
+// receiver decompresses it and processes the inner message as a regular bx.
+var validHead = []string{"nn", "bl", "rb", "tx", "gt", "st", "bt", "hi", "gh", "sh", "bx", "bz"}
 
 type BaseMessage struct {
 	Head    []byte `json:"head"`

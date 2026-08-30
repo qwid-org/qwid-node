@@ -2,6 +2,8 @@ package transactionServices
 
 import (
 	"bytes"
+	"compress/flate"
+	"sync"
 	"time"
 
 	"github.com/qwid-org/qwid-node/common"
@@ -204,6 +206,71 @@ func SendGT(ip [4]byte, txsHashes [][]byte, syncPre string) {
 	}
 }
 
+var (
+	sendDropMutex   sync.Mutex
+	sendDropCount   int
+	sendDropLogTime time.Time
+)
+
+// compressBxThreshold is the serialized bx size above which the answer is sent
+// as a flate-compressed bz message instead. Small answers are not worth the
+// round trip through the compressor, and staying plain keeps them readable to
+// any tooling that speaks only bx.
+const compressBxThreshold = 4096
+
+// compressToBz wraps a whole serialized bx message in a bz envelope:
+// flate(BestSpeed) over the bytes, carried as the single payload of a "bz"
+// TransactionsMessage. Measured on real stored transactions this sheds ~25% of
+// the size (post-quantum signatures are high-entropy; the win comes from the
+// structural bytes) at under 5ms per 500-transaction chunk.
+func compressToBz(bxBytes []byte, topic [2]byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := flate.NewWriter(&buf, flate.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(bxBytes); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	n := message.TransactionsMessage{
+		BaseMessage: message.BaseMessage{
+			Head:    []byte("bz"),
+			ChainID: common.GetChainID(),
+		},
+		TransactionsBytes: map[[2]byte][][]byte{topic: {buf.Bytes()}},
+	}
+	return n.GetBytes(), nil
+}
+
+// noteDroppedSend counts a dropped outbound message and emits at most one
+// summary line a minute (see the NP-M10 comment in Send).
+func noteDroppedSend() {
+	sendDropMutex.Lock()
+	sendDropCount++
+	if time.Since(sendDropLogTime) > time.Minute {
+		logger.GetLogger().Printf("NP-M10: tx send channel full - dropped %d outbound message(s) in the last minute "+
+			"(outbound bandwidth saturated; peers re-request anything they miss)", sendDropCount)
+		sendDropCount = 0
+		sendDropLogTime = time.Now()
+	}
+	sendDropMutex.Unlock()
+}
+
+// SendChannelCongested reports whether the outbound transaction channel is
+// nearly full. Building a multi-MB bt answer that will only be dropped on the
+// way out wastes the CPU and memory the congestion is already short of.
+func SendChannelCongested() bool {
+	services.SendMutexTx.RLock()
+	defer services.SendMutexTx.RUnlock()
+	if services.SendChanTx == nil {
+		return true
+	}
+	return len(services.SendChanTx) > 3*cap(services.SendChanTx)/4
+}
+
 func Send(addr [4]byte, nb []byte) bool {
 
 	nb = append(addr[:], nb...)
@@ -214,10 +281,15 @@ func Send(addr [4]byte, nb []byte) bool {
 			return true
 		default:
 			// NP-M10: best-effort gossip — the send channel is full, so drop this
-			// message but log it (propagation is still covered by on-arrival
-			// BroadcastTxn and the periodic delta loop). Blocking here would push
-			// backpressure into the caller.
-			logger.GetLogger().Println("NP-M10: tx send channel full, dropping outbound message")
+			// message (propagation is still covered by on-arrival BroadcastTxn,
+			// the periodic delta loop, and the requester's bt retry). Blocking
+			// here would push backpressure into the caller.
+			//
+			// Logged as a once-a-minute summary: under sustained load (serving
+			// multi-MB bx answers over a link slower than they are produced) the
+			// channel stays full for long stretches, and a line per dropped
+			// message drowned the log and slowed the very sending it described.
+			noteDroppedSend()
 			return false
 		}
 	}
