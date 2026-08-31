@@ -11,6 +11,7 @@ import (
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/services"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
 	"github.com/qwid-org/qwid-node/tcpip"
 )
 
@@ -319,6 +320,16 @@ func checkSyncStall(now time.Time) {
 		return
 	}
 	syncProcessMutex.Unlock()
+
+	// Missing-transaction answers actively arriving are progress even while
+	// the height stands still: a full-block backlog of tens of thousands of
+	// transactions legitimately takes minutes to stream in at 500 per answer.
+	// Rewinding then is actively harmful - every rewind ADDS blocks to the
+	// missing set, so the fetch never converges.
+	if transactionServices.TimeSinceLastBxArrival() < SyncStallTimeout {
+		progress.since = now
+		return
+	}
 
 	if canRewind, live := stallRewindUseful(h); !canRewind {
 		// syncPeers counts real peers only, so the log separates "nobody is
