@@ -75,6 +75,11 @@ var (
 	// small network is never asked for confirmations it cannot have.
 	MinPeersForLargeSync int = 3
 
+	// CompressBx enables flate compression of large bx sync answers (sent as
+	// bz messages). Off by default; set COMPRESS_BX=true in ~/.qwid/.env to
+	// enable on the SERVING node. Receivers always understand bz.
+	CompressBx = false
+
 	// Per-topic inbound message-size caps (bytes) — DoS hardening (sub-project A).
 	// Replace the single 151MB MaxMessageSizeBytes ENFORCEMENT (the wire marker
 	// MessageInitialization/MaxMessageSizeBytes are unchanged). Sized generously
@@ -292,6 +297,10 @@ func init() {
 		logger.GetLogger().Panicln("Warning no declaration of HEIGHT_OF_NETWORK")
 	} else {
 		CurrentHeightOfNetwork = int64(ch)
+	}
+	// Optional: compress large bx sync answers (bz messages). Default OFF.
+	if v := os.Getenv("COMPRESS_BX"); v == "true" || v == "1" {
+		CompressBx = true
 	}
 	// Optional operator override of the large-sync confirmation quorum.
 	if raw := os.Getenv("MIN_PEERS_FOR_LARGE_SYNC"); raw != "" {

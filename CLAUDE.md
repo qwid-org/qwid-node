@@ -159,6 +159,9 @@ HEIGHT_OF_NETWORK=<current_height>  # Sync target while the local chain is BELOW
                                     # throttle in shouldSyncToHeight, so a node with a single
                                     # peer syncs toward it at full speed (blocks are still
                                     # fully verified).
+COMPRESS_BX=true             # Optional, default OFF. Enables flate compression of large bx sync answers (sent as
+                             # bz messages) on the SERVING node; receivers always understand bz. ~25% fewer wire
+                             # bytes for a few ms CPU per answer.
 MIN_PEERS_FOR_LARGE_SYNC=3   # Optional, integer >= 1, default 3. How many live peers must confirm a large height
                              # claim before syncing straight to it (claims within HEIGHT_OF_NETWORK skip the check).
                              # The effective quorum is capped at the number of actually connected sync peers, so a

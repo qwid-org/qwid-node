@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/qwid-org/qwid-node/common"
@@ -243,6 +244,25 @@ func compressToBz(bxBytes []byte, topic [2]byte) ([]byte, error) {
 		TransactionsBytes: map[[2]byte][][]byte{topic: {buf.Bytes()}},
 	}
 	return n.GetBytes(), nil
+}
+
+var lastBxArrivalNs atomic.Int64
+
+// noteBxArrival records that a bx answer just delivered new transactions.
+func noteBxArrival() { lastBxArrivalNs.Store(time.Now().UnixNano()) }
+
+// TimeSinceLastBxArrival reports how long ago the last bx answer delivered new
+// transactions. The sync stall watchdog uses it to tell "stuck" from "the
+// missing-transaction backlog is actively streaming in": rewinding while data
+// flows only ENLARGES the missing set and turns a big fetch into a death
+// spiral (each 45s rewind added blocks to re-fetch faster than 500-tx answers
+// arrived).
+func TimeSinceLastBxArrival() time.Duration {
+	ns := lastBxArrivalNs.Load()
+	if ns == 0 {
+		return time.Hour
+	}
+	return time.Since(time.Unix(0, ns))
 }
 
 // noteDroppedSend counts a dropped outbound message and emits at most one

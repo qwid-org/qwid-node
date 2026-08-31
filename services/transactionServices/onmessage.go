@@ -271,6 +271,9 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 		close(jobs)
 		wg.Wait()
+		if storedCount > 0 {
+			noteBxArrival()
+		}
 		summary := fmt.Sprintf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
 		if undecodable > 0 {
 			summary += fmt.Sprintf("; %d undecodable (first: %v)", undecodable, firstDecodeErr)
@@ -389,9 +392,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				logger.GetLogger().Println("cannot generate transaction msg", err)
 			}
 			out := transactionMsg.GetBytes()
-			// Large answers go out flate-compressed as a bz message (~25% less
-			// wire bytes for a few ms of CPU); small ones stay plain bx.
-			if len(out) > compressBxThreshold {
+			// Large answers CAN go out flate-compressed as a bz message (~25%
+			// less wire bytes); disabled by default, enabled with
+			// COMPRESS_BX=true on the serving node. Receivers always accept bz.
+			if common.CompressBx && len(out) > compressBxThreshold {
 				if zb, zerr := compressToBz(out, topic); zerr == nil {
 					logger.GetLogger().Printf("bt answer compressed: %d -> %d bytes", len(out), len(zb))
 					out = zb
