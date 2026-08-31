@@ -400,42 +400,17 @@ func checkSyncStall(now time.Time) {
 		return
 	}
 
-	// Rewind under the same lock the "sh" handler holds, so we never pull blocks
-	// out from under a batch that is mid-apply. A held lock also means a batch is
-	// actively running, which is not a stall — skip this round.
-	if !syncProcessMutex.TryLock() {
-		return
-	}
-	defer syncProcessMutex.Unlock()
-
-	// syncProcessMutex alone is not enough: the nonce service applies live blocks
-	// under common.BlockMutex without ever taking it. Rewinding the account state
-	// from under such an application makes it store the rewound state under the
-	// block's own height — balances then permanently disagree with the block fee
-	// ledger and every following block is rejected on the supply invariant. A
-	// held block lock also means a block is being applied, i.e. not a stall.
-	//
-	// Give it a moment rather than one TryLock: this is the only mechanism that
-	// unsticks a stalled sync, so it must not be starved by a lock that happens
-	// to be busy every time it looks. A skipped round is logged — silently doing
-	// nothing here is indistinguishable from a node that has simply given up.
-	if !lockBlocksForRewind() {
-		logger.GetLogger().Printf("sync stalled at height %d for %s, but a block is being applied - "+
-			"postponing the rewind to the next round", h, now.Sub(progress.since).Truncate(time.Second))
-		return
-	}
-	defer common.BlockMutex.Unlock()
-
-	target := h - SyncStallRewind
-	if target < 0 {
-		target = 0
-	}
-	logger.GetLogger().Printf("sync stalled at height %d for %s - rewinding to %d to re-request the batch",
-		h, now.Sub(progress.since).Truncate(time.Second), target)
-	services.ResetAccountsAndBlocksSyncLocked(target)
-
-	// Push the request out ourselves rather than waiting for a peer's next 'hi'.
-	// The rewind alone changes nothing if those messages are not reaching us.
+	// Deliberately NO state rewind here. The old recovery rewound 2 blocks to
+	// "make the next batch overlap", but a stalled-on-data node's state at h is
+	// perfectly valid — the peer just needs to resend from h+1, and the request
+	// below asks for exactly that (header requests are anchored at our own
+	// height). The rewind only ever hurt: account snapshots exist once per
+	// 20-block batch, so a 2-block rewind landed on the nearest snapshot up to
+	// 20 blocks back and forced a whole batch to be re-downloaded and
+	// re-applied per stall round. A genuine fork at our tip is detected and
+	// reset by the sh handler's own fork paths when the batch arrives.
+	logger.GetLogger().Printf("sync stalled at height %d for %s - re-requesting the batch (no rewind)",
+		h, now.Sub(progress.since).Truncate(time.Second))
 	newHeight := common.GetHeight()
 	sent, live := requestHeadersFromPeersAhead(newHeight)
 	logger.GetLogger().Printf("sync stall recovery: height=%d target=%d syncing=%v livePeerClaims=%d headerRequestsSent=%d",
@@ -448,9 +423,8 @@ func checkSyncStall(now time.Time) {
 			"the peers we can see are not ahead of us", live, newHeight)
 	}
 
-	// Restart the clock even if the rewind landed somewhere else than asked, so
-	// a chain of rewinds is paced by SyncStallTimeout rather than firing every
-	// second.
+	// Restart the clock so recovery rounds are paced by SyncStallTimeout
+	// rather than firing every second.
 	progress.height = common.GetHeight()
 	progress.since = now
 }
