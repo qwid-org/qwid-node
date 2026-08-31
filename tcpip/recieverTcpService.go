@@ -305,8 +305,16 @@ func Send(conn net.Conn, message []byte) error {
 	message = append(common.MessageInitialization[:], message...)
 	message = append(message, []byte("<-END->")...)
 
-	// Set write deadline to 2 seconds
-	conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+	// The write deadline must scale with the payload. A flat 4s cut off
+	// multi-MB sync batches (a full-block "sh" runs to 2-4MB) on a saturated
+	// link MID-WRITE — and on an AEAD-encrypted stream a partial frame is not a
+	// retryable hiccup but permanent corruption: the receiver fails decryption,
+	// reads <-ERR->, and the connection dies. Under load that repeated every
+	// few seconds and sync stopped entirely. 4s base keeps small messages
+	// snappy; +1s per 256KB gives a 3MB batch ~16s, i.e. ~1.5Mbit/s minimum
+	// acceptable throughput.
+	deadline := 4*time.Second + time.Duration(len(message)/(256*1024))*time.Second
+	conn.SetWriteDeadline(time.Now().Add(deadline))
 
 	_, err := conn.Write(message)
 	if err != nil {
