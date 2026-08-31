@@ -47,6 +47,19 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 	opts.SetWriteBufferSize(64 * 1024 * 1024) // 64MB
 	opts.SetMaxWriteBufferNumber(3)
 
+	// Bloom filters + a block cache. Without a filter policy every NEGATIVE
+	// lookup (IsKey/Get of an absent key) walks the index of every SST file;
+	// the sync census asks "is this transaction in the DB" for THOUSANDS of
+	// absent hashes per block, and on a grown database that took ~10ms per
+	// lookup - blocks with many missing transactions needed 30s to census
+	// while blocks with few were instant. A 10-bit bloom answers "definitely
+	// not here" from memory. Filters apply to newly written SST files; old
+	// files gain them as compaction rewrites them.
+	bbto := gorocksdb.NewDefaultBlockBasedTableOptions()
+	bbto.SetFilterPolicy(gorocksdb.NewBloomFilterFull(10))
+	bbto.SetBlockCache(gorocksdb.NewLRUCache(256 * 1024 * 1024))
+	opts.SetBlockBasedTableFactory(bbto)
+
 	db.db, err = gorocksdb.OpenDb(opts, dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database at %s (another node instance may be running on this data dir, or it is corrupt): %w", dbPath, err)
