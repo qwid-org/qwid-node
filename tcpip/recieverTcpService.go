@@ -283,7 +283,20 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		return nil, fmt.Errorf("inbound handshake: encryptedConn wrap failed: %w", err)
 	}
 
-	publishAcceptedConn(topic, ip, ec)
+	// Key the connection by the authenticated peer's HANDLE, not the transport
+	// IP: two nodes behind one NAT arrive from the same IP and used to evict
+	// each other's accepted stream on the shared (topic, ip) slot. The handle
+	// keeps them apart everywhere downstream (maps, claims, counters). Our own
+	// self-connection keeps the transport key (see connKeyFor).
+	key := connKeyFor(peerID, ip)
+	publishAcceptedConn(topic, key, ec)
+	// Read the inbound stream too. A peer that cannot be dialed back (NAT)
+	// sends on the very link it dialed to us; without a reader here it was
+	// mute. Self-connections keep the historical single-reader model (the dial
+	// end reads), so no reader is spawned for them (key == transport IP then).
+	if IsPeerHandle(key) {
+		go acceptedReceiveLoop(topic, key, ip, ec)
+	}
 	return tcpConn, nil
 }
 
@@ -338,6 +351,7 @@ func Receive(topic [2]byte, conn net.Conn) []byte {
 
 // ValidRegisterPeer Confirm that ip is valid node
 func ValidRegisterPeer(ip [4]byte) {
+	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	PeersMutex.Lock()
 	defer PeersMutex.Unlock()
 	if n, ok := validPeersConnected[ip]; ok {
@@ -352,6 +366,7 @@ func ValidRegisterPeer(ip [4]byte) {
 
 // NodeRegisterPeer Confirm that ip is valid node IP
 func NodeRegisterPeer(ip [4]byte) {
+	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	PeersMutex.Lock()
 	defer PeersMutex.Unlock()
 	if _, ok := nodePeersConnected[ip]; ok {
@@ -363,6 +378,7 @@ func NodeRegisterPeer(ip [4]byte) {
 
 // ReduceTrustRegisterPeer limit connections attempts needs to be peer lock
 func ReduceTrustRegisterPeer(ip [4]byte) {
+	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	// || bytes.Equal(ip[:2], InternalIP[:2])
 	if bytes.Equal(ip[:], MyIP[:]) || bytes.Equal(ip[:], []byte{0, 0, 0, 0}) {
 		return
@@ -477,12 +493,29 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 		}
 	}
 
-	// Register the accepted connection for sending
+	// Register the accepted connection for sending. Trust counters are per
+	// transport source (canonicalIP), while the map key may be a peer handle.
 	tcpConnections[topic][ip] = tcpConn
 	acceptedConnections[topic][ip] = tcpConn
 	peersConnected[topicipBytes] = topic
-	validPeersConnected[ip] = common.ConnectionMaxTries
-	nodePeersConnected[ip] = common.ConnectionMaxTries
+	trustIP := canonicalIP(ip)
+	validPeersConnected[trustIP] = common.ConnectionMaxTries
+	nodePeersConnected[trustIP] = common.ConnectionMaxTries
+}
+
+// IsTransportConnected reports whether any connection on topic terminates at
+// the given transport IP. Map keys may be virtual peer handles, so a plain map
+// lookup by IP misses them; peer discovery uses this to decide whether a
+// learned address still needs dialing.
+func IsTransportConnected(topic [2]byte, ip [4]byte) bool {
+	PeersMutex.RLock()
+	defer PeersMutex.RUnlock()
+	for key := range tcpConnections[topic] {
+		if key == ip || canonicalIP(key) == ip {
+			return true
+		}
+	}
+	return false
 }
 
 func GetPeersConnected(topic [2]byte) map[[6]byte][2]byte {
@@ -506,6 +539,15 @@ func GetIPsConnected() [][]byte {
 		uniqueIPs := make(map[[4]byte]struct{})
 		for _, connections := range tcpConnections {
 			for ip := range connections {
+				// Map keys may be virtual peer handles; peer discovery must
+				// advertise DIALABLE transport addresses.
+				if IsPeerHandle(ip) {
+					real, ok := RealIPForHandle(ip)
+					if !ok {
+						continue
+					}
+					ip = real
+				}
 				// Never advertise our own addresses. Loopback in particular is
 				// meaningless to anyone else: a peer that learns 127.0.0.1 from us
 				// dials its OWN listener, ends up exchanging 'hi' with itself and

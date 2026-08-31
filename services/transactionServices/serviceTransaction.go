@@ -297,6 +297,7 @@ func Send(addr [4]byte, nb []byte) bool {
 }
 
 func startPublishingTransactionMsg() {
+	tcpip.RegisterTopicHandler(tcpip.TransactionTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.TransactionTopic)
 	go tcpip.LoopSend(services.SendChanTx, tcpip.TransactionTopic)
 }

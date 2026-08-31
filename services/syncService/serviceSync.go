@@ -436,6 +436,7 @@ func sendSyncMsgInLoop() {
 
 func startPublishingSyncMsg() {
 
+	tcpip.RegisterTopicHandler(tcpip.SyncTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.SyncTopic)
 	go tcpip.LoopSend(services.SendChanSync, tcpip.SyncTopic)
 }

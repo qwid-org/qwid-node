@@ -357,8 +357,10 @@ func sendNonceMsgInLoop() {
 }
 
 func startPublishingNonceMsg() {
+	tcpip.RegisterTopicHandler(tcpip.NonceTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.NonceTopic)
 	go tcpip.LoopSend(services.SendChanNonce, tcpip.NonceTopic)
+	tcpip.RegisterTopicHandler(tcpip.SelfNonceTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.SelfNonceTopic)
 	go tcpip.LoopSend(services.SendChanSelfNonce, tcpip.SelfNonceTopic)
 }

@@ -218,6 +218,20 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 }
 
 func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
+	// Reconnect notifications may carry a virtual peer handle (the key its dead
+	// connection was registered under); dialing needs the transport address.
+	if IsPeerHandle(ip) {
+		real, ok := RealIPForHandle(ip)
+		if !ok {
+			logger.GetLogger().Printf("no transport address known for peer handle %v - cannot dial", ip)
+			select {
+			case receiveChan <- []byte("EXIT"):
+			default:
+			}
+			return
+		}
+		ip = real
+	}
 	if !beginDial(topic, ip) {
 		logger.GetLogger().Printf("connection already active or pending for topic %c%c peer %v", topic[0], topic[1], ip)
 		select {
@@ -304,6 +318,10 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		return
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
+	// Register and tag this connection under the authenticated peer's handle,
+	// so two nodes sharing one transport IP stay two distinct peers. Dialing,
+	// trust, bans and rate limits keep using the transport ip.
+	key := connKeyFor(peerID, ip)
 
 	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer.
 	// tcpConn stays the raw *net.TCPConn (used for dial/re-dial and Close);
@@ -336,14 +354,14 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	// If an accepted connection already exists, we keep it for sending and
 	// only use this outbound connection for the receive loop.
 	outboundStoredInMap := false
-	if existingConn, exists := tcpConnections[topic][ip]; exists {
+	if existingConn, exists := tcpConnections[topic][key]; exists {
 		_ = existingConn
 	} else {
-		tcpConnections[topic][ip] = conn
+		tcpConnections[topic][key] = conn
 		outboundStoredInMap = true
 	}
 	var topicipBytes [6]byte
-	copy(topicipBytes[:], append(topic[:], ip[:]...))
+	copy(topicipBytes[:], append(topic[:], key[:]...))
 	peersConnected[topicipBytes] = topic
 	validPeersConnected[ip] = common.ConnectionMaxTries
 	nodePeersConnected[ip] = common.ConnectionMaxTries
@@ -419,7 +437,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					if conn != nil {
 						conn.Close()
 					}
-					deletedIP := closeAndRemovePeerTopic(topic, ip)
+					deletedIP := closeAndRemovePeerTopic(topic, key)
 					receiveChan <- []byte("EXIT")
 					for _, d := range deletedIP {
 						select {
@@ -461,7 +479,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					// receive loop resumes reading from it — otherwise an
 					// unauthenticated stream would be trusted just like the
 					// original, already-handshaken connection.
-					if _, sKeys, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
+					if rePeerID, sKeys, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
 						logger.GetLogger().Println("re-dial handshake failed with", ipport, ":", hsErr)
 						tcpConn.Close()
 						if isHandshakeProtocolViolation(hsErr) {
@@ -491,14 +509,27 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 							return
 						}
 						conn = newConn
+						newKey := connKeyFor(rePeerID, ip)
 						if outboundStoredInMap {
 							PeersMutex.Lock()
 							if _, ok := tcpConnections[topic]; !ok {
 								tcpConnections[topic] = make(map[[4]byte]net.Conn)
 							}
-							tcpConnections[topic][ip] = conn
+							if newKey != key {
+								// A different node answered this transport address
+								// (NAT remap); move the registration to its identity.
+								delete(tcpConnections[topic], key)
+								var oldTopicIP [6]byte
+								copy(oldTopicIP[:], append(topic[:], key[:]...))
+								delete(peersConnected, oldTopicIP)
+							}
+							tcpConnections[topic][newKey] = conn
+							var newTopicIP [6]byte
+							copy(newTopicIP[:], append(topic[:], newKey[:]...))
+							peersConnected[newTopicIP] = topic
 							PeersMutex.Unlock()
 						}
+						key = newKey
 					}
 					reconnectionTries = 0
 					lastData = time.Now() // fresh stream - restart the quiet clock
@@ -587,7 +618,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 							}
 							continue // drop this message; do not dispatch
 						}
-						receiveChan <- append(ip[:], r[4:]...)
+						receiveChan <- append(key[:], r[4:]...)
 					} else {
 						logger.GetLogger().Println("wrong MessageInitialization", r[:4], "should be", common.MessageInitialization[:])
 						PeersMutex.Lock()

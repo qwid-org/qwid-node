@@ -47,6 +47,7 @@ func isWhitelisted(ip [4]byte) bool {
 }
 
 func IsIPBanned(ip [4]byte) bool {
+	ip = canonicalIP(ip) // bans are per transport source, tags may be handles
 	bannedIPMutex.Lock()
 	defer bannedIPMutex.Unlock()
 	if blackListIPs[ip] {
@@ -65,6 +66,7 @@ func IsIPBanned(ip [4]byte) bool {
 }
 
 func BanIP(ip [4]byte) {
+	ip = canonicalIP(ip) // bans are per transport source, tags may be handles
 	// internal IP should not be banned || bytes.Equal(ip[:2], InternalIP[:2])
 	if isWhitelisted(ip) {
 		return
@@ -90,28 +92,21 @@ func BanIP(ip [4]byte) {
 		if _, ok := nodePeersConnected[ip]; ok {
 			delete(nodePeersConnected, ip)
 		}
-		tcpConns := tcpConnections[NonceTopic]
-		tcpConn, ok := tcpConns[ip]
-		if ok {
-			CloseAndRemoveConnection(tcpConn)
-			return
-		}
-		tcpConns = tcpConnections[TransactionTopic]
-		tcpConn, ok = tcpConns[ip]
-		if ok {
-			CloseAndRemoveConnection(tcpConn)
-			return
-		}
-		tcpConns = tcpConnections[SyncTopic]
-		tcpConn, ok = tcpConns[ip]
-		if ok {
-			CloseAndRemoveConnection(tcpConn)
-			return
+		// Connection maps are keyed by peer handle where one exists, so match
+		// every key whose transport address is the banned IP - a ban is per
+		// source and must sever ALL nodes arriving from it.
+		for _, topic := range [][2]byte{NonceTopic, TransactionTopic, SyncTopic} {
+			for key, tcpConn := range tcpConnections[topic] {
+				if canonicalIP(key) == ip {
+					CloseAndRemoveConnection(tcpConn)
+				}
+			}
 		}
 	}
 }
 
 func ReduceAndCheckIfBanIP(ip [4]byte) {
+	ip = canonicalIP(ip) // trust/bans are per transport source, tags may be handles
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	PeersMutex.Lock()
@@ -322,6 +317,7 @@ func AllowMessageFromIP(ip [4]byte) bool {
 // in its own class) while guaranteeing that best-effort traffic cannot starve
 // the path sync actually depends on.
 func AllowMessageFromIPForHead(ip [4]byte, head [2]byte) bool {
+	ip = canonicalIP(ip) // rate limits are per transport source, tags may be handles
 	if isWhitelisted(ip) {
 		return true
 	}
