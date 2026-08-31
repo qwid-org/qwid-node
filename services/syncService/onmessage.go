@@ -59,8 +59,15 @@ var (
 	// MaxHeightJumpWithoutConsensus - if a peer claims height more than this ahead,
 	// require multiple peers to confirm before syncing
 	MaxHeightJumpWithoutConsensus int64 = 4
-	// ClaimExpiryDuration - how long before a height claim expires
-	ClaimExpiryDuration = 30 * time.Second
+	// ClaimExpiryDuration - how long before a height claim expires. Must
+	// comfortably outlive one sync batch (observed ~70s for 20 full blocks):
+	// while the batch handler runs, incoming 'hi' queue behind it unprocessed,
+	// and with a shorter expiry every claim died mid-batch — the stall watchdog
+	// then saw "no live peer" and recycled a healthy connection. Claims refresh
+	// about every second in normal operation, so the only cost of a longer
+	// expiry is how late a DEAD peer's claim stops counting; the quiet-death
+	// watchdog reacts to a dead peer well before that matters.
+	ClaimExpiryDuration = 90 * time.Second
 	// SyncStallTimeout - how long the local height may stay put while syncing
 	// before the sync is treated as stalled. A dropped connection can lose either
 	// our "bt" request for a block's transactions or the peer's "bx" answer, and

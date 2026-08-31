@@ -308,6 +308,18 @@ func checkSyncStall(now time.Time) {
 		return
 	}
 
+	// A held syncProcessMutex means a batch is actively being verified or its
+	// missing transactions are being fetched — the very work a stall watchdog
+	// exists to restart. During that work the 'hi' stream queues behind the
+	// same handler, so claims EXPECTEDLY go stale; acting on that (recycling
+	// the sync connection, blind requests) tore down a healthy link mid-batch
+	// and turned a slow catch-up into connection churn. Busy is not stalled.
+	if !syncProcessMutex.TryLock() {
+		progress.since = now
+		return
+	}
+	syncProcessMutex.Unlock()
+
 	if canRewind, live := stallRewindUseful(h); !canRewind {
 		// syncPeers counts real peers only, so the log separates "nobody is
 		// connected on the sync topic" from "connected, but their 'hi' is not
