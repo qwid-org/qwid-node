@@ -174,14 +174,17 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 					if IsSelfIP(k) {
 						continue
 					}
-					if _, ok := validPeersConnected[k]; ok {
+					// Trust counters are keyed by transport IP; the map key may
+					// be a peer handle - translate before the trust lookup, or
+					// every handle-keyed peer silently drops out of broadcasts.
+					if _, ok := validPeersConnected[canonicalIP(k)]; ok {
 						targets = append(targets, connEntry{k, tcpConn0})
 					} else {
 						logger.GetLogger().Println("when send to all, ignore connection", k)
 					}
 				}
 			} else {
-				if _, ok2 := validPeersConnected[ipr]; !ok2 {
+				if _, ok2 := validPeersConnected[canonicalIP(ipr)]; !ok2 {
 					logger.GetLogger().Println("ignore when send to ", ipr)
 				} else if tcpConn, ok := tcpConnections[topic][ipr]; ok {
 					targets = append(targets, connEntry{ipr, tcpConn})
