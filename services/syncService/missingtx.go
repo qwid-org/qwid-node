@@ -92,6 +92,17 @@ func dueMissingTxRequests(hashes [][]byte, now time.Time) (due [][]byte, escalat
 	return due, escalate, recycle
 }
 
+// outstandingMissingTxCount reports how many transaction hashes are currently
+// being chased. Non-zero means a batch is waiting on its transactions - the
+// moment when redundant header re-requests hurt the most, because every one of
+// them makes the peer resend a multi-MB sh batch over the same link the bx
+// answers need.
+func outstandingMissingTxCount() int {
+	missingTxMutex.Lock()
+	defer missingTxMutex.Unlock()
+	return len(missingTx)
+}
+
 // clearMissingTx drops all bookkeeping once a sync round finds nothing
 // missing, so a later re-miss starts a fresh escalation cycle.
 func clearMissingTx() {

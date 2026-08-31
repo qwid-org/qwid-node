@@ -575,6 +575,17 @@ func OnMessage(addr [4]byte, m []byte) {
 			common.IsSyncing.Store(true)
 		}
 
+		// While a batch is being verified or applied (syncProcessMutex held),
+		// a 'hi' contributes exactly one thing: the claim recorded above.
+		// Reacting further — chain comparison, header requests — would make the
+		// peer resend multi-MB sh batches into the same link the in-flight
+		// batch's transactions are arriving on, and pile more sh handlers onto
+		// the mutex queue. Requests resume the moment the batch is done.
+		if !syncProcessMutex.TryLock() {
+			return
+		}
+		syncProcessMutex.Unlock()
+
 		if lastOtherHeight == h {
 			services.AdjustShiftInPastInReset(lastOtherHeight)
 			lastBlockHashBytes, err := blocks.LoadHashOfBlock(h)
