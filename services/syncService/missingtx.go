@@ -36,9 +36,10 @@ const (
 	// and re-dialed. The bt requests demonstrably leave this node while
 	// nothing comes back, which is the signature of a half-dead link: OUR
 	// receive loop is fine, but the peer's send side points at a stale stream
-	// (typically left over from our earlier restart) that no timeout on our
-	// side can detect. 5 tries * 30s = ~2.5 minutes of silence.
-	missingTxRecycleAfter = 5
+	// (typically left over from our earlier restart). 2 tries * 30s = ~1 minute
+	// of silence - a fresh dial replaces the peer's stale stream, and a healthy
+	// fetch never goes a full minute without a single bx.
+	missingTxRecycleAfter = 2
 	// missingTxForget drops bookkeeping for hashes not asked about for this
 	// long, so the map cannot grow without bound across a long sync.
 	missingTxForget = 10 * time.Minute
@@ -123,8 +124,34 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 	if len(due) == 0 {
 		return 0
 	}
-	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %v, first: %x",
-		len(due), addr, due[0][:8])
+	// The batch server (known from the sync topic) does not necessarily hold a
+	// transaction-topic link with us - and a targeted send without a connection
+	// is silently dropped in LoopSend, so the request would evaporate and the
+	// fetch would starve with no error anywhere. Transactions are served by
+	// hash, so ANY peer with a transaction-topic connection can answer; fall
+	// back to one when the server has none.
+	if !tcpip.HasConnection(tcpip.TransactionTopic, addr) {
+		fallback := addr
+		for topicip := range tcpip.GetPeersConnected(tcpip.TransactionTopic) {
+			var ip [4]byte
+			copy(ip[:], topicip[2:])
+			if tcpip.IsSelfIP(ip) {
+				continue
+			}
+			fallback = ip
+			break
+		}
+		if fallback == addr {
+			logger.GetLogger().Printf("cannot request %d missing transaction(s): batch server %v has no "+
+				"transaction-topic link and no other transaction-topic peer is connected", len(due), addr)
+			return 0
+		}
+		logger.GetLogger().Printf("batch server %s has no transaction-topic link - requesting %d missing transaction(s) from %s instead",
+			tcpip.PeerLabel(addr), len(due), tcpip.PeerLabel(fallback))
+		addr = fallback
+	}
+	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %s, first: %x",
+		len(due), tcpip.PeerLabel(addr), due[0][:8])
 
 	// Pacing: 5 chunks/s of MaxNumberTransactionInChunk txs each (~2500 tx/s).
 	// The ceiling is the peer's per-IP sync-class message budget
@@ -156,9 +183,9 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 		// hashes cross the escalation threshold in the same round, and writing
 		// a log line for each (to stdout AND the log file) took longer than
 		// the requests themselves and drowned everything else in the log.
-		logger.GetLogger().Printf("%d missing tx(s) still unanswered after %d+ requests to %v - "+
+		logger.GetLogger().Printf("%d missing tx(s) still unanswered after %d+ requests to %s - "+
 			"asking %d other peer(s); first: %x (grep the peer's log for 'bt'/'bx' lines)",
-			len(escalate), missingTxEscalateAfter, addr, len(others), escalate[0][:8])
+			len(escalate), missingTxEscalateAfter, tcpip.PeerLabel(addr), len(others), escalate[0][:8])
 		for _, t := range others {
 			for i := 0; i < len(escalate); i += maxChunk {
 				end := i + maxChunk
@@ -176,7 +203,7 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 	// peer's send side holds a stale stream from before our restart - and only
 	// a fresh dial can replace it.
 	if recycle {
-		logger.GetLogger().Printf("no bx answers from %v for ~1 minute - recycling the transaction-topic connection", addr)
+		logger.GetLogger().Printf("no bx answers from %s for ~1 minute - recycling the transaction-topic connection", tcpip.PeerLabel(addr))
 		tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
 	}
 	return len(due)

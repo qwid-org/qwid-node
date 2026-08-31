@@ -263,7 +263,15 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 
 	// TCP-specific options must be set on the raw *net.TCPConn before it is
 	// wrapped in encryptedConn (net.Conn has no SetKeepAlive).
+	//
+	// The keepalive PERIOD matters as much as the flag: without it the OS
+	// default applies (2 hours on Linux), so when the remote peer restarted,
+	// this accepted socket stayed "alive" for hours while every write to it -
+	// bx answers above all - vanished into the kernel buffer with no error.
+	// The peer meanwhile starved on missing transactions with no clue why.
+	// 30s matches what the outbound dial path sets.
 	tcpConn.SetKeepAlive(true)
+	tcpConn.SetKeepAlivePeriod(30 * time.Second)
 
 	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer
 	// using the keys the handshake just derived. Use sKeys directly — routing
@@ -509,6 +517,17 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 	trustIP := canonicalIP(ip)
 	validPeersConnected[trustIP] = common.ConnectionMaxTries
 	nodePeersConnected[trustIP] = common.ConnectionMaxTries
+}
+
+// HasConnection reports whether a connection exists for exactly this
+// (topic, key) - the lookup LoopSend's targeted send performs. A targeted
+// message to a key with no connection is silently dropped there, so callers
+// that must not lose a request check here first and pick another target.
+func HasConnection(topic [2]byte, key [4]byte) bool {
+	PeersMutex.RLock()
+	defer PeersMutex.RUnlock()
+	_, ok := tcpConnections[topic][key]
+	return ok
 }
 
 // IsTransportConnected reports whether any connection on topic terminates at

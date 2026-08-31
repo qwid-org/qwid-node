@@ -2,6 +2,7 @@ package tcpip
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"sync"
 
@@ -26,9 +27,9 @@ import (
 // need it: dialing, banning, and per-source rate limiting.
 var (
 	handleMutex    sync.Mutex
-	handleByNodeID = map[[common.AddressLength]byte][4]byte{}
-	realIPByHandle = map[[4]byte][4]byte{}
-	nodeIDByHandle = map[[4]byte]common.Address{}
+	handleByNodeID        = map[[common.AddressLength]byte][4]byte{}
+	realIPByHandle        = map[[4]byte][4]byte{}
+	nodeIDByHandle        = map[[4]byte]common.Address{}
 	nextHandle     uint16 = 1
 )
 
@@ -101,6 +102,26 @@ func connKeyFor(peerID common.Address, realIP [4]byte) [4]byte {
 		return realIP
 	}
 	return HandleForPeer(peerID, realIP)
+}
+
+// PeerLabel renders a peer address for logs. A virtual handle becomes
+// "peer-N(nodeIDprefix@transportIP)" so an operator never has to guess which
+// node "[10 254 0 1]" is — handle numbering is LOCAL to each node (allocated
+// in first-seen order), so the same virtual address means different peers in
+// different nodes' logs. A plain transport IP renders as before.
+func PeerLabel(ip [4]byte) string {
+	if !IsPeerHandle(ip) {
+		return fmt.Sprintf("%v", ip)
+	}
+	handleMutex.Lock()
+	real := realIPByHandle[ip]
+	id, okID := nodeIDByHandle[ip]
+	handleMutex.Unlock()
+	n := int(ip[2])<<8 | int(ip[3])
+	if !okID {
+		return fmt.Sprintf("peer-%d(?)", n)
+	}
+	return fmt.Sprintf("peer-%d(%x@%d.%d.%d.%d)", n, id.GetBytes()[:4], real[0], real[1], real[2], real[3])
 }
 
 // Topic handlers: the services' OnMessage entry points, registered so the

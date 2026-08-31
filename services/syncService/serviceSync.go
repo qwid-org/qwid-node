@@ -368,7 +368,7 @@ func checkSyncStall(now time.Time) {
 					if tcpip.IsSelfIP(ip) {
 						continue
 					}
-					logger.GetLogger().Printf("no 'hi' from %v for two stall rounds - recycling the sync-topic connection", ip)
+					logger.GetLogger().Printf("no 'hi' from %s for two stall rounds - recycling the sync-topic connection", tcpip.PeerLabel(ip))
 					tcpip.RecycleTopicConnection(tcpip.SyncTopic, ip)
 				}
 			}

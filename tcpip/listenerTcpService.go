@@ -63,7 +63,7 @@ const quietConnTimeout = 3 * time.Minute
 // restart), in which case its replies never arrive and nothing on our side
 // times out. A fresh dial forces the peer to register a new stream for us.
 func RecycleTopicConnection(topic [2]byte, ip [4]byte) {
-	logger.GetLogger().Printf("recycling connection to %v on topic %c%c", ip, topic[0], topic[1])
+	logger.GetLogger().Printf("recycling connection to %s on topic %c%c", PeerLabel(ip), topic[0], topic[1])
 	deletedIP := closeAndRemovePeerTopic(topic, ip)
 	for _, d := range deletedIP {
 		select {
