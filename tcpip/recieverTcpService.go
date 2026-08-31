@@ -341,7 +341,9 @@ func Send(conn net.Conn, message []byte) error {
 // read error, and the caller (StartNewConnection's receive loop) drops/
 // reconnects the connection — it never continues past a decrypt failure.
 func Receive(topic [2]byte, conn net.Conn) []byte {
-	const bufSize = 1024 //1048576
+	// 64KB reads: a full-block sync answer runs to megabytes, and 1KB reads
+	// meant thousands of syscall+decrypt round trips per message.
+	const bufSize = 65536
 
 	if conn == nil {
 		return []byte("<-CLS->")

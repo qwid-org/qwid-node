@@ -42,37 +42,44 @@ func TestHandlesSeparateNodesBehindOneIP(t *testing.T) {
 	}
 }
 
-// The frame assembler must reproduce the receive-loop framing: reassemble
-// fragments, strip the init marker, and flag violations.
+// The frame assembler must find delimiters INSIDE the buffer: multiple
+// back-to-back frames in one chunk, frames split across chunks, and a
+// delimiter split across chunk boundaries must all survive.
 func TestFrameAssembler(t *testing.T) {
 	topic := TransactionTopic
-	payload := []byte("hello-payload")
-	wire := append(append(append([]byte{}, common.MessageInitialization[:]...), payload...), []byte("<-END->")...)
+	mk := func(payload string) []byte {
+		return append(append(append([]byte{}, common.MessageInitialization[:]...), []byte(payload)...), frameEnd...)
+	}
 
-	// Whole frame in one chunk.
+	// Two glued frames in a single chunk - the case the old framing lost.
 	fa := frameAssembler{topic: topic}
-	msgs, viol := fa.push(wire)
-	if viol || len(msgs) != 1 {
-		t.Fatalf("single-chunk frame: msgs=%d viol=%v", len(msgs), viol)
-	}
-	if !bytes.HasPrefix(msgs[0], payload) {
-		t.Fatal("payload must start right after the init marker")
+	msgs, viol := fa.push(append(mk("alpha"), mk("beta")...))
+	if viol || len(msgs) != 2 || string(msgs[0]) != "alpha" || string(msgs[1]) != "beta" {
+		t.Fatalf("glued frames: msgs=%q viol=%v", msgs, viol)
 	}
 
-	// Split across two chunks.
+	// One frame split across three chunks, with the delimiter itself split.
 	fa = frameAssembler{topic: topic}
+	wire := mk("gamma-payload")
 	if msgs, viol = fa.push(wire[:5]); viol || len(msgs) != 0 {
-		t.Fatalf("fragment must not complete a frame: msgs=%d viol=%v", len(msgs), viol)
+		t.Fatalf("fragment 1: msgs=%d viol=%v", len(msgs), viol)
 	}
-	msgs, viol = fa.push(wire[5:])
-	if viol || len(msgs) != 1 || !bytes.HasPrefix(msgs[0], payload) {
-		t.Fatalf("reassembled frame: msgs=%d viol=%v", len(msgs), viol)
+	if msgs, viol = fa.push(wire[5 : len(wire)-3]); viol || len(msgs) != 0 {
+		t.Fatalf("fragment 2 (split delimiter): msgs=%d viol=%v", len(msgs), viol)
+	}
+	msgs, viol = fa.push(wire[len(wire)-3:])
+	if viol || len(msgs) != 1 || string(msgs[0]) != "gamma-payload" {
+		t.Fatalf("reassembled: msgs=%q viol=%v", msgs, viol)
 	}
 
-	// Wrong initialization marker is a violation.
+	// Wrong initialization marker is a violation; the NEXT frame still parses.
 	fa = frameAssembler{topic: topic}
-	bad := append([]byte{9, 9, 9, 9}, wire[4:]...)
-	if _, viol = fa.push(bad); !viol {
+	bad := append(append([]byte{9, 9, 9, 9}, []byte("junk")...), frameEnd...)
+	msgs, viol = fa.push(append(bad, mk("delta")...))
+	if !viol {
 		t.Fatal("bad init marker must be flagged as a violation")
+	}
+	if len(msgs) != 1 || string(msgs[0]) != "delta" {
+		t.Fatalf("frame after violation must survive: msgs=%q", msgs)
 	}
 }

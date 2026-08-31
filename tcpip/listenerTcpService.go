@@ -409,13 +409,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		}
 	}()
 
-	rTopic := map[[2]byte][]byte{}
-	// Topics currently discarding the tail of an over-long message. Dropping the
-	// accumulated prefix is not enough: the rest of that message keeps arriving,
-	// and without this the next fragment is mistaken for the start of a new one,
-	// which is what produced "wrong MessageInitialization" and left the
-	// connection permanently desynchronised.
-	discardingTopic := map[[2]byte]bool{}
+	fa := frameAssembler{topic: topic}
 
 	// lastData tracks the last moment ANY bytes arrived on this connection, so a
 	// silently dead peer (NAT drop, hard reboot - no EOF, no error, only read
@@ -536,6 +530,9 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					}
 					reconnectionTries = 0
 					lastData = time.Now() // fresh stream - restart the quiet clock
+					// A fresh stream starts at a frame boundary; stale partial
+					// bytes from the dead socket must not prefix it.
+					fa = frameAssembler{topic: topic}
 					continue
 				}
 				reconnectionTries++
@@ -554,86 +551,42 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			//	continue
 			//}
 
-			if discardingTopic[topic] {
-				// Still inside the over-long message: swallow fragments until its
-				// end marker, then resume framing on a real boundary.
-				if len(r) >= 7 && bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-					discardingTopic[topic] = false
-					logger.GetLogger().Printf("resynchronised on topic %c%c after discarding an over-long message", topic[0], topic[1])
-				}
-				continue
-			}
-
-			rt, ok := rTopic[topic]
-			if ok {
-				r = append(rt, r...)
-			}
-			// NP-M3: guard the trailing-marker check so a fragment shorter than
-			// the 7-byte "<-END->" marker cannot panic on r[len(r)-7:].
-			if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-				rTopic[topic] = r
-			} else {
-				rTopic[topic] = []byte{}
-			}
-
-			if int32(len(r)) > MaxMessageSizeForTopic(topic) {
-				logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
-					topic[0], topic[1], len(r), MaxMessageSizeForTopic(topic))
-				// Unless this fragment already ended the message, the rest of it
-				// is still in flight and must be skipped rather than parsed.
-				if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-					discardingTopic[topic] = true
-				}
+			// Framing via the shared assembler: delimiters are found INSIDE the
+			// buffer, so back-to-back messages on a busy stream all survive
+			// (the old chunk-end-only check glued and lost most of them).
+			payloads, viol := fa.push(r)
+			if viol {
 				PeersMutex.Lock()
 				ReduceTrustRegisterPeer(ip)
+				trust, okTrust := validPeersConnected[ip]
 				PeersMutex.Unlock()
-				rTopic[topic] = []byte{}
-				if trust, ok := validPeersConnected[ip]; ok && trust <= 0 {
+				if okTrust && trust <= 0 {
 					BanIP(ip)
 					receiveChan <- []byte("EXIT")
 					return
 				}
-				continue
 			}
-			if bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-				if len(r) > 4 {
-					if bytes.Equal(r[:4], common.MessageInitialization[:]) {
-						// The message head is the first two bytes of the body,
-						// straight after the 4-byte initialization marker
-						// (message.BaseMessage.GetBytes). Reading it here — before
-						// any parsing — is what lets the limiter tell sync traffic
-						// from gossip. A frame too short to hold a head charges the
-						// gossip budget, which is where junk belongs.
-						var head [2]byte
-						if len(r) >= 6 {
-							copy(head[:], r[4:6])
-						}
-						if !AllowMessageFromIPForHead(ip, head) {
-							logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
-							PeersMutex.Lock()
-							ReduceTrustRegisterPeer(ip)
-							trust, ok := validPeersConnected[ip]
-							PeersMutex.Unlock()
-							if ok && trust <= 0 {
-								BanIP(ip)
-								receiveChan <- []byte("EXIT")
-								return
-							}
-							continue // drop this message; do not dispatch
-						}
-						receiveChan <- append(key[:], r[4:]...)
-					} else {
-						logger.GetLogger().Println("wrong MessageInitialization", r[:4], "should be", common.MessageInitialization[:])
-						PeersMutex.Lock()
-						ReduceTrustRegisterPeer(ip)
-						PeersMutex.Unlock()
-						if trust, ok := validPeersConnected[ip]; ok && trust <= 0 {
-							BanIP(ip)
-							receiveChan <- []byte("EXIT")
-							return
-						}
-					}
+			for _, m := range payloads {
+				// The message head is the first two bytes of the body; reading
+				// it pre-parse lets the limiter tell sync traffic from gossip.
+				var head [2]byte
+				if len(m) >= 2 {
+					copy(head[:], m[:2])
 				}
+				if !AllowMessageFromIPForHead(ip, head) {
+					logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
+					PeersMutex.Lock()
+					ReduceTrustRegisterPeer(ip)
+					trust, okTrust := validPeersConnected[ip]
+					PeersMutex.Unlock()
+					if okTrust && trust <= 0 {
+						BanIP(ip)
+						receiveChan <- []byte("EXIT")
+						return
+					}
+					continue // drop this message; do not dispatch
+				}
+				receiveChan <- append(key[:], m...)
 			}
 		}
 	}

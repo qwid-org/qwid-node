@@ -146,49 +146,73 @@ func topicHandler(topic [2]byte) func([4]byte, []byte) {
 	return topicHandlers[topic]
 }
 
-// frameAssembler reassembles the wire framing (MessageInitialization header,
-// "<-END->" trailer, fragmentation, over-long discard) for one connection.
-// Mirrors the framing in StartNewConnection's receive loop.
+// frameAssembler reassembles the wire framing for one connection: messages
+// are MessageInitialization || body || "<-END->", back to back on the stream.
+//
+// The delimiter is searched INSIDE the accumulated buffer, not just at read
+// boundaries. The old framing only recognised a message when "<-END->"
+// happened to fall exactly at the end of a read chunk - true by luck on a
+// quiet link (gaps between messages align the reads) and almost never true on
+// a busy one, where messages queue back to back: frames got glued, the parser
+// took the first message of the glued blob and the rest was silently lost.
+// Under sync load that surfaced as "the peer sends many bx, we receive two".
 type frameAssembler struct {
 	topic      [2]byte
 	buf        []byte
+	scanned    int // prefix of buf already searched for the delimiter
 	discarding bool
 }
 
-// push consumes one read chunk and returns any complete message payloads
-// (init marker stripped) plus whether the chunk was a protocol violation
-// (over-long message or bad initialization marker).
+var frameEnd = []byte("<-END->")
+
+// push consumes one read chunk and returns every complete message payload in
+// the buffer (init marker stripped), plus whether a protocol violation was
+// seen (over-long frame or bad initialization marker).
 func (fa *frameAssembler) push(r []byte) (payloads [][]byte, violation bool) {
-	if fa.discarding {
-		if len(r) >= 7 && bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
+	fa.buf = append(fa.buf, r...)
+	for {
+		// Resume the search where it stopped, backed off so a delimiter split
+		// across two pushes is still found.
+		start := fa.scanned - (len(frameEnd) - 1)
+		if start < 0 {
+			start = 0
+		}
+		idx := bytes.Index(fa.buf[start:], frameEnd)
+		if idx < 0 {
+			fa.scanned = len(fa.buf)
+			if !fa.discarding && int32(len(fa.buf)) > MaxMessageSizeForTopic(fa.topic) {
+				logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
+					fa.topic[0], fa.topic[1], len(fa.buf), MaxMessageSizeForTopic(fa.topic))
+				violation = true
+				fa.discarding = true
+				fa.buf = nil
+				fa.scanned = 0
+			}
+			return payloads, violation
+		}
+		idx += start
+		frame := fa.buf[:idx]
+		fa.buf = append([]byte(nil), fa.buf[idx+len(frameEnd):]...)
+		fa.scanned = 0
+		if fa.discarding {
+			// Tail of the over-long frame ended; resume normal framing.
 			fa.discarding = false
 			logger.GetLogger().Printf("resynchronised on topic %c%c after discarding an over-long message", fa.topic[0], fa.topic[1])
+			continue
 		}
-		return nil, false
-	}
-	r = append(fa.buf, r...)
-	if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-		fa.buf = r
-	} else {
-		fa.buf = nil
-	}
-	if int32(len(r)) > MaxMessageSizeForTopic(fa.topic) {
-		logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
-			fa.topic[0], fa.topic[1], len(r), MaxMessageSizeForTopic(fa.topic))
-		if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-			fa.discarding = true
+		if int32(len(frame)) > MaxMessageSizeForTopic(fa.topic) {
+			logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
+				fa.topic[0], fa.topic[1], len(frame), MaxMessageSizeForTopic(fa.topic))
+			violation = true
+			continue
 		}
-		fa.buf = nil
-		return nil, true
-	}
-	if len(r) >= 7 && bytes.Equal(r[len(r)-7:], []byte("<-END->")) && len(r) > 4 {
-		if !bytes.Equal(r[:4], common.MessageInitialization[:]) {
-			logger.GetLogger().Println("wrong MessageInitialization", r[:4], "should be", common.MessageInitialization[:])
-			return nil, true
+		if len(frame) <= 4 || !bytes.Equal(frame[:4], common.MessageInitialization[:]) {
+			logger.GetLogger().Println("wrong MessageInitialization", frame[:min(4, len(frame))], "should be", common.MessageInitialization[:])
+			violation = true
+			continue
 		}
-		return [][]byte{r[4:]}, false
+		payloads = append(payloads, frame[4:])
 	}
-	return nil, false
 }
 
 // acceptedReceiveLoop reads an ACCEPTED (inbound) connection and dispatches
