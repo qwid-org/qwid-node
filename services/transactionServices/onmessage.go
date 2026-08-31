@@ -271,7 +271,11 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 		close(jobs)
 		wg.Wait()
-		if storedCount > 0 {
+		// ANY bx delivery counts as link liveness - including one that carried
+		// only duplicates (a late answer to an earlier request). Counting only
+		// new transactions made the recycle watchdog kill a perfectly live
+		// connection whenever a retry round happened to deliver re-sends.
+		if storedCount > 0 || skippedExisting > 0 {
 			noteBxArrival()
 		}
 		summary := fmt.Sprintf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
