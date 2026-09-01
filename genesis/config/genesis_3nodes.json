@@ -2,7 +2,7 @@
     "date": 1662296251,
     "chain_id": 23,
     "difficulty": 10,
-	"reward_ratio": 1e-7,
+    "reward_ratio": 1e-07,
     "block_time_interval": 10.0,
     "max_total_supply": 230000000000000000,
     "init_supply": 23000000000000000,
@@ -19,7 +19,6 @@
     "min_staking_user": 100000000000,
     "oracles_height_distance": 6,
     "voting_height_distance": 60,
-
     "staked_balances": [
         {
             "account": "f9a3b2f9ef683fff2a3767b5cda83e12b8cd54c7",
