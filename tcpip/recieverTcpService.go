@@ -304,8 +304,17 @@ func Send(conn net.Conn, message []byte) error {
 	message = append(common.MessageInitialization[:], message...)
 	message = append(message, []byte("<-END->")...)
 
-	// Set write deadline to 2 seconds
-	conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+	// The write deadline scales with the message. A flat deadline broke the
+	// connection in a way no retry could fix: the encrypted transport writes
+	// AEAD records under a running counter, so a timeout that lands mid-record
+	// leaves half a record on the wire while the counter has already moved on.
+	// From that moment every record the peer reads fails to decrypt - the
+	// "error in read. Closing connection" storm - and only a fresh dial and
+	// handshake can resynchronise. Multi-MB sync batches over a slow link
+	// exceeded a flat 4s routinely; 64KB/s is affordable for the slowest link
+	// worth supporting, and small messages keep the old snappy deadline.
+	deadline := 4*time.Second + time.Duration(len(message)/(64*1024))*time.Second
+	conn.SetWriteDeadline(time.Now().Add(deadline))
 
 	_, err := conn.Write(message)
 	if err != nil {
