@@ -441,6 +441,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 				}
 				continue
 			}
+			// Throttled to once a second: this runs per 1KB fragment, and a
+			// 3MB message would otherwise take the shared lock ~3000 times.
+			if time.Since(lastData) >= time.Second {
+				NoteInbound(topic, ip)
+			}
 			lastData = time.Now()
 			if bytes.Equal(r, []byte("<-ERR->")) {
 				if reconnectionTries > common.ConnectionMaxTries {

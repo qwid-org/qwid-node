@@ -49,6 +49,55 @@ var Ports = map[[2]byte]int{
 }
 
 var MyIP [4]byte
+// Last inbound activity per (topic, ip), at second granularity. The receive
+// loops track bytes-arrived locally for their own quiet-connection timeout;
+// this shared view exists for the missing-transaction watchdog, which must not
+// recycle a link that is mid-way through delivering a large answer. A
+// completed message is the only thing that layer can see on its own, and a
+// multi-MB batch over a slow uplink takes longer to complete than its silence
+// threshold - so without this it tore down exactly the transfers it was
+// waiting for.
+var (
+	lastInboundMutex sync.Mutex
+	lastInbound      = map[[6]byte]time.Time{}
+)
+
+// NoteInbound records that bytes arrived on (topic, ip). Called from the
+// receive loops; cheap enough per fragment, but callers throttle to ~1/s.
+func NoteInbound(topic [2]byte, ip [4]byte) {
+	var k [6]byte
+	copy(k[:2], topic[:])
+	copy(k[2:], ip[:])
+	lastInboundMutex.Lock()
+	// Bound the map: connections come and go with peer churn, and nothing else
+	// deletes entries. 64 is far above topics x live peers.
+	if len(lastInbound) > 64 {
+		cut := time.Now().Add(-10 * time.Minute)
+		for a, t := range lastInbound {
+			if t.Before(cut) {
+				delete(lastInbound, a)
+			}
+		}
+	}
+	lastInbound[k] = time.Now()
+	lastInboundMutex.Unlock()
+}
+
+// SinceLastInbound reports how long ago bytes last arrived on (topic, ip);
+// ok is false when nothing was ever recorded.
+func SinceLastInbound(topic [2]byte, ip [4]byte) (time.Duration, bool) {
+	var k [6]byte
+	copy(k[:2], topic[:])
+	copy(k[2:], ip[:])
+	lastInboundMutex.Lock()
+	t, ok := lastInbound[k]
+	lastInboundMutex.Unlock()
+	if !ok {
+		return 0, false
+	}
+	return time.Since(t), true
+}
+
 // HasConnection reports whether a connection exists for exactly this
 // (topic, ip) - the lookup LoopSend's targeted send performs. A targeted
 // message to an address with no connection is silently dropped there, so

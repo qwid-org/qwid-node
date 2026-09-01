@@ -208,8 +208,18 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 	// peer's send side holds a stale stream from before our restart - and only
 	// a fresh dial can replace it.
 	if recycle {
-		logger.GetLogger().Printf("no bx answers from %v for ~1 minute - recycling the transaction-topic connection", addr)
-		tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
+		// "No completed bx" is not the same as "dead link". A 500-tx answer is
+		// ~3MB, and over a slow uplink it takes longer to arrive than this
+		// watchdog's silence threshold - recycling then destroys the very
+		// transfer being waited for, every time, and the fetch never completes.
+		// Bytes still flowing on the topic mean the answer is in flight: hold.
+		if d, ok := tcpip.SinceLastInbound(tcpip.TransactionTopic, addr); ok && d < missingTxRetryInterval {
+			logger.GetLogger().Printf("no complete bx from %v yet, but data is flowing (last bytes %s ago) - "+
+				"a large answer is in flight, not recycling", addr, d.Truncate(time.Second))
+		} else {
+			logger.GetLogger().Printf("no bx answers from %v for ~1 minute - recycling the transaction-topic connection", addr)
+			tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
+		}
 	}
 	return len(due)
 }
