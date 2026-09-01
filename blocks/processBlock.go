@@ -541,7 +541,16 @@ func EvaluateSmartContracts(bl *Block) bool {
 
 func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *transactionsPool.MerkleTree, checkFinal bool) error {
 
-	defer RemoveAllTransactionsRelatedToBlock(*newBlock)
+	// NOTE: deliberately NO deferred RemoveAllTransactionsRelatedToBlock here.
+	// That defer ran on FAILURE too, so a block that could not apply because
+	// SOME of its transactions were still in flight had ALL its already-fetched
+	// transactions deleted from the pool DB - the next attempt then reported
+	// the full set missing again and re-downloaded everything, forever (the
+	// "downloads them and they go missing again" loop). A failed apply must
+	// leave fetched transactions in place; the success path moves them to the
+	// confirmed DB and cleans the pool itself (the txStore loop below), and
+	// genuinely invalid transactions are removed point-wise by
+	// RemoveBadTransactionByHash where they are detected.
 	// Stake-snapshot-dependent checks, run against the parent (height-1) state
 	// that is in memory before this block's transactions are applied.
 	if err := VerifyStakeDependent(*newBlock); err != nil {
@@ -628,7 +637,16 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 		}
 	}()
 
-	defer RemoveAllTransactionsRelatedToBlock(*newBlock)
+	// NOTE: deliberately NO deferred RemoveAllTransactionsRelatedToBlock here.
+	// That defer ran on FAILURE too, so a block that could not apply because
+	// SOME of its transactions were still in flight had ALL its already-fetched
+	// transactions deleted from the pool DB - the next attempt then reported
+	// the full set missing again and re-downloaded everything, forever (the
+	// "downloads them and they go missing again" loop). A failed apply must
+	// leave fetched transactions in place; the success path moves them to the
+	// confirmed DB and cleans the pool itself (the txStore loop below), and
+	// genuinely invalid transactions are removed point-wise by
+	// RemoveBadTransactionByHash where they are detected.
 	// Stake-snapshot-dependent checks, run against the parent (height-1) state
 	// that is in memory before this block's transactions are applied.
 	phase := time.Now()
@@ -746,6 +764,9 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 		}
 	}
 	tTxStore = time.Since(phase)
+	// Success: sweep any in-memory pool remnants of this block (the loop above
+	// already moved every transaction pool->confirmed; this is idempotent).
+	RemoveAllTransactionsRelatedToBlock(*newBlock)
 	err = ProcessBlockEncryption(*newBlock, lastBlock)
 	if err != nil {
 		// Deliberately logged and not returned: the block itself is valid and has

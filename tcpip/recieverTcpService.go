@@ -31,7 +31,15 @@ var (
 	// matching inbound stream arrives; replacing that entry must not close the
 	// outbound stream because its receive loop is still using it.
 	acceptedConnections = make(map[[2]byte]map[[4]byte]net.Conn)
-	PeersMutex          = &sync.RWMutex{}
+	// outboundConns tracks the connection each outbound receive loop is
+	// currently reading from, keyed like tcpConnections. It is NOT a send path —
+	// when an accepted connection already occupies tcpConnections the outbound
+	// stream lives only here. RecycleTopicConnection must be able to close it:
+	// otherwise the receive loop never notices the recycle, keeps holding the
+	// dialing-dedup slot, and every fresh dial dies with "connection already
+	// active or pending" while the topic has no send path at all.
+	outboundConns = make(map[[2]byte]map[[4]byte]net.Conn)
+	PeersMutex    = &sync.RWMutex{}
 	Quit                chan os.Signal
 	TransactionTopic    = [2]byte{'T', 'T'}
 	NonceTopic          = [2]byte{'N', 'N'}
@@ -96,18 +104,6 @@ func SinceLastInbound(topic [2]byte, ip [4]byte) (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Since(t), true
-}
-
-// HasConnection reports whether a connection exists for exactly this
-// (topic, ip) - the lookup LoopSend's targeted send performs. A targeted
-// message to an address with no connection is silently dropped there, so
-// callers that must not lose a request check here first and pick another
-// target.
-func HasConnection(topic [2]byte, ip [4]byte) bool {
-	PeersMutex.RLock()
-	defer PeersMutex.RUnlock()
-	_, ok := tcpConnections[topic][ip]
-	return ok
 }
 
 var MyIPSelfNonce [4]byte
@@ -324,7 +320,15 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 
 	// TCP-specific options must be set on the raw *net.TCPConn before it is
 	// wrapped in encryptedConn (net.Conn has no SetKeepAlive).
+	//
+	// The keepalive PERIOD matters as much as the flag: without it the OS
+	// default applies (2 hours on Linux), so when the remote peer restarted,
+	// this accepted socket stayed "alive" for hours while every write to it -
+	// bx answers above all - vanished into the kernel buffer with no error.
+	// The peer meanwhile starved on missing transactions with no clue why.
+	// 30s matches what the outbound dial path sets.
 	tcpConn.SetKeepAlive(true)
+	tcpConn.SetKeepAlivePeriod(30 * time.Second)
 
 	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer
 	// using the keys the handshake just derived. Use sKeys directly — routing
@@ -344,7 +348,20 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		return nil, fmt.Errorf("inbound handshake: encryptedConn wrap failed: %w", err)
 	}
 
-	publishAcceptedConn(topic, ip, ec)
+	// Key the connection by the authenticated peer's HANDLE, not the transport
+	// IP: two nodes behind one NAT arrive from the same IP and used to evict
+	// each other's accepted stream on the shared (topic, ip) slot. The handle
+	// keeps them apart everywhere downstream (maps, claims, counters). Our own
+	// self-connection keeps the transport key (see connKeyFor).
+	key := connKeyFor(peerID, ip)
+	publishAcceptedConn(topic, key, ec)
+	// Read the inbound stream too. A peer that cannot be dialed back (NAT)
+	// sends on the very link it dialed to us; without a reader here it was
+	// mute. Self-connections keep the historical single-reader model (the dial
+	// end reads), so no reader is spawned for them (key == transport IP then).
+	if IsPeerHandle(key) {
+		go acceptedReceiveLoop(topic, key, ip, ec)
+	}
 	return tcpConn, nil
 }
 
@@ -359,9 +376,13 @@ func Send(conn net.Conn, message []byte) error {
 	// leaves half a record on the wire while the counter has already moved on.
 	// From that moment every record the peer reads fails to decrypt - the
 	// "error in read. Closing connection" storm - and only a fresh dial and
-	// handshake can resynchronise. Multi-MB sync batches over a slow link
-	// exceeded a flat 4s routinely; 64KB/s is affordable for the slowest link
-	// worth supporting, and small messages keep the old snappy deadline.
+	// handshake can resynchronise.
+	//
+	// 64KB/s (not p2p's 256KB/s): the slowest link this network actually runs
+	// over is mobile with ~50KB/s of usable uplink, where a 3MB batch takes a
+	// minute. A deadline sized for 256KB/s would cut that transfer off at ~16s
+	// every time - the exact failure this exists to prevent, now guaranteed on
+	// the link most prone to it. Small messages keep the old snappy deadline.
 	deadline := 4*time.Second + time.Duration(len(message)/(64*1024))*time.Second
 	conn.SetWriteDeadline(time.Now().Add(deadline))
 
@@ -382,7 +403,9 @@ func Send(conn net.Conn, message []byte) error {
 // read error, and the caller (StartNewConnection's receive loop) drops/
 // reconnects the connection — it never continues past a decrypt failure.
 func Receive(topic [2]byte, conn net.Conn) []byte {
-	const bufSize = 1024 //1048576
+	// 64KB reads: a full-block sync answer runs to megabytes, and 1KB reads
+	// meant thousands of syscall+decrypt round trips per message.
+	const bufSize = 65536
 
 	if conn == nil {
 		return []byte("<-CLS->")
@@ -408,6 +431,7 @@ func Receive(topic [2]byte, conn net.Conn) []byte {
 
 // ValidRegisterPeer Confirm that ip is valid node
 func ValidRegisterPeer(ip [4]byte) {
+	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	PeersMutex.Lock()
 	defer PeersMutex.Unlock()
 	if n, ok := validPeersConnected[ip]; ok {
@@ -422,6 +446,7 @@ func ValidRegisterPeer(ip [4]byte) {
 
 // NodeRegisterPeer Confirm that ip is valid node IP
 func NodeRegisterPeer(ip [4]byte) {
+	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	PeersMutex.Lock()
 	defer PeersMutex.Unlock()
 	if _, ok := nodePeersConnected[ip]; ok {
@@ -433,6 +458,7 @@ func NodeRegisterPeer(ip [4]byte) {
 
 // ReduceTrustRegisterPeer limit connections attempts needs to be peer lock
 func ReduceTrustRegisterPeer(ip [4]byte) {
+	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	// || bytes.Equal(ip[:2], InternalIP[:2])
 	if bytes.Equal(ip[:], MyIP[:]) || bytes.Equal(ip[:], []byte{0, 0, 0, 0}) {
 		return
@@ -547,12 +573,40 @@ func publishAcceptedConn(topic [2]byte, ip [4]byte, tcpConn net.Conn) {
 		}
 	}
 
-	// Register the accepted connection for sending
+	// Register the accepted connection for sending. Trust counters are per
+	// transport source (canonicalIP), while the map key may be a peer handle.
 	tcpConnections[topic][ip] = tcpConn
 	acceptedConnections[topic][ip] = tcpConn
 	peersConnected[topicipBytes] = topic
-	validPeersConnected[ip] = common.ConnectionMaxTries
-	nodePeersConnected[ip] = common.ConnectionMaxTries
+	trustIP := canonicalIP(ip)
+	validPeersConnected[trustIP] = common.ConnectionMaxTries
+	nodePeersConnected[trustIP] = common.ConnectionMaxTries
+}
+
+// HasConnection reports whether a connection exists for exactly this
+// (topic, key) - the lookup LoopSend's targeted send performs. A targeted
+// message to a key with no connection is silently dropped there, so callers
+// that must not lose a request check here first and pick another target.
+func HasConnection(topic [2]byte, key [4]byte) bool {
+	PeersMutex.RLock()
+	defer PeersMutex.RUnlock()
+	_, ok := tcpConnections[topic][key]
+	return ok
+}
+
+// IsTransportConnected reports whether any connection on topic terminates at
+// the given transport IP. Map keys may be virtual peer handles, so a plain map
+// lookup by IP misses them; peer discovery uses this to decide whether a
+// learned address still needs dialing.
+func IsTransportConnected(topic [2]byte, ip [4]byte) bool {
+	PeersMutex.RLock()
+	defer PeersMutex.RUnlock()
+	for key := range tcpConnections[topic] {
+		if key == ip || canonicalIP(key) == ip {
+			return true
+		}
+	}
+	return false
 }
 
 func GetPeersConnected(topic [2]byte) map[[6]byte][2]byte {
@@ -576,6 +630,15 @@ func GetIPsConnected() [][]byte {
 		uniqueIPs := make(map[[4]byte]struct{})
 		for _, connections := range tcpConnections {
 			for ip := range connections {
+				// Map keys may be virtual peer handles; peer discovery must
+				// advertise DIALABLE transport addresses.
+				if IsPeerHandle(ip) {
+					real, ok := RealIPForHandle(ip)
+					if !ok {
+						continue
+					}
+					ip = real
+				}
 				// Never advertise our own addresses. Loopback in particular is
 				// meaningless to anyone else: a peer that learns 127.0.0.1 from us
 				// dials its OWN listener, ends up exchanging 'hi' with itself and

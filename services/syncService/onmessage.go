@@ -59,8 +59,15 @@ var (
 	// MaxHeightJumpWithoutConsensus - if a peer claims height more than this ahead,
 	// require multiple peers to confirm before syncing
 	MaxHeightJumpWithoutConsensus int64 = 4
-	// ClaimExpiryDuration - how long before a height claim expires
-	ClaimExpiryDuration = 30 * time.Second
+	// ClaimExpiryDuration - how long before a height claim expires. Must
+	// comfortably outlive one sync batch (observed ~70s for 20 full blocks):
+	// while the batch handler runs, incoming 'hi' queue behind it unprocessed,
+	// and with a shorter expiry every claim died mid-batch — the stall watchdog
+	// then saw "no live peer" and recycled a healthy connection. Claims refresh
+	// about every second in normal operation, so the only cost of a longer
+	// expiry is how late a DEAD peer's claim stops counting; the quiet-death
+	// watchdog reacts to a dead peer well before that matters.
+	ClaimExpiryDuration = 90 * time.Second
 	// SyncStallTimeout - how long the local height may stay put while syncing
 	// before the sync is treated as stalled. A dropped connection can lose either
 	// our "bt" request for a block's transactions or the peer's "bx" answer, and
@@ -492,9 +499,6 @@ func OnMessage(addr [4]byte, m []byte) {
 		var ip4 [4]byte
 		if tcpip.GetPeersCount() < common.MaxPeersConnected {
 			peers := txn[[2]byte{'P', 'P'}]
-			peersConnectedNN := tcpip.GetPeersConnected(tcpip.NonceTopic)
-			peersConnectedBB := tcpip.GetPeersConnected(tcpip.SyncTopic)
-			peersConnectedTT := tcpip.GetPeersConnected(tcpip.TransactionTopic)
 
 			for _, ip := range peers {
 				copy(ip4[:], ip)
@@ -510,9 +514,11 @@ func OnMessage(addr [4]byte, m []byte) {
 				if tcpip.IsSelfIP(ip4) {
 					continue
 				}
+				// Connection maps are keyed by peer handle, so "is this address
+				// already connected" must translate through the handle table.
 				connectingPeersMutex.Lock()
 				copy(topicip[:2], tcpip.NonceTopic[:])
-				if _, ok := peersConnectedNN[topicip]; !ok && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
+				if !tcpip.IsTransportConnected(tcpip.NonceTopic, ip4) && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
 					connectingPeers[topicip] = true
 					go func(pip [4]byte, key [6]byte) {
 						nonceServices.StartSubscribingNonceMsg(pip)
@@ -522,7 +528,7 @@ func OnMessage(addr [4]byte, m []byte) {
 					}(ip4, topicip)
 				}
 				copy(topicip[:2], tcpip.SyncTopic[:])
-				if _, ok := peersConnectedBB[topicip]; !ok && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
+				if !tcpip.IsTransportConnected(tcpip.SyncTopic, ip4) && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
 					connectingPeers[topicip] = true
 					go func(pip [4]byte, key [6]byte) {
 						StartSubscribingSyncMsg(pip)
@@ -532,7 +538,7 @@ func OnMessage(addr [4]byte, m []byte) {
 					}(ip4, topicip)
 				}
 				copy(topicip[:2], tcpip.TransactionTopic[:])
-				if _, ok := peersConnectedTT[topicip]; !ok && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
+				if !tcpip.IsTransportConnected(tcpip.TransactionTopic, ip4) && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
 					connectingPeers[topicip] = true
 					go func(pip [4]byte, key [6]byte) {
 						transactionServices.StartSubscribingTransactionMsg(pip)
@@ -563,6 +569,17 @@ func OnMessage(addr [4]byte, m []byte) {
 		if common.IsBehindNetwork() {
 			common.IsSyncing.Store(true)
 		}
+
+		// While a batch is being verified or applied (syncProcessMutex held),
+		// a 'hi' contributes exactly one thing: the claim recorded above.
+		// Reacting further — chain comparison, header requests — would make the
+		// peer resend multi-MB sh batches into the same link the in-flight
+		// batch's transactions are arriving on, and pile more sh handlers onto
+		// the mutex queue. Requests resume the moment the batch is done.
+		if !syncProcessMutex.TryLock() {
+			return
+		}
+		syncProcessMutex.Unlock()
 
 		if lastOtherHeight == h {
 			services.AdjustShiftInPastInReset(lastOtherHeight)

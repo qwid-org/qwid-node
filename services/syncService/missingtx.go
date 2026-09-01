@@ -142,21 +142,21 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 			break
 		}
 		if fallback == addr {
-			logger.GetLogger().Printf("cannot request %d missing transaction(s): batch server %v has no "+
+			logger.GetLogger().Printf("cannot request %d missing transaction(s): batch server %s has no "+
 				"transaction-topic link and no other transaction-topic peer is connected - asking discovery to dial it",
-				len(due), addr)
+				len(due), tcpip.PeerLabel(addr))
 			// No TT link anywhere means nothing will ever answer these requests.
 			// Recycling a connection that does not exist just pushes a reconnect
 			// notification for (TT, addr), so discovery dials the batch server.
 			tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
 			return 0
 		}
-		logger.GetLogger().Printf("batch server %v has no transaction-topic link - requesting %d missing transaction(s) from %v instead",
-			addr, len(due), fallback)
+		logger.GetLogger().Printf("batch server %s has no transaction-topic link - requesting %d missing transaction(s) from %s instead",
+			tcpip.PeerLabel(addr), len(due), tcpip.PeerLabel(fallback))
 		addr = fallback
 	}
-	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %v, first: %x",
-		len(due), addr, due[0][:8])
+	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %s, first: %x",
+		len(due), tcpip.PeerLabel(addr), due[0][:8])
 
 	// Pacing: 5 chunks/s of MaxNumberTransactionInChunk txs each (~2500 tx/s).
 	// The ceiling is the peer's per-IP sync-class message budget
@@ -188,9 +188,9 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 		// hashes cross the escalation threshold in the same round, and writing
 		// a log line for each (to stdout AND the log file) took longer than
 		// the requests themselves and drowned everything else in the log.
-		logger.GetLogger().Printf("%d missing tx(s) still unanswered after %d+ requests to %v - "+
+		logger.GetLogger().Printf("%d missing tx(s) still unanswered after %d+ requests to %s - "+
 			"asking %d other peer(s); first: %x (grep the peer's log for 'bt'/'bx' lines)",
-			len(escalate), missingTxEscalateAfter, addr, len(others), escalate[0][:8])
+			len(escalate), missingTxEscalateAfter, tcpip.PeerLabel(addr), len(others), escalate[0][:8])
 		for _, t := range others {
 			for i := 0; i < len(escalate); i += maxChunk {
 				end := i + maxChunk
@@ -214,10 +214,10 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 		// transfer being waited for, every time, and the fetch never completes.
 		// Bytes still flowing on the topic mean the answer is in flight: hold.
 		if d, ok := tcpip.SinceLastInbound(tcpip.TransactionTopic, addr); ok && d < missingTxRetryInterval {
-			logger.GetLogger().Printf("no complete bx from %v yet, but data is flowing (last bytes %s ago) - "+
-				"a large answer is in flight, not recycling", addr, d.Truncate(time.Second))
+			logger.GetLogger().Printf("no complete bx from %s yet, but data is flowing (last bytes %s ago) - "+
+				"a large answer is in flight, not recycling", tcpip.PeerLabel(addr), d.Truncate(time.Second))
 		} else {
-			logger.GetLogger().Printf("no bx answers from %v for ~1 minute - recycling the transaction-topic connection", addr)
+			logger.GetLogger().Printf("no bx answers from %s for ~1 minute - recycling the transaction-topic connection", tcpip.PeerLabel(addr))
 			tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
 		}
 	}

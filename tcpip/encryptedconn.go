@@ -33,9 +33,13 @@ type encryptedConn struct {
 
 func newEncryptedConn(raw net.Conn, keys *SessionKeys) (net.Conn, error) {
 	wa, err := chacha20poly1305.New(keys.WriteKey)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	ra, err := chacha20poly1305.New(keys.ReadKey)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return &encryptedConn{raw: raw, writeAEAD: wa, readAEAD: ra}, nil
 }
 
@@ -51,14 +55,20 @@ func (e *encryptedConn) Write(p []byte) (int, error) {
 	total := 0
 	for len(p) > 0 {
 		chunk := p
-		if len(chunk) > maxRecordPayload { chunk = chunk[:maxRecordPayload] }
+		if len(chunk) > maxRecordPayload {
+			chunk = chunk[:maxRecordPayload]
+		}
 		nonce := recordNonce(e.writeCtr)
 		e.writeCtr++
 		ct := e.writeAEAD.Seal(nil, nonce, chunk, nil)
 		var hdr [4]byte
 		binary.BigEndian.PutUint32(hdr[:], uint32(len(ct)))
-		if _, err := e.raw.Write(hdr[:]); err != nil { return total, err }
-		if _, err := e.raw.Write(ct); err != nil { return total, err }
+		if _, err := e.raw.Write(hdr[:]); err != nil {
+			return total, err
+		}
+		if _, err := e.raw.Write(ct); err != nil {
+			return total, err
+		}
 		total += len(chunk)
 		p = p[len(chunk):]
 	}
@@ -70,17 +80,23 @@ func (e *encryptedConn) Read(p []byte) (int, error) {
 	defer e.readMu.Unlock()
 	if len(e.readBuf) == 0 {
 		var hdr [4]byte
-		if _, err := io.ReadFull(e.raw, hdr[:]); err != nil { return 0, err }
+		if _, err := io.ReadFull(e.raw, hdr[:]); err != nil {
+			return 0, err
+		}
 		n := int(binary.BigEndian.Uint32(hdr[:]))
 		if n < e.readAEAD.Overhead() || n > maxRecordPayload+e.readAEAD.Overhead() {
 			return 0, fmt.Errorf("encryptedConn: bad record length %d", n)
 		}
 		ct := make([]byte, n)
-		if _, err := io.ReadFull(e.raw, ct); err != nil { return 0, err }
+		if _, err := io.ReadFull(e.raw, ct); err != nil {
+			return 0, err
+		}
 		nonce := recordNonce(e.readCtr)
 		e.readCtr++
 		pt, err := e.readAEAD.Open(nil, nonce, ct, nil)
-		if err != nil { return 0, fmt.Errorf("encryptedConn: decrypt failed: %w", err) }
+		if err != nil {
+			return 0, fmt.Errorf("encryptedConn: decrypt failed: %w", err)
+		}
 		e.readBuf = pt
 	}
 	n := copy(p, e.readBuf)

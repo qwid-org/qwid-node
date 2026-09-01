@@ -11,6 +11,7 @@ import (
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/services"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
 	"github.com/qwid-org/qwid-node/tcpip"
 )
 
@@ -300,6 +301,27 @@ func checkSyncStall(now time.Time) {
 		return
 	}
 
+	// A held syncProcessMutex means a batch is actively being verified or its
+	// missing transactions are being fetched — the very work a stall watchdog
+	// exists to restart. During that work the 'hi' stream queues behind the
+	// same handler, so claims EXPECTEDLY go stale; acting on that (recycling
+	// the sync connection, blind requests) tore down a healthy link mid-batch
+	// and turned a slow catch-up into connection churn. Busy is not stalled.
+	if !syncProcessMutex.TryLock() {
+		progress.since = now
+		return
+	}
+	syncProcessMutex.Unlock()
+
+	// Missing-transaction answers actively arriving are progress even while
+	// the height stands still: a full-block backlog of tens of thousands of
+	// transactions legitimately takes minutes to stream in at 500 per answer.
+	// Acting then only enlarges the missing set, so the fetch never converges.
+	if transactionServices.TimeSinceLastBxArrival() < SyncStallTimeout {
+		progress.since = now
+		return
+	}
+
 	// syncPeers counts real peers only, so the log separates "nobody is
 	// connected on the sync topic" from "connected, but their 'hi' is not
 	// arriving" - the two need different fixes.
@@ -324,7 +346,7 @@ func checkSyncStall(now time.Time) {
 				if tcpip.IsSelfIP(ip) {
 					continue
 				}
-				logger.GetLogger().Printf("no 'hi' from %v for two stall rounds - recycling the sync-topic connection", ip)
+				logger.GetLogger().Printf("no 'hi' from %s for two stall rounds - recycling the sync-topic connection", tcpip.PeerLabel(ip))
 				tcpip.RecycleTopicConnection(tcpip.SyncTopic, ip)
 			}
 		}
@@ -332,10 +354,19 @@ func checkSyncStall(now time.Time) {
 		progress.noClaimRounds = 0
 	}
 
-	// Ask blindly rather than waiting for a claim that may never come. This is
-	// sent to every sync peer, not only the ones known to be ahead: a peer
-	// whose 'hi' is not reaching us has no recorded height, and it is exactly
-	// the peer most likely to be the one holding up the sync.
+	// Deliberately NO state rewind. A stalled-on-data node's state at h is
+	// perfectly valid — the peer just needs to resend from h+1, and header
+	// requests are anchored at our own height, so the blind request below asks
+	// for exactly that. The old 2-block rewind was strictly harmful: account
+	// snapshots exist once per 20-block batch, so it landed on the nearest
+	// snapshot up to 20 blocks back and forced a whole batch to be
+	// re-downloaded per stall round; a genuine fork at our tip is detected by
+	// the sh handler's own fork paths when the batch arrives.
+	//
+	// The request goes to EVERY sync peer, not only the ones known to be
+	// ahead: a peer whose 'hi' is not reaching us has no recorded height, and
+	// it is exactly the peer most likely to be the one holding up the sync. A
+	// peer that is behind simply ignores it.
 	if syncPeers > 0 {
 		sent := 0
 		for topicip := range tcpip.GetPeersConnected(tcpip.SyncTopic) {
@@ -375,6 +406,7 @@ func sendSyncMsgInLoop() {
 
 func startPublishingSyncMsg() {
 
+	tcpip.RegisterTopicHandler(tcpip.SyncTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.SyncTopic)
 	go tcpip.LoopSend(services.SendChanSync, tcpip.SyncTopic)
 }
