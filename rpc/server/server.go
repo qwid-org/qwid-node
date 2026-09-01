@@ -16,6 +16,7 @@ import (
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/core/stateDB"
 	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
@@ -680,7 +681,23 @@ func handleVIEW(line []byte, reply *[]byte) {
 //	confirmed_db+multisig   on chain, awaiting signatures
 //
 // Transactions that never reached a block keep their previous single values.
-func txLocation(inConfirmed, inPoolDB, inMain, inEscrow, inMultisig bool) string {
+// voidedState reports why a transaction's value never moved, or "" if it did.
+func voidedState(hash []byte) string {
+	record, err := database.MainDB.Get(append(common.VoidedTxDBPrefix[:], hash...))
+	if err != nil {
+		return ""
+	}
+	return common.VoidedReason(record)
+}
+
+func txLocation(inConfirmed, inPoolDB, inMain, inEscrow, inMultisig bool, voided string) string {
+	// Being voided outranks every other state. The transaction is on the chain
+	// and it has left its pool, so the checks below would call it confirmed —
+	// but its value never moved, and reporting that as confirmed makes an
+	// account's history impossible to reconcile.
+	if voided != "" {
+		return voided
+	}
 	if inConfirmed {
 		switch {
 		case inEscrow:
@@ -745,6 +762,7 @@ func handleDETS(line []byte, reply *[]byte) {
 			transactionsPool.PoolsTx.HasTransaction(line),
 			transactionsPool.PoolTxEscrow.HasTransaction(line),
 			transactionsPool.PoolTxMultiSign.HasTransaction(line),
+			voidedState(line),
 		)
 
 		if location == "" {

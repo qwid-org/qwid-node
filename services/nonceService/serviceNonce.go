@@ -357,8 +357,10 @@ func sendNonceMsgInLoop() {
 }
 
 func startPublishingNonceMsg() {
+	tcpip.RegisterTopicHandler(tcpip.NonceTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.NonceTopic)
 	go tcpip.LoopSend(services.SendChanNonce, tcpip.NonceTopic)
+	tcpip.RegisterTopicHandler(tcpip.SelfNonceTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.SelfNonceTopic)
 	go tcpip.LoopSend(services.SendChanSelfNonce, tcpip.SelfNonceTopic)
 }
@@ -398,7 +400,7 @@ func StartSubscribingNonceMsg(ip [4]byte) {
 }
 
 func sendReply(addr [4]byte) {
-	logger.GetLogger().Println("send reply to ", addr)
+	logger.GetLogger().Println("send reply to", tcpip.PeerLabel(addr))
 	var topic = [2]byte{'N', 'N'}
 	n, err := generateNonceMsg(topic)
 	if err != nil {
@@ -406,7 +408,7 @@ func sendReply(addr [4]byte) {
 		return
 	}
 	if Send(addr, n.GetBytes()) {
-		logger.GetLogger().Println("send reply to node ", addr, " my ip ", tcpip.MyIP)
+		logger.GetLogger().Println("send reply sent to", tcpip.PeerLabel(addr))
 	}
 }
 

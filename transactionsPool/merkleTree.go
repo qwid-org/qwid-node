@@ -322,43 +322,23 @@ func LoadTreeWithoutTxHashes(height int64) (*MerkleTree, error) {
 	return tree, nil
 }
 
+// FindTransactionInBlocks reports whether targetHash is one of the
+// transactions committed at height, returning that height when found.
+//
+// It reads the flat committed-hash list (TransactionsHashesByHeightDBPrefix),
+// which StoreTree writes at the same moment as the Merkle tree and which holds
+// exactly the same membership information. It used to ALSO load the height's
+// whole Merkle tree and JSON-decode it first — a multi-megabyte decode for a
+// full 5000-tx block — and CheckTransactionInDBAndInMarkleTrie calls this once
+// PER TRANSACTION of the block being applied: profiling a slow sync showed 88%
+// of the node's entire CPU inside that decode, stretching a two-second block
+// apply into minutes. The tree traversal also returned a node INDEX rather
+// than a height on success, which the caller's `txHeight <= 0` test then
+// misread for index 0; the flat list returns the height, as intended.
 func FindTransactionInBlocks(targetHash []byte, height int64) (int64, error) {
-
-	tree, err := LoadTreeWithoutTxHashes(height)
-	if err != nil {
-		return -1, err
-	}
-	defer tree.Destroy()
-
-	if tree == nil {
-		return -1, fmt.Errorf("merkle tree is nil")
-	}
-
-	if len(tree.Root) == 0 {
-		return -1, fmt.Errorf("no merkle tree root hash")
-	}
-
-	// Hold RLock for containsTxHash traversal (explicit unlock before deferred Destroy's write lock)
-	globalMutex.RLock()
-	left, hl := tree.Root[0].containsTxHash(0, targetHash)
-	if left {
-		globalMutex.RUnlock()
-		return hl, nil
-	}
-
-	if len(tree.Root) > 1 {
-		right, hr := tree.Root[1].containsTxHash(0, targetHash)
-		if right {
-			globalMutex.RUnlock()
-			return hr, nil
-		}
-	}
-	globalMutex.RUnlock()
-
-	//TODO the least
 	hashes, err := LoadTxHashes(height)
 	if err != nil {
-		return 0, err
+		return -1, err
 	}
 	for _, h := range hashes {
 		if bytes.Equal(h[:], targetHash[:]) {

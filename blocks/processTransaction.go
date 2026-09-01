@@ -7,6 +7,7 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
@@ -21,6 +22,18 @@ var ZerosHash = make([]byte, common.HashLength)
 // from the pool rather than retried. Every other failure may be transient —
 // the target's block might simply not have been processed here yet.
 var ErrEscrowAlreadyMatured = errors.New("escrow transaction has already matured")
+
+// markVoided records that a transaction is on the chain but its value never
+// moved. Failure to store is logged rather than returned: this is a record kept
+// for readers, not consensus state, and refusing the block over it would be a
+// far worse outcome than a transaction displayed with the wrong label.
+func markVoided(hash []byte, height int64, reason byte) {
+	if err := database.MainDB.Put(append(common.VoidedTxDBPrefix[:], hash...),
+		common.VoidedRecord(height, reason)); err != nil {
+		logger.GetLogger().Printf("WARNING: transaction %x was voided but the marker could not be stored: %v",
+			hash[:8], err)
+	}
+}
 
 func validateEscrowCancellation(tx transactionsDefinition.Transaction, height int64) (transactionsDefinition.Transaction, error) {
 	targetHash, ok := tx.CancellationTarget()
@@ -404,6 +417,11 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 		}
 		transactionsPool.RemoveEscrowTransaction(targetHash.GetBytes())
 		transactionsPool.PoolTxEscrow.BanTransactionByHash(targetHash.GetBytes())
+		// Record that the target was annulled. Removing it from the escrow pool
+		// makes it indistinguishable from a settled transfer afterwards, so
+		// without this marker the reversed amount keeps being reported as
+		// confirmed and the account's history does not add up.
+		markVoided(targetHash.GetBytes(), height, common.VoidedCancelled)
 		return nil
 	}
 	var n int
@@ -604,6 +622,11 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 	if height-mainTx.GetHeight() > common.MaxTransactionInMultiSigPool {
 		for _, t := range txs {
 			transactionsPool.RemoveMultiSignTransaction(t.Hash.GetBytes())
+			// Mark every entry, the main transaction and its approvals alike.
+			// Once they leave the pool nothing distinguishes them from settled
+			// transactions, and an approval for a transfer that never happened
+			// has no more effect than the transfer itself.
+			markVoided(t.Hash.GetBytes(), height, common.VoidedExpired)
 		}
 		return fmt.Errorf("main transaction %x expired in multi signature pool", mainTx.Hash.GetBytes()[:8])
 	}
@@ -613,7 +636,11 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 		return fmt.Errorf("no account found: MultiSign")
 	}
 	if len(txs) < int(acc.MultiSignNumber) {
-		logger.GetLogger().Println("not enough signatures for transactions to process ", tx.TxParam.MultiSignTx.GetHex())
+		// Silent: waiting for signatures is what a multisig transaction DOES,
+		// and this fires for every pending entry on every block. The state is
+		// visible where it belongs — in the transaction's reported status — and
+		// the outcome that is genuinely news, expiry after a week, is logged
+		// above as an error.
 		return nil
 	}
 	// Counting lives in CountMultiSignApprovals so the rule exists once. The
@@ -625,7 +652,7 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 	// occupied two slots, so one address could satisfy two approvals.
 	numApprovals, _ := CountMultiSignApprovals(mainTx, txs)
 	if numApprovals < int(acc.MultiSignNumber) {
-		logger.GetLogger().Println("not enough signatures for transactions to process ", tx.TxParam.MultiSignTx.GetHex())
+		// Same steady state as above, reached by the stricter count.
 		return nil
 	}
 
@@ -679,15 +706,25 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 	// DOUBLE-MOVE the amount. Do not break that invariant.
 
 	txs := transactionsPool.PoolTxEscrow.PeekTransactions(common.MaxTransactionInPool, height)
-	logger.GetLogger().Printf("ProcessTransactionsEscrow: height=%d, escrow pool returned %d transactions", height, len(txs))
 
-	for i, tx := range txs {
+	// Counted, not narrated. This loop used to emit three to five lines PER
+	// TRANSACTION, and it walks the whole escrow pool — up to
+	// MaxTransactionInPool entries — on EVERY block, whether or not anything is
+	// due. At any real escrow throughput that is hundreds of thousands of lines
+	// per block, and since the logger writes synchronously it was contending
+	// with block production itself.
+	//
+	// The per-transaction facts are all recoverable from the transaction
+	// itself; what an operator cannot reconstruct is how the batch was
+	// disposed of, so that is what gets reported.
+	var settled, notReady, movedToMultisig, delegatedSkipped int
+	var settledAmount int64
+
+	for _, tx := range txs {
 
 		amount := tx.TxData.Amount
 		address := tx.GetSenderAddress()
 		addressRecipient := tx.TxData.Recipient
-		logger.GetLogger().Printf("  escrow tx[%d]: hash=%s, sender=%s, recipient=%s, amount=%d, txHeight=%d, escrowDelay=%d",
-			i, tx.Hash.GetHex()[:16], address.GetHex()[:16], addressRecipient.GetHex()[:16], amount, tx.GetHeight(), tx.TxData.EscrowTransactionsDelay)
 		var err error
 		var n int
 		if tx.GetLockedAmount() > 0 {
@@ -702,15 +739,13 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			// AC-M7: skip this escrow tx but keep processing the rest of the
 			// batch. The previous `return nil` abandoned all remaining escrow
 			// transactions on the first delegated-account match.
-			logger.GetLogger().Printf("  escrow tx[%d]: delegated account (n=%d), skipping", i, n)
+			delegatedSkipped++
 			continue
 		} else { // this is not delegated account so standard transaction
 			senderAcc, exist := account.GetAccountByAddressBytes(address.GetBytes())
 			if !exist {
 				return fmt.Errorf("no account found: Escrow")
 			}
-			logger.GetLogger().Printf("  escrow tx[%d]: senderAcc.TransactionDelay=%d, txHeight+delay=%d, currentHeight=%d",
-				i, senderAcc.TransactionDelay, tx.GetHeight()+senderAcc.TransactionDelay, height)
 			if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 				// Skip this one and keep going, as the delegated-account branch
 				// above already does (AC-M7). Returning here abandoned every
@@ -719,15 +754,14 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 				// therefore least mature — transaction is served first. One
 				// fresh escrow transfer was enough to hold every older, already
 				// due transfer past its promised delay.
-				logger.GetLogger().Printf("  escrow tx[%d]: NOT READY, need to wait %d more blocks", i, tx.GetHeight()+senderAcc.TransactionDelay-height)
+				notReady++
 				continue
 			} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
-				logger.GetLogger().Printf("  escrow tx[%d]: moving to multisign pool", i)
+				movedToMultisig++
 				if transactionsPool.AddMultiSignTransaction(tx) {
 					transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				}
 			} else {
-				logger.GetLogger().Printf("  escrow tx[%d]: EXECUTING (delay passed or no delay)", i)
 				if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 					transactionsPool.AddMultiSignTransaction(tx)
 				}
@@ -744,9 +778,18 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 					return err
 				}
 				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
-				logger.GetLogger().Printf("  escrow tx[%d]: balance transferred %d from %s to %s", i, amount, address.GetHex()[:16], addressRecipient.GetHex()[:16])
+				settled++
+				settledAmount += amount
 			}
 		}
+	}
+
+	// Silence when nothing happened. A pool full of entries that are merely not
+	// due yet is the steady state between settlements, repeated every ten
+	// seconds; reporting it says only that time passed.
+	if settled > 0 || movedToMultisig > 0 || delegatedSkipped > 0 {
+		logger.GetLogger().Printf("escrow at height %d: %d settled (%d total), %d moved to multisig, %d skipped as delegated, %d not due yet (%d in pool)",
+			height, settled, settledAmount, movedToMultisig, delegatedSkipped, notReady, len(txs))
 	}
 	return nil
 }

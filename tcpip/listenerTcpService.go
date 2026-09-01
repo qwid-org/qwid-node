@@ -63,7 +63,7 @@ const quietConnTimeout = 3 * time.Minute
 // restart), in which case its replies never arrive and nothing on our side
 // times out. A fresh dial forces the peer to register a new stream for us.
 func RecycleTopicConnection(topic [2]byte, ip [4]byte) {
-	logger.GetLogger().Printf("recycling connection to %v on topic %c%c", ip, topic[0], topic[1])
+	logger.GetLogger().Printf("recycling connection to %s on topic %c%c", PeerLabel(ip), topic[0], topic[1])
 	deletedIP := closeAndRemovePeerTopic(topic, ip)
 	for _, d := range deletedIP {
 		select {
@@ -107,6 +107,15 @@ func closeAndRemovePeerTopic(topic [2]byte, ip [4]byte) [][]byte {
 	if accepted, ok := acceptedConnections[topic][ip]; ok {
 		accepted.Close()
 		delete(acceptedConnections[topic], ip)
+	}
+	// The outbound receive loop's stream is in tcpConnections only when nothing
+	// occupied the slot at dial time; close it explicitly so the loop wakes up
+	// (read error) and re-dials a fresh, re-handshaken stream in place. Without
+	// this a recycle left the loop alive on the old stream, holding the dialing
+	// dedup slot and blocking every reconnection attempt.
+	if oc, ok := outboundConns[topic][ip]; ok {
+		oc.Close()
+		delete(outboundConns[topic], ip)
 	}
 	return deletedIP
 }
@@ -174,14 +183,17 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 					if IsSelfIP(k) {
 						continue
 					}
-					if _, ok := validPeersConnected[k]; ok {
+					// Trust counters are keyed by transport IP; the map key may
+					// be a peer handle - translate before the trust lookup, or
+					// every handle-keyed peer silently drops out of broadcasts.
+					if _, ok := validPeersConnected[canonicalIP(k)]; ok {
 						targets = append(targets, connEntry{k, tcpConn0})
 					} else {
 						logger.GetLogger().Println("when send to all, ignore connection", k)
 					}
 				}
 			} else {
-				if _, ok2 := validPeersConnected[ipr]; !ok2 {
+				if _, ok2 := validPeersConnected[canonicalIP(ipr)]; !ok2 {
 					logger.GetLogger().Println("ignore when send to ", ipr)
 				} else if tcpConn, ok := tcpConnections[topic][ipr]; ok {
 					targets = append(targets, connEntry{ipr, tcpConn})
@@ -218,6 +230,20 @@ func LoopSend(sendChan <-chan []byte, topic [2]byte) {
 }
 
 func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
+	// Reconnect notifications may carry a virtual peer handle (the key its dead
+	// connection was registered under); dialing needs the transport address.
+	if IsPeerHandle(ip) {
+		real, ok := RealIPForHandle(ip)
+		if !ok {
+			logger.GetLogger().Printf("no transport address known for peer handle %v - cannot dial", ip)
+			select {
+			case receiveChan <- []byte("EXIT"):
+			default:
+			}
+			return
+		}
+		ip = real
+	}
 	if !beginDial(topic, ip) {
 		logger.GetLogger().Printf("connection already active or pending for topic %c%c peer %v", topic[0], topic[1], ip)
 		select {
@@ -304,6 +330,10 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		return
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
+	// Register and tag this connection under the authenticated peer's handle,
+	// so two nodes sharing one transport IP stay two distinct peers. Dialing,
+	// trust, bans and rate limits keep using the transport ip.
+	key := connKeyFor(peerID, ip)
 
 	// Task 3: wrap the raw, now-authenticated stream in the AEAD record layer.
 	// tcpConn stays the raw *net.TCPConn (used for dial/re-dial and Close);
@@ -336,18 +366,32 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	// If an accepted connection already exists, we keep it for sending and
 	// only use this outbound connection for the receive loop.
 	outboundStoredInMap := false
-	if existingConn, exists := tcpConnections[topic][ip]; exists {
+	if existingConn, exists := tcpConnections[topic][key]; exists {
 		_ = existingConn
 	} else {
-		tcpConnections[topic][ip] = conn
+		tcpConnections[topic][key] = conn
 		outboundStoredInMap = true
 	}
 	var topicipBytes [6]byte
-	copy(topicipBytes[:], append(topic[:], ip[:]...))
+	copy(topicipBytes[:], append(topic[:], key[:]...))
 	peersConnected[topicipBytes] = topic
 	validPeersConnected[ip] = common.ConnectionMaxTries
 	nodePeersConnected[ip] = common.ConnectionMaxTries
+	if _, ok := outboundConns[topic]; !ok {
+		outboundConns[topic] = make(map[[4]byte]net.Conn)
+	}
+	outboundConns[topic][key] = conn
 	PeersMutex.Unlock()
+
+	// key and conn are re-assigned on in-loop re-dials; the closure reads their
+	// final values, so it always unregisters the stream this loop last used.
+	defer func() {
+		PeersMutex.Lock()
+		if c, ok := outboundConns[topic][key]; ok && c == conn {
+			delete(outboundConns[topic], key)
+		}
+		PeersMutex.Unlock()
+	}()
 
 	reconnectionTries := 0
 
@@ -359,6 +403,13 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		if outboundStoredInMap {
 			deletedIP := CloseAndRemoveConnection(conn)
 			PeersMutex.Unlock()
+			// A recycle may have already removed this connection from the maps,
+			// making deletedIP empty — the reconnect notification must still go
+			// out, or this exit is the end of the lifecycle and the topic stays
+			// down until the peer happens to dial us.
+			if len(deletedIP) == 0 {
+				deletedIP = [][]byte{append(topic[:], ip[:]...)}
+			}
 			for _, d := range deletedIP {
 				select {
 				case ChanPeer <- d:
@@ -388,13 +439,19 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		}
 	}()
 
-	rTopic := map[[2]byte][]byte{}
-	// Topics currently discarding the tail of an over-long message. Dropping the
-	// accumulated prefix is not enough: the rest of that message keeps arriving,
-	// and without this the next fragment is mistaken for the start of a new one,
-	// which is what produced "wrong MessageInitialization" and left the
-	// connection permanently desynchronised.
-	discardingTopic := map[[2]byte]bool{}
+	// notifyReconnect asks discovery to start a fresh lifecycle for this peer and
+	// topic. Every terminal path that is not a deliberate ban must call it (or
+	// cleanupOutbound, which notifies itself) — this goroutine owns the dialing
+	// dedup slot, so if it exits silently nothing ever re-dials the peer.
+	notifyReconnect := func() {
+		select {
+		case ChanPeer <- append(topic[:], ip[:]...):
+		default:
+			logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+		}
+	}
+
+	fa := frameAssembler{topic: topic}
 
 	// lastData tracks the last moment ANY bytes arrived on this connection, so a
 	// silently dead peer (NAT drop, hard reboot - no EOF, no error, only read
@@ -419,7 +476,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					if conn != nil {
 						conn.Close()
 					}
-					deletedIP := closeAndRemovePeerTopic(topic, ip)
+					deletedIP := closeAndRemovePeerTopic(topic, key)
 					receiveChan <- []byte("EXIT")
 					for _, d := range deletedIP {
 						select {
@@ -441,6 +498,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 				}
 				continue
 			}
+			// Throttled to once a second: this runs per 1KB fragment, and a
+			// 3MB message would otherwise take the shared lock ~3000 times.
+			if time.Since(lastData) >= time.Second {
+				NoteInbound(topic, ip)
+			}
 			lastData = time.Now()
 			if bytes.Equal(r, []byte("<-ERR->")) {
 				if reconnectionTries > common.ConnectionMaxTries {
@@ -449,8 +511,10 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					tcpConn, err = net.DialTCP("tcp", nil, tcpAddr)
 					if err != nil {
 						logger.GetLogger().Printf("Connection attempt to %s failed: %v", ipport, err.Error())
-						// Reconnection failed — exit cleanly so subscriber can
-						// be re-established by the peer discovery loop.
+						// Reconnection failed — exit cleanly, but explicitly ask
+						// discovery to retry: this goroutine holds the dialing
+						// slot, so nobody else could have started a lifecycle.
+						notifyReconnect()
 						receiveChan <- []byte("EXIT")
 						return
 					}
@@ -461,11 +525,14 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					// receive loop resumes reading from it — otherwise an
 					// unauthenticated stream would be trusted just like the
 					// original, already-handshaken connection.
-					if _, sKeys, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
+					if rePeerID, sKeys, hsErr := HandshakeInitiator(tcpConn, self); hsErr != nil {
 						logger.GetLogger().Println("re-dial handshake failed with", ipport, ":", hsErr)
 						tcpConn.Close()
 						if isHandshakeProtocolViolation(hsErr) {
 							BanIP(ip)
+						} else {
+							// Transport-level failure, not abuse: retry later.
+							notifyReconnect()
 						}
 						receiveChan <- []byte("EXIT")
 						return
@@ -480,6 +547,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						if sKeys == nil {
 							logger.GetLogger().Println("re-dial handshake: no session keys derived for", ip)
 							tcpConn.Close()
+							notifyReconnect()
 							receiveChan <- []byte("EXIT")
 							return
 						}
@@ -487,21 +555,52 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						if wrapErr != nil {
 							logger.GetLogger().Println("re-dial handshake: failed to wrap connection:", wrapErr)
 							tcpConn.Close()
+							notifyReconnect()
 							receiveChan <- []byte("EXIT")
 							return
 						}
 						conn = newConn
-						if outboundStoredInMap {
-							PeersMutex.Lock()
-							if _, ok := tcpConnections[topic]; !ok {
-								tcpConnections[topic] = make(map[[4]byte]net.Conn)
-							}
-							tcpConnections[topic][ip] = conn
-							PeersMutex.Unlock()
+						newKey := connKeyFor(rePeerID, ip)
+						PeersMutex.Lock()
+						if _, ok := tcpConnections[topic]; !ok {
+							tcpConnections[topic] = make(map[[4]byte]net.Conn)
 						}
+						if newKey != key {
+							// A different node answered this transport address
+							// (NAT remap); move the registration to its identity.
+							if outboundStoredInMap {
+								delete(tcpConnections[topic], key)
+								var oldTopicIP [6]byte
+								copy(oldTopicIP[:], append(topic[:], key[:]...))
+								delete(peersConnected, oldTopicIP)
+							}
+							delete(outboundConns[topic], key)
+						}
+						// Take the send-path slot whenever it is free. A recycle
+						// may have emptied it since the original dial; trusting the
+						// stale outboundStoredInMap=false here would leave the topic
+						// with no send path at all until the peer dials us.
+						if existing, exists := tcpConnections[topic][newKey]; !exists || existing == nil {
+							tcpConnections[topic][newKey] = conn
+							outboundStoredInMap = true
+						} else if outboundStoredInMap {
+							tcpConnections[topic][newKey] = conn
+						}
+						var newTopicIP [6]byte
+						copy(newTopicIP[:], append(topic[:], newKey[:]...))
+						peersConnected[newTopicIP] = topic
+						if _, ok := outboundConns[topic]; !ok {
+							outboundConns[topic] = make(map[[4]byte]net.Conn)
+						}
+						outboundConns[topic][newKey] = conn
+						PeersMutex.Unlock()
+						key = newKey
 					}
 					reconnectionTries = 0
 					lastData = time.Now() // fresh stream - restart the quiet clock
+					// A fresh stream starts at a frame boundary; stale partial
+					// bytes from the dead socket must not prefix it.
+					fa = frameAssembler{topic: topic}
 					continue
 				}
 				reconnectionTries++
@@ -520,86 +619,42 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			//	continue
 			//}
 
-			if discardingTopic[topic] {
-				// Still inside the over-long message: swallow fragments until its
-				// end marker, then resume framing on a real boundary.
-				if len(r) >= 7 && bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-					discardingTopic[topic] = false
-					logger.GetLogger().Printf("resynchronised on topic %c%c after discarding an over-long message", topic[0], topic[1])
-				}
-				continue
-			}
-
-			rt, ok := rTopic[topic]
-			if ok {
-				r = append(rt, r...)
-			}
-			// NP-M3: guard the trailing-marker check so a fragment shorter than
-			// the 7-byte "<-END->" marker cannot panic on r[len(r)-7:].
-			if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-				rTopic[topic] = r
-			} else {
-				rTopic[topic] = []byte{}
-			}
-
-			if int32(len(r)) > MaxMessageSizeForTopic(topic) {
-				logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
-					topic[0], topic[1], len(r), MaxMessageSizeForTopic(topic))
-				// Unless this fragment already ended the message, the rest of it
-				// is still in flight and must be skipped rather than parsed.
-				if len(r) < 7 || !bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-					discardingTopic[topic] = true
-				}
+			// Framing via the shared assembler: delimiters are found INSIDE the
+			// buffer, so back-to-back messages on a busy stream all survive
+			// (the old chunk-end-only check glued and lost most of them).
+			payloads, viol := fa.push(r)
+			if viol {
 				PeersMutex.Lock()
 				ReduceTrustRegisterPeer(ip)
+				trust, okTrust := validPeersConnected[ip]
 				PeersMutex.Unlock()
-				rTopic[topic] = []byte{}
-				if trust, ok := validPeersConnected[ip]; ok && trust <= 0 {
+				if okTrust && trust <= 0 {
 					BanIP(ip)
 					receiveChan <- []byte("EXIT")
 					return
 				}
-				continue
 			}
-			if bytes.Equal(r[len(r)-7:], []byte("<-END->")) {
-				if len(r) > 4 {
-					if bytes.Equal(r[:4], common.MessageInitialization[:]) {
-						// The message head is the first two bytes of the body,
-						// straight after the 4-byte initialization marker
-						// (message.BaseMessage.GetBytes). Reading it here — before
-						// any parsing — is what lets the limiter tell sync traffic
-						// from gossip. A frame too short to hold a head charges the
-						// gossip budget, which is where junk belongs.
-						var head [2]byte
-						if len(r) >= 6 {
-							copy(head[:], r[4:6])
-						}
-						if !AllowMessageFromIPForHead(ip, head) {
-							logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
-							PeersMutex.Lock()
-							ReduceTrustRegisterPeer(ip)
-							trust, ok := validPeersConnected[ip]
-							PeersMutex.Unlock()
-							if ok && trust <= 0 {
-								BanIP(ip)
-								receiveChan <- []byte("EXIT")
-								return
-							}
-							continue // drop this message; do not dispatch
-						}
-						receiveChan <- append(ip[:], r[4:]...)
-					} else {
-						logger.GetLogger().Println("wrong MessageInitialization", r[:4], "should be", common.MessageInitialization[:])
-						PeersMutex.Lock()
-						ReduceTrustRegisterPeer(ip)
-						PeersMutex.Unlock()
-						if trust, ok := validPeersConnected[ip]; ok && trust <= 0 {
-							BanIP(ip)
-							receiveChan <- []byte("EXIT")
-							return
-						}
-					}
+			for _, m := range payloads {
+				// The message head is the first two bytes of the body; reading
+				// it pre-parse lets the limiter tell sync traffic from gossip.
+				var head [2]byte
+				if len(m) >= 2 {
+					copy(head[:], m[:2])
 				}
+				if !AllowMessageFromIPForHead(ip, head) {
+					logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
+					PeersMutex.Lock()
+					ReduceTrustRegisterPeer(ip)
+					trust, okTrust := validPeersConnected[ip]
+					PeersMutex.Unlock()
+					if okTrust && trust <= 0 {
+						BanIP(ip)
+						receiveChan <- []byte("EXIT")
+						return
+					}
+					continue // drop this message; do not dispatch
+				}
+				receiveChan <- append(key[:], m...)
 			}
 		}
 	}

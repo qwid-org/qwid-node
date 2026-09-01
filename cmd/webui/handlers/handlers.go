@@ -147,7 +147,7 @@ func GetWalletInfo(w http.ResponseWriter, r *http.Request) {
 	resp := WalletInfoResponse{
 		Loaded:    true,
 		Address:   MainWallet.MainAddress.GetHex(),
-		PubKeyHex: MainWallet.Account1.PublicKey.GetHex()[:64] + "...",
+		PubKeyHex: common.HexPrefix(MainWallet.Account1.PublicKey.GetHex(), 64),
 		SigName:   MainWallet.GetSigName(true),
 		SigName2:  MainWallet.GetSigName(false),
 	}

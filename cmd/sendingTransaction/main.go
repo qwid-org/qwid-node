@@ -55,7 +55,7 @@ func main() {
 	if err != nil {
 		widgets.QMessageBox_Information(nil, "Warning", "error with retrieving current encryption", widgets.QMessageBox__Ok, widgets.QMessageBox__Ok)
 	}
-	wallet.InitActiveWallet(0, string(password), sigName, sigName2)
+	wallet.InitActiveWallet(1, string(password), sigName, sigName2)
 	MainWallet = wallet.GetActiveWallet()
 
 	for range num {
@@ -116,7 +116,7 @@ func SampleTransaction(w *wallet.Wallet) transactionsDefinition.Transaction {
 	defer mutex.Unlock()
 	sender := w.MainAddress
 	recv := common.Address{}
-	br := common.Hex2Bytes("5b21c69aaea1ddd18bd17ad6f23f109479cca304")
+	br := common.Hex2Bytes("1fbf5070a3144e922e698f2b54ac3955c33f3bb6")
 	//br := rand.RandomBytes(20)
 	err := recv.Init(append([]byte{0}, br...))
 	if err != nil {

@@ -20,21 +20,26 @@ import (
 // operator gets one loud line with the hash to grep for on the peer.
 const (
 	// missingTxRetryInterval is the minimum time between two bt requests for
-	// the same hash. The peer either answers within a round trip or something
-	// is wrong - asking twice a second only floods both logs.
-	missingTxRetryInterval = 5 * time.Second
+	// the same hash. It must comfortably cover transferring AND processing a
+	// full backlog: with tens of thousands of transactions in flight the
+	// answers take a dozen seconds to arrive and be verified, and a 5s retry
+	// re-requested hashes whose answers were still queued — the peer then sent
+	// every batch again, the duplicate flood kept the receive loop pinned, and
+	// block application starved on CPU (the "speeds up after Ctrl+C" symptom).
+	missingTxRetryInterval = 30 * time.Second
 	// missingTxEscalateAfter is how many unanswered requests it takes before
 	// the request is broadcast to every live peer ahead and the operator is
-	// pointed at the hash. 6 tries * 5s = ~30s of silence.
-	missingTxEscalateAfter = 6
+	// pointed at the hash. 3 tries * 30s = ~1.5 min of silence.
+	missingTxEscalateAfter = 3
 	// missingTxRecycleAfter is how many unanswered requests it takes before
 	// the transaction-topic connection to the unresponsive peer is torn down
 	// and re-dialed. The bt requests demonstrably leave this node while
 	// nothing comes back, which is the signature of a half-dead link: OUR
 	// receive loop is fine, but the peer's send side points at a stale stream
-	// (typically left over from our earlier restart) that no timeout on our
-	// side can detect. 12 tries * 5s = ~1 minute of silence.
-	missingTxRecycleAfter = 12
+	// (typically left over from our earlier restart). 2 tries * 30s = ~1 minute
+	// of silence - a fresh dial replaces the peer's stale stream, and a healthy
+	// fetch never goes a full minute without a single bx.
+	missingTxRecycleAfter = 2
 	// missingTxForget drops bookkeeping for hashes not asked about for this
 	// long, so the map cannot grow without bound across a long sync.
 	missingTxForget = 10 * time.Minute
@@ -88,6 +93,17 @@ func dueMissingTxRequests(hashes [][]byte, now time.Time) (due [][]byte, escalat
 	return due, escalate, recycle
 }
 
+// outstandingMissingTxCount reports how many transaction hashes are currently
+// being chased. Non-zero means a batch is waiting on its transactions - the
+// moment when redundant header re-requests hurt the most, because every one of
+// them makes the peer resend a multi-MB sh batch over the same link the bx
+// answers need.
+func outstandingMissingTxCount() int {
+	missingTxMutex.Lock()
+	defer missingTxMutex.Unlock()
+	return len(missingTx)
+}
+
 // clearMissingTx drops all bookkeeping once a sync round finds nothing
 // missing, so a later re-miss starts a fresh escalation cycle.
 func clearMissingTx() {
@@ -108,8 +124,39 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 	if len(due) == 0 {
 		return 0
 	}
-	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %v, first: %x",
-		len(due), addr, due[0][:8])
+	// The batch server (known from the sync topic) does not necessarily hold a
+	// transaction-topic link with us - and a targeted send without a connection
+	// is silently dropped in LoopSend, so the request would evaporate and the
+	// fetch would starve with no error anywhere. Transactions are served by
+	// hash, so ANY peer with a transaction-topic connection can answer; fall
+	// back to one when the server has none.
+	if !tcpip.HasConnection(tcpip.TransactionTopic, addr) {
+		fallback := addr
+		for topicip := range tcpip.GetPeersConnected(tcpip.TransactionTopic) {
+			var ip [4]byte
+			copy(ip[:], topicip[2:])
+			if tcpip.IsSelfIP(ip) {
+				continue
+			}
+			fallback = ip
+			break
+		}
+		if fallback == addr {
+			logger.GetLogger().Printf("cannot request %d missing transaction(s): batch server %s has no "+
+				"transaction-topic link and no other transaction-topic peer is connected - asking discovery to dial it",
+				len(due), tcpip.PeerLabel(addr))
+			// No TT link anywhere means nothing will ever answer these requests.
+			// Recycling a connection that does not exist just pushes a reconnect
+			// notification for (TT, addr), so discovery dials the batch server.
+			tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
+			return 0
+		}
+		logger.GetLogger().Printf("batch server %s has no transaction-topic link - requesting %d missing transaction(s) from %s instead",
+			tcpip.PeerLabel(addr), len(due), tcpip.PeerLabel(fallback))
+		addr = fallback
+	}
+	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %s, first: %x",
+		len(due), tcpip.PeerLabel(addr), due[0][:8])
 
 	// Pacing: 5 chunks/s of MaxNumberTransactionInChunk txs each (~2500 tx/s).
 	// The ceiling is the peer's per-IP sync-class message budget
@@ -137,11 +184,13 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 				others = append(others, t)
 			}
 		}
-		for _, h := range escalate {
-			logger.GetLogger().Printf("missing tx %x still unanswered after %d requests to %v - "+
-				"asking %d other peer(s); grep the peer's log for this hash ('bt'/'bx' lines)",
-				h[:8], missingTxEscalateAfter, addr, len(others))
-		}
+		// One summary line, not one line per hash: at high TPS thousands of
+		// hashes cross the escalation threshold in the same round, and writing
+		// a log line for each (to stdout AND the log file) took longer than
+		// the requests themselves and drowned everything else in the log.
+		logger.GetLogger().Printf("%d missing tx(s) still unanswered after %d+ requests to %s - "+
+			"asking %d other peer(s); first: %x (grep the peer's log for 'bt'/'bx' lines)",
+			len(escalate), missingTxEscalateAfter, tcpip.PeerLabel(addr), len(others), escalate[0][:8])
 		for _, t := range others {
 			for i := 0; i < len(escalate); i += maxChunk {
 				end := i + maxChunk
@@ -159,8 +208,18 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 	// peer's send side holds a stale stream from before our restart - and only
 	// a fresh dial can replace it.
 	if recycle {
-		logger.GetLogger().Printf("no bx answers from %v for ~1 minute - recycling the transaction-topic connection", addr)
-		tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
+		// "No completed bx" is not the same as "dead link". A 500-tx answer is
+		// ~3MB, and over a slow uplink it takes longer to arrive than this
+		// watchdog's silence threshold - recycling then destroys the very
+		// transfer being waited for, every time, and the fetch never completes.
+		// Bytes still flowing on the topic mean the answer is in flight: hold.
+		if d, ok := tcpip.SinceLastInbound(tcpip.TransactionTopic, addr); ok && d < missingTxRetryInterval {
+			logger.GetLogger().Printf("no complete bx from %s yet, but data is flowing (last bytes %s ago) - "+
+				"a large answer is in flight, not recycling", tcpip.PeerLabel(addr), d.Truncate(time.Second))
+		} else {
+			logger.GetLogger().Printf("no bx answers from %s for ~1 minute - recycling the transaction-topic connection", tcpip.PeerLabel(addr))
+			tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
+		}
 	}
 	return len(due)
 }

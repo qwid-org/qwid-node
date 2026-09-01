@@ -339,8 +339,23 @@ type PubKey struct {
 
 func (pk *PubKey) Init(b []byte, mainAddress Address) error {
 	//logger.GetLogger().Println("PubKey.Init: len(b)=", len(b), "PubKeyLength=", PubKeyLength(false), "PubKeyLength2=", PubKeyLength2(false))
-	if len(b) != PubKeyLength(false) && len(b) != PubKeyLength2(false) && !IsPaused() && !IsPaused2() {
-		return fmt.Errorf("error Pubkey initialization with wrong length, should be %v, %v, got %v", PubKeyLength(false), PubKeyLength2(false), len(b))
+	// A lower bound, not an exact match. The previous condition was dead: it
+	// also required !IsPaused() && !IsPaused2(), and since IsPaused2 became
+	// derived from IsPaused exactly one scheme is always live, so that pair can
+	// never both be false. Init therefore accepted a key of ANY length,
+	// including an empty one — which it then hashed into a real-looking address
+	// (3345524abf6bbe1809449224b5972c41790b6cf2 for every keyless transaction).
+	//
+	// Checking against the exact scheme lengths instead was rejected on
+	// purpose: a node replaying history that crossed more than one scheme
+	// change would meet keys of a scheme it no longer lists, and turning that
+	// into a decode failure would break sync. A key shorter than an address
+	// cannot be one under any scheme, so this catches the empty and truncated
+	// cases without ever standing between the node and its own history. A
+	// wrong-but-plausible length still passes here and is caught where it
+	// always was, by signature verification.
+	if len(b) <= AddressLength {
+		return fmt.Errorf("public key is %v bytes, too short to be a key under any scheme", len(b))
 	}
 	if len(b) == PubKeyLength(false) {
 		pk.Primary = true
@@ -547,4 +562,20 @@ func EmptySignature() Signature {
 	tmp := make([]byte, SignatureLength(false)+1)
 	s.Init(tmp, EmptyAddress())
 	return s
+}
+
+// HexPrefix returns at most n characters of a hex string, appending an ellipsis
+// when it had to cut.
+//
+// It exists because truncating with a bare s[:n] panics whenever the value is
+// shorter than expected, and "shorter than expected" is routine here: a
+// transaction without a public key carries an EMPTY byte slice, not a nil one,
+// once it has been through JSON — so a nil check lets it past and the slice
+// expression brings the process down. That is how displaying the details of an
+// ordinary transfer crashed the Web UI.
+func HexPrefix(s string, n int) string {
+	if n < 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

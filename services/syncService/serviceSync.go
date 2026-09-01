@@ -11,6 +11,7 @@ import (
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/services"
+	"github.com/qwid-org/qwid-node/services/transactionServices"
 	"github.com/qwid-org/qwid-node/tcpip"
 )
 
@@ -188,6 +189,15 @@ func SendHeaders(addr [4]byte, bHeight int64, height int64) {
 // is plenty: applying the answered batch takes far longer than that anyway.
 const headerRequestMinInterval = time.Second
 
+// headerRequestFetchingInterval throttles header requests while missing
+// transactions are being fetched. Every request makes the peer resend the
+// full multi-MB sh batch for the SAME range (requests are anchored at our
+// height), and at one per second those redundant batches saturated the link
+// the bx transaction answers needed - the fetch could never finish before the
+// next batch flood. One refresh per 15s keeps the retry path alive at ~1/15th
+// of the bandwidth cost.
+const headerRequestFetchingInterval = 15 * time.Second
+
 var (
 	lastHeaderRequest      = map[[4]byte]time.Time{}
 	lastHeaderRequestMutex sync.Mutex
@@ -196,9 +206,13 @@ var (
 // allowHeaderRequest reports whether a header request to addr may go out now,
 // and if so records it. Bounded by the peer set, so the map cannot grow.
 func allowHeaderRequest(addr [4]byte) bool {
+	interval := headerRequestMinInterval
+	if outstandingMissingTxCount() > 0 {
+		interval = headerRequestFetchingInterval
+	}
 	lastHeaderRequestMutex.Lock()
 	defer lastHeaderRequestMutex.Unlock()
-	if t, ok := lastHeaderRequest[addr]; ok && time.Since(t) < headerRequestMinInterval {
+	if t, ok := lastHeaderRequest[addr]; ok && time.Since(t) < interval {
 		return false
 	}
 	lastHeaderRequest[addr] = time.Now()
@@ -238,51 +252,33 @@ func Send(addr [4]byte, nb []byte) bool {
 type syncProgress struct {
 	height int64
 	since  time.Time
+	// noClaimRounds counts consecutive stall rounds with a connected sync peer
+	// but zero live height claims - the signature of a half-dead sync link.
+	noClaimRounds int
 }
 
 var progress = syncProgress{height: -1}
 
-// checkSyncStall gives back a couple of blocks when the node has been syncing
-// without advancing for SyncStallTimeout.
+// checkSyncStall unsticks a sync that has stopped advancing for
+// SyncStallTimeout, WITHOUT giving blocks back.
 //
 // The sync protocol has no retry of its own: a node that asked a peer for a
-// block's transactions ("bt") and never got the answer ("bx") — because the
-// connection dropped in between — keeps re-checking the same incomplete block
-// forever. Rewinding makes the next batch from the peer overlap blocks we
-// already hold, which re-runs the missing-transaction census in the "sh"
-// handler and re-sends the request. The same recovery covers a batch that
-// stalled on blocks rather than transactions.
-// rewindLockWait bounds how long the stall watchdog waits for the block lock.
-const rewindLockWait = 2 * time.Second
-
-// lockBlocksForRewind takes common.BlockMutex for the stall rewind if it becomes
-// free within rewindLockWait. Bounded, so the sync send loop this runs on is
-// never parked behind a long batch.
-func lockBlocksForRewind() bool {
-	deadline := time.Now().Add(rewindLockWait)
-	for {
-		if common.BlockMutex.TryLock() {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// stallRewindUseful reports whether rewinding could achieve anything from
-// height, along with the number of live peer claims behind that answer.
+// block's transactions ("bt") and never got the answer ("bx") keeps re-checking
+// the same incomplete block forever. That used to be solved by rewinding two
+// blocks so the peer's next batch would overlap and the request be re-issued.
 //
-// A rewind is only ever a way to make a peer re-send a batch. With nobody above
-// us to ask, giving blocks back achieves nothing and costs SyncStallRewind
-// blocks every SyncStallTimeout — a node left alone on the network (or one whose
-// only "peer" is its own self-connection echoing our pre-rewind height) would
-// walk its chain backwards for as long as it runs.
-func stallRewindUseful(height int64) (useful bool, live int) {
-	ahead, live := peersAhead(height)
-	return len(ahead) > 0, live
-}
+// Rewinding is gone. It treated a lost message by destroying confirmed local
+// state, and it could not tell that case apart from the several others that
+// look identical from here — a half-dead link, a peer that is simply behind,
+// a claim that never arrived. When it guessed wrong it walked the chain
+// backwards, and every rewind reopened a window for the accounting and supply
+// invariants that the fork-resolution path already handles properly.
+//
+// What replaced it costs nothing if it guesses wrong: ask the peers directly
+// for the next bucket of headers, and tear down a sync link that has gone
+// quiet. A peer that is behind ignores the request; an ahead peer answers, and
+// the answer both advances the chain and re-runs the missing-transaction
+// census that the rewind was trying to trigger by force.
 
 func checkSyncStall(now time.Time) {
 	h := common.GetHeight()
@@ -305,90 +301,90 @@ func checkSyncStall(now time.Time) {
 		return
 	}
 
-	if canRewind, live := stallRewindUseful(h); !canRewind {
-		// syncPeers counts real peers only, so the log separates "nobody is
-		// connected on the sync topic" from "connected, but their 'hi' is not
-		// arriving" - the two need different fixes.
-		syncPeers := tcpip.CountPeersOnTopic(tcpip.SyncTopic)
-		logger.GetLogger().Printf("sync stalled at height %d for %s, but no live peer is ahead of us "+
-			"(livePeerClaims=%d syncPeers=%d) - not rewinding, waiting for a peer that can serve the batch",
-			h, now.Sub(progress.since).Truncate(time.Second), live, syncPeers)
-		// A connected sync peer whose 'hi' is not reaching us (half-dead link,
-		// throttling, a lost message) still answers header requests. Ask blindly
-		// for the next bucket instead of waiting for a claim that may never
-		// come: a peer that is behind us simply ignores the request, while an
-		// ahead peer's 'sh' answer both advances the chain and gives the
-		// quiet-connection watchdog the inbound data it watches for.
-		if syncPeers > 0 {
-			sent := 0
+	// A held syncProcessMutex means a batch is actively being verified or its
+	// missing transactions are being fetched — the very work a stall watchdog
+	// exists to restart. During that work the 'hi' stream queues behind the
+	// same handler, so claims EXPECTEDLY go stale; acting on that (recycling
+	// the sync connection, blind requests) tore down a healthy link mid-batch
+	// and turned a slow catch-up into connection churn. Busy is not stalled.
+	if !syncProcessMutex.TryLock() {
+		progress.since = now
+		return
+	}
+	syncProcessMutex.Unlock()
+
+	// Missing-transaction answers actively arriving are progress even while
+	// the height stands still: a full-block backlog of tens of thousands of
+	// transactions legitimately takes minutes to stream in at 500 per answer.
+	// Acting then only enlarges the missing set, so the fetch never converges.
+	if transactionServices.TimeSinceLastBxArrival() < SyncStallTimeout {
+		progress.since = now
+		return
+	}
+
+	// syncPeers counts real peers only, so the log separates "nobody is
+	// connected on the sync topic" from "connected, but their 'hi' is not
+	// arriving" - the two need different fixes.
+	_, live := peersAhead(h)
+	syncPeers := tcpip.CountPeersOnTopic(tcpip.SyncTopic)
+	logger.GetLogger().Printf("sync stalled at height %d for %s (livePeerClaims=%d syncPeers=%d)",
+		h, now.Sub(progress.since).Truncate(time.Second), live, syncPeers)
+
+	// A sync peer that is connected yet delivers no 'hi' for two full stall
+	// rounds (and answers no blind header request either) is a half-dead
+	// link - typically the peer's send side still points at a stream from
+	// before our restart, which no timeout on our side can detect. Tear the
+	// sync-topic connection down and re-dial, exactly as the missing-tx
+	// path recycles the transaction topic.
+	if live == 0 && syncPeers > 0 {
+		progress.noClaimRounds++
+		if progress.noClaimRounds >= 2 {
+			progress.noClaimRounds = 0
 			for topicip := range tcpip.GetPeersConnected(tcpip.SyncTopic) {
 				var ip [4]byte
 				copy(ip[:], topicip[2:])
 				if tcpip.IsSelfIP(ip) {
 					continue
 				}
-				SendGetHeaders(ip, h+common.NumberOfHashesInBucket)
-				sent++
+				logger.GetLogger().Printf("no 'hi' from %s for two stall rounds - recycling the sync-topic connection", tcpip.PeerLabel(ip))
+				tcpip.RecycleTopicConnection(tcpip.SyncTopic, ip)
 			}
-			logger.GetLogger().Printf("sync stall recovery: blind header request up to height %d sent to %d sync peer(s)",
-				h+common.NumberOfHashesInBucket, sent)
 		}
-		// Pace this message by SyncStallTimeout rather than repeating it every second.
-		progress.since = now
-		return
+	} else {
+		progress.noClaimRounds = 0
 	}
 
-	// Rewind under the same lock the "sh" handler holds, so we never pull blocks
-	// out from under a batch that is mid-apply. A held lock also means a batch is
-	// actively running, which is not a stall — skip this round.
-	if !syncProcessMutex.TryLock() {
-		return
-	}
-	defer syncProcessMutex.Unlock()
-
-	// syncProcessMutex alone is not enough: the nonce service applies live blocks
-	// under common.BlockMutex without ever taking it. Rewinding the account state
-	// from under such an application makes it store the rewound state under the
-	// block's own height — balances then permanently disagree with the block fee
-	// ledger and every following block is rejected on the supply invariant. A
-	// held block lock also means a block is being applied, i.e. not a stall.
+	// Deliberately NO state rewind. A stalled-on-data node's state at h is
+	// perfectly valid — the peer just needs to resend from h+1, and header
+	// requests are anchored at our own height, so the blind request below asks
+	// for exactly that. The old 2-block rewind was strictly harmful: account
+	// snapshots exist once per 20-block batch, so it landed on the nearest
+	// snapshot up to 20 blocks back and forced a whole batch to be
+	// re-downloaded per stall round; a genuine fork at our tip is detected by
+	// the sh handler's own fork paths when the batch arrives.
 	//
-	// Give it a moment rather than one TryLock: this is the only mechanism that
-	// unsticks a stalled sync, so it must not be starved by a lock that happens
-	// to be busy every time it looks. A skipped round is logged — silently doing
-	// nothing here is indistinguishable from a node that has simply given up.
-	if !lockBlocksForRewind() {
-		logger.GetLogger().Printf("sync stalled at height %d for %s, but a block is being applied - "+
-			"postponing the rewind to the next round", h, now.Sub(progress.since).Truncate(time.Second))
-		return
-	}
-	defer common.BlockMutex.Unlock()
-
-	target := h - SyncStallRewind
-	if target < 0 {
-		target = 0
-	}
-	logger.GetLogger().Printf("sync stalled at height %d for %s - rewinding to %d to re-request the batch",
-		h, now.Sub(progress.since).Truncate(time.Second), target)
-	services.ResetAccountsAndBlocksSyncLocked(target)
-
-	// Push the request out ourselves rather than waiting for a peer's next 'hi'.
-	// The rewind alone changes nothing if those messages are not reaching us.
-	newHeight := common.GetHeight()
-	sent, live := requestHeadersFromPeersAhead(newHeight)
-	logger.GetLogger().Printf("sync stall recovery: height=%d target=%d syncing=%v livePeerClaims=%d headerRequestsSent=%d",
-		newHeight, common.GetSyncTarget(), common.IsSyncing.Load(), live, sent)
-	if live == 0 {
-		logger.GetLogger().Println("sync stall recovery: no live peer height claims - " +
-			"peers' 'hi' messages are not reaching us, so no batch can ever be requested")
-	} else if sent == 0 {
-		logger.GetLogger().Printf("sync stall recovery: %d live peer claim(s), none above our height %d - "+
-			"the peers we can see are not ahead of us", live, newHeight)
+	// The request goes to EVERY sync peer, not only the ones known to be
+	// ahead: a peer whose 'hi' is not reaching us has no recorded height, and
+	// it is exactly the peer most likely to be the one holding up the sync. A
+	// peer that is behind simply ignores it.
+	if syncPeers > 0 {
+		sent := 0
+		for topicip := range tcpip.GetPeersConnected(tcpip.SyncTopic) {
+			var ip [4]byte
+			copy(ip[:], topicip[2:])
+			if tcpip.IsSelfIP(ip) {
+				continue
+			}
+			SendGetHeaders(ip, h+common.NumberOfHashesInBucket)
+			sent++
+		}
+		logger.GetLogger().Printf("sync stall recovery: blind header request up to height %d sent to %d sync peer(s)",
+			h+common.NumberOfHashesInBucket, sent)
+	} else {
+		logger.GetLogger().Println("sync stall recovery: no sync peer is connected, so no batch can be requested")
 	}
 
-	// Restart the clock even if the rewind landed somewhere else than asked, so
-	// a chain of rewinds is paced by SyncStallTimeout rather than firing every
-	// second.
+	// Pace this by SyncStallTimeout rather than repeating it every second.
 	progress.height = common.GetHeight()
 	progress.since = now
 }
@@ -410,6 +406,7 @@ func sendSyncMsgInLoop() {
 
 func startPublishingSyncMsg() {
 
+	tcpip.RegisterTopicHandler(tcpip.SyncTopic, OnMessage)
 	go tcpip.StartNewListener(tcpip.SyncTopic)
 	go tcpip.LoopSend(services.SendChanSync, tcpip.SyncTopic)
 }

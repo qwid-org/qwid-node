@@ -23,6 +23,38 @@ func (db *BlockchainDB) GetLdb() *gorocksdb.DB {
 	return db.db
 }
 
+// Block-cache sizes. They differ on purpose: the writer is the node itself,
+// while the reader is a SEPARATE process (the explorer opens the same data as a
+// secondary) that commonly runs on the same host. Giving both the same cache
+// would quietly double the memory a single machine needs to run a node and its
+// explorer, so the reader gets half.
+const (
+	writerBlockCacheBytes uint64 = 256 * 1024 * 1024
+	readerBlockCacheBytes uint64 = 128 * 1024 * 1024
+)
+
+// applyBloomAndCache installs a bloom filter policy and a block cache.
+//
+// Without a filter policy every NEGATIVE lookup (IsKey/Get of an absent key)
+// walks the index of every SST file; the sync census asks "is this transaction
+// in the DB" for THOUSANDS of absent hashes per block, and on a grown database
+// that took ~10ms per lookup - blocks with many missing transactions needed 30s
+// to census while blocks with few were instant. A 10-bit bloom answers
+// "definitely not here" from memory.
+//
+// Filters are written into SST files, so they appear as new files are written
+// and old ones are rewritten by compaction. A read-only or secondary opener
+// creates no files at all: it gets no filters of its own, and instead READS the
+// ones the writer already stored — which requires naming the same policy here,
+// since RocksDB ignores a filter it cannot match to the configured policy. The
+// block cache helps it either way.
+func applyBloomAndCache(opts *gorocksdb.Options, cacheBytes uint64) {
+	bbto := gorocksdb.NewDefaultBlockBasedTableOptions()
+	bbto.SetFilterPolicy(gorocksdb.NewBloomFilterFull(10))
+	bbto.SetBlockCache(gorocksdb.NewLRUCache(cacheBytes))
+	opts.SetBlockBasedTableFactory(bbto)
+}
+
 func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database is nil")
@@ -47,6 +79,8 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 	opts.SetWriteBufferSize(64 * 1024 * 1024) // 64MB
 	opts.SetMaxWriteBufferNumber(3)
 
+	applyBloomAndCache(opts, writerBlockCacheBytes)
+
 	db.db, err = gorocksdb.OpenDb(opts, dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database at %s (another node instance may be running on this data dir, or it is corrupt): %w", dbPath, err)
@@ -69,6 +103,7 @@ func (db *BlockchainDB) InitReadOnly(dbPath string, secondaryPath string) (*Bloc
 	opts := gorocksdb.NewDefaultOptions()
 	opts.SetCreateIfMissing(false)
 	opts.SetMaxOpenFiles(1000)
+	applyBloomAndCache(opts, readerBlockCacheBytes)
 
 	if secondaryPath != "" {
 		if err := os.MkdirAll(secondaryPath, 0755); err == nil {

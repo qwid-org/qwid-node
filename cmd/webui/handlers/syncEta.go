@@ -30,9 +30,9 @@ const (
 	// two samples a second apart would swing wildly.
 	etaMinSpan = 5 * time.Second
 	// etaResetJump is how much remaining may grow between consecutive samples
-	// before the window is discarded as poisoned. A stall rewind gives back
-	// SyncStallRewind(=2) blocks and the target creeps up ~1 per 10s; anything
-	// bigger means a reset or a target jump, and averaging across it would
+	// before the window is discarded as poisoned. The target creeps up ~1 per
+	// 10s in normal operation; anything bigger means a reset, a fork rewind or
+	// a target jump, and averaging across it would
 	// yield a nonsense rate for the next two minutes.
 	etaResetJump = 64
 )

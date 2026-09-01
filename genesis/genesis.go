@@ -4,7 +4,6 @@ package genesis
 import (
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
@@ -476,15 +475,37 @@ func Load(path string) (Genesis, error) {
 	}
 
 	mainWallet := wallet.GetActiveWallet()
-	fmt.Println(mainWallet.MainAddress.GetHex())
+	// Labelled, and through the logger. A bare address printed on its own line
+	// immediately above a failure that mentions "address" is what suggested the
+	// check compares addresses; it compares public keys.
+	logger.GetLogger().Println("Active wallet identity:", mainWallet.MainAddress.GetHex())
 
 	del1 := common.GetDelegatedAccountAddress(1)
 	delegatedAccount := common.GetDelegatedAccount()
-	if mainWallet.Account1.PublicKey.GetBytes() != nil &&
-		genesis.OperatorPubKey[:100] != mainWallet.Account1.PublicKey.GetHex()[:100] &&
+	// Compare bounded prefixes rather than slicing both to a fixed 100
+	// characters. operator_pub_key is hand-edited text: a truncated or empty
+	// one crashed the node at startup instead of reporting a bad genesis file.
+	// The wallet side had the same nil-versus-empty flaw as everywhere else.
+	if len(mainWallet.Account1.PublicKey.GetBytes()) > 0 &&
+		common.HexPrefix(genesis.OperatorPubKey, 100) != common.HexPrefix(mainWallet.Account1.PublicKey.GetHex(), 100) &&
 		delegatedAccount.GetHex() == del1.GetHex() {
-		logger.GetLogger().Println(mainWallet.Account1.PublicKey.GetHex())
-		logger.GetLogger().Fatal("Main Wallet address should be the same as in config genesis.json file")
+		// Name the field that actually disagrees, show both sides, and say which
+		// file was read. The previous wording ("Main Wallet address should be
+		// the same...") described a comparison that does not happen: this
+		// checks the OPERATOR PUBLIC KEY, not an address, and it printed only
+		// the wallet's value, so there was nothing to compare it against and no
+		// indication of which genesis file was in use — the node reads the copy
+		// under ~/.qwid, which is easily not the one just edited in the repo.
+		logger.GetLogger().Fatalf(
+			"genesis mismatch: operator_pub_key in %s does not match this wallet's primary public key.\n"+
+				"  genesis operator_pub_key: %s\n"+
+				"  wallet %s primary key:    %s\n"+
+				"Update operator_pub_key (and the staked pub_key / pub_key_2 entries) in that file to this "+
+				"wallet's keys, or start the node with the wallet the file was built for.",
+			path,
+			common.HexPrefix(genesis.OperatorPubKey, 40),
+			mainWallet.MainAddress.GetHex(),
+			common.HexPrefix(mainWallet.Account1.PublicKey.GetHex(), 40))
 	}
 	return genesis, nil
 }

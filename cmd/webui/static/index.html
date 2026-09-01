@@ -1560,6 +1560,12 @@ contract Coin {
                 // escrow transfer the value moves later still, so that state
                 // gets its own label rather than being folded into confirmed.
                 const LOCATIONS = {
+                    // Cancelled comes first because it is the state most easily
+                    // mistaken for its opposite: the transaction IS on the
+                    // chain, so everything except the value transfer looks
+                    // like a completed one.
+                    cancelled:               ['Cancelled &middot; not transferred', '#ff4757'],
+                    expired:                 ['Expired &middot; not enough signatures', '#ff4757'],
                     confirmed_db:            ['Confirmed',                       '#00ff64'],
                     'confirmed_db+escrow':   ['Confirmed &middot; not settled',  '#ff9f43'],
                     'confirmed_db+multisig': ['Confirmed &middot; needs signatures', '#ff9f43'],

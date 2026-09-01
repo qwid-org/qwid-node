@@ -59,18 +59,20 @@ var (
 	// MaxHeightJumpWithoutConsensus - if a peer claims height more than this ahead,
 	// require multiple peers to confirm before syncing
 	MaxHeightJumpWithoutConsensus int64 = 4
-	// ClaimExpiryDuration - how long before a height claim expires
-	ClaimExpiryDuration = 30 * time.Second
+	// ClaimExpiryDuration - how long before a height claim expires. Must
+	// comfortably outlive one sync batch (observed ~70s for 20 full blocks):
+	// while the batch handler runs, incoming 'hi' queue behind it unprocessed,
+	// and with a shorter expiry every claim died mid-batch — the stall watchdog
+	// then saw "no live peer" and recycled a healthy connection. Claims refresh
+	// about every second in normal operation, so the only cost of a longer
+	// expiry is how late a DEAD peer's claim stops counting; the quiet-death
+	// watchdog reacts to a dead peer well before that matters.
+	ClaimExpiryDuration = 90 * time.Second
 	// SyncStallTimeout - how long the local height may stay put while syncing
 	// before the sync is treated as stalled. A dropped connection can lose either
 	// our "bt" request for a block's transactions or the peer's "bx" answer, and
 	// nothing in the protocol retries on its own, so the node would wait forever.
 	SyncStallTimeout = 45 * time.Second
-	// SyncStallRewind - how many blocks to give back when a stall is detected.
-	// Rewinding makes the next batch overlap what we already hold, which re-runs
-	// the missing-transaction census and re-sends the request. Kept small: the
-	// blocks are re-applied from the peer within a round or two.
-	SyncStallRewind int64 = 2
 )
 
 // recordPeerHeightClaim stores a peer's height claim.
@@ -275,6 +277,43 @@ func networkHeight() int64 {
 	}
 }
 
+// corroboratedNetworkHeight returns the highest height at least TWO distinct
+// live peers agree the network is at or above — the second-highest live claim.
+// It gates block production (common.IsBehindNetwork via SetProductionTarget): a
+// single uncorroborated claim (a lone peer, a liar, or two nodes behind one NAT
+// that collapse to one IP-keyed claim) returns 0, so it can never by itself stop
+// this node from producing. This is the same two-independent-claims defence
+// networkHeight applies to the sync target's upper end, lifted to production.
+//
+// Keyed by claim source (currently IP; a later change keys it by the handshake
+// nodeID). Two honest nodes behind one NAT therefore cannot yet corroborate each
+// other — the safe direction: the node keeps producing and syncs, rather than
+// halting on an unverifiable claim.
+func corroboratedNetworkHeight() int64 {
+	peerHeightClaimsMutex.RLock()
+	defer peerHeightClaimsMutex.RUnlock()
+
+	now := time.Now()
+	best, second := int64(0), int64(0)
+	live := 0
+	for addr, claim := range peerHeightClaims {
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
+			continue
+		}
+		live++
+		if claim.height > best {
+			second = best
+			best = claim.height
+		} else if claim.height > second {
+			second = claim.height
+		}
+	}
+	if live < 2 {
+		return 0
+	}
+	return second
+}
+
 // peerTarget is one live peer claim we may request a batch from.
 type peerTarget struct {
 	addr   [4]byte
@@ -372,11 +411,16 @@ func nextBatchTarget(addr [4]byte, height int64) (int64, bool) {
 	return validated, true
 }
 
-// updateSyncTarget refreshes the network height used to decide whether this node
-// is still behind and therefore must not produce blocks.
+// updateSyncTarget refreshes the network height. Two distinct targets are kept:
+// the sync target (trusts a single peer, so a two-node network can catch up) and
+// the production target (needs two independent peers, so no single claim can
+// stop this node producing).
 func updateSyncTarget() {
 	nh := networkHeight()
 	common.SetSyncTarget(nh)
+	// Production gate: corroborated height only (0 when unconfirmed), so a lone
+	// or lying peer cannot halt block production. See corroboratedNetworkHeight.
+	common.SetProductionTarget(corroboratedNetworkHeight())
 	// HeightMax answers "how high is the network" for the stats/UI and for the
 	// rewind-step heuristic. Feed it the consensus-filtered peer height, not the
 	// throttled per-round sync target: the latter is only ever a batch ahead of
@@ -455,9 +499,6 @@ func OnMessage(addr [4]byte, m []byte) {
 		var ip4 [4]byte
 		if tcpip.GetPeersCount() < common.MaxPeersConnected {
 			peers := txn[[2]byte{'P', 'P'}]
-			peersConnectedNN := tcpip.GetPeersConnected(tcpip.NonceTopic)
-			peersConnectedBB := tcpip.GetPeersConnected(tcpip.SyncTopic)
-			peersConnectedTT := tcpip.GetPeersConnected(tcpip.TransactionTopic)
 
 			for _, ip := range peers {
 				copy(ip4[:], ip)
@@ -473,9 +514,11 @@ func OnMessage(addr [4]byte, m []byte) {
 				if tcpip.IsSelfIP(ip4) {
 					continue
 				}
+				// Connection maps are keyed by peer handle, so "is this address
+				// already connected" must translate through the handle table.
 				connectingPeersMutex.Lock()
 				copy(topicip[:2], tcpip.NonceTopic[:])
-				if _, ok := peersConnectedNN[topicip]; !ok && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
+				if !tcpip.IsTransportConnected(tcpip.NonceTopic, ip4) && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
 					connectingPeers[topicip] = true
 					go func(pip [4]byte, key [6]byte) {
 						nonceServices.StartSubscribingNonceMsg(pip)
@@ -485,7 +528,7 @@ func OnMessage(addr [4]byte, m []byte) {
 					}(ip4, topicip)
 				}
 				copy(topicip[:2], tcpip.SyncTopic[:])
-				if _, ok := peersConnectedBB[topicip]; !ok && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
+				if !tcpip.IsTransportConnected(tcpip.SyncTopic, ip4) && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
 					connectingPeers[topicip] = true
 					go func(pip [4]byte, key [6]byte) {
 						StartSubscribingSyncMsg(pip)
@@ -495,7 +538,7 @@ func OnMessage(addr [4]byte, m []byte) {
 					}(ip4, topicip)
 				}
 				copy(topicip[:2], tcpip.TransactionTopic[:])
-				if _, ok := peersConnectedTT[topicip]; !ok && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
+				if !tcpip.IsTransportConnected(tcpip.TransactionTopic, ip4) && !tcpip.IsIPBanned(ip4) && !connectingPeers[topicip] {
 					connectingPeers[topicip] = true
 					go func(pip [4]byte, key [6]byte) {
 						transactionServices.StartSubscribingTransactionMsg(pip)
@@ -526,6 +569,17 @@ func OnMessage(addr [4]byte, m []byte) {
 		if common.IsBehindNetwork() {
 			common.IsSyncing.Store(true)
 		}
+
+		// While a batch is being verified or applied (syncProcessMutex held),
+		// a 'hi' contributes exactly one thing: the claim recorded above.
+		// Reacting further — chain comparison, header requests — would make the
+		// peer resend multi-MB sh batches into the same link the in-flight
+		// batch's transactions are arriving on, and pile more sh handlers onto
+		// the mutex queue. Requests resume the moment the batch is done.
+		if !syncProcessMutex.TryLock() {
+			return
+		}
+		syncProcessMutex.Unlock()
 
 		if lastOtherHeight == h {
 			services.AdjustShiftInPastInReset(lastOtherHeight)
@@ -821,7 +875,23 @@ func OnMessage(addr [4]byte, m []byte) {
 		logger.GetLogger().Println("Starting final block processing and fund transfers")
 
 		defer func() {
-			if !common.IsBehindNetwork() {
+			// Stay in sync mode while the peer we ACTUALLY imported this batch
+			// from is still ahead — even if that height is not corroborated.
+			// Reaching this code means we applied real blocks from `addr`, which
+			// a liar cannot produce, so this cannot be abused: a claim-only liar
+			// serves no batch and never gets here. This keeps a genuine two-node
+			// catch-up (one honest peer) from producing on a short fork in the
+			// gap between batches, while still never letting an unverified claim
+			// alone stop production (IsBehindNetwork stays uncorroborated).
+			servingStillAhead := false
+			peerHeightClaimsMutex.RLock()
+			if c, ok := peerHeightClaims[addr]; ok &&
+				time.Since(c.timestamp) <= ClaimExpiryDuration &&
+				c.height > common.GetHeight() {
+				servingStillAhead = true
+			}
+			peerHeightClaimsMutex.RUnlock()
+			if !common.IsBehindNetwork() && !servingStillAhead {
 				common.IsSyncing.Store(false)
 			}
 		}()

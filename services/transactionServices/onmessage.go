@@ -1,7 +1,11 @@
 package transactionServices
 
 import (
+	"bytes"
+	"compress/flate"
 	"fmt"
+	"io"
+	"runtime"
 	"sync"
 	"time"
 
@@ -110,7 +114,7 @@ func OnMessage(addr [4]byte, m []byte) {
 				// } else if senderExist && senderAcc.MultiSignNumber > 0 {
 				// 	isAdded = transactionsPool.PoolTxMultiSign.AddTransaction(t, t.Hash)
 				// } else {
-					// Reject non-staking transactions to delegated accounts
+				// Reject non-staking transactions to delegated accounts
 				if n, err := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); err == nil && n > 0 && n < 256 {
 					if t.TxData.Amount > 0 && t.TxData.Amount < common.MinStakingUser && t.GetLockedAmount() == 0 {
 						// Counted, not logged: this sat in the per-transaction
@@ -135,18 +139,17 @@ func OnMessage(addr [4]byte, m []byte) {
 						logger.GetLogger().Println(err)
 						continue
 					}
-					// Store pubkey immediately so it's available for nonce verification
-					// pk := t.TxData.Pubkey
-					// if len(pk.GetBytes()) > 0 {
-					// 	//logger.GetLogger().Println("Storing pubkey from transaction immediately")
-					// 	storePubKeyFromTransaction(pk, t.GetSenderAddress())
-					// }
-					// Always broadcast local transactions (from RPC/wallet with addr 0.0.0.0)
-					// For remote transactions, only broadcast if not syncing
-					isLocalTx := addr == [4]byte{0, 0, 0, 0}
-					if isLocalTx { // || !common.IsSyncing.Load() {
-						BroadcastTxn(addr, m)
-					}
+					// Deliberately NOT broadcast here. Locally submitted
+					// transactions used to be forwarded immediately — one
+					// outbound message PER TRANSACTION — while the delta loop
+					// (broadcastTransactionsMsgInLoop) re-sent the same
+					// transactions batched a second later. At 100 TPS that was a
+					// hundred redundant messages a second into a 100-slot send
+					// channel, which is what the "could not broadcast
+					// transaction" noise was: the channel full with duplicates
+					// of what the next delta batch carried anyway. The delta
+					// loop propagates a new transaction within a second, which
+					// against a 10-second block interval costs nothing.
 				}
 			}
 		}
@@ -175,63 +178,105 @@ func OnMessage(addr [4]byte, m []byte) {
 		var firstDecodeErr error
 		var firstDropReason string
 		var firstStoreErr error
+
+		// The whole per-transaction pipeline (decode, dedup, signature verify,
+		// store) runs in a small worker pool. One bx answer carries up to
+		// MaxNumberTransactionInChunk transactions and signature verification
+		// dominates the cost; processing them serially kept the receive loop
+		// pinned to one core, the inbound queue backed up faster than it
+		// drained, and block application starved for CPU. Two cores are left
+		// free for the apply path and the other services.
+		var resMutex sync.Mutex
+		var wg sync.WaitGroup
+		jobs := make(chan []byte, 2*common.MaxNumberTransactionInChunk)
+		workers := runtime.NumCPU() - 2
+		if workers < 2 {
+			workers = 2
+		}
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for tb := range jobs {
+					tx := transactionsDefinition.Transaction{}
+					t, rest, err := tx.GetFromBytes(tb)
+					if err != nil || len(rest) > 0 {
+						resMutex.Lock()
+						undecodable++
+						if firstDecodeErr == nil {
+							if err == nil {
+								err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
+							}
+							firstDecodeErr = err
+						}
+						resMutex.Unlock()
+						continue
+					}
+					if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) ||
+						transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
+						resMutex.Lock()
+						skippedExisting++
+						resMutex.Unlock()
+						continue
+					}
+					// NP-C6: verify the signature whenever the sender's public key is
+					// available (embedded in the tx, or already registered). Only skip
+					// verification when the pubkey is genuinely not yet known during
+					// sync — the signed block merkle root still enforces integrity when
+					// the referencing block is later validated.
+					sigBytes := t.GetSignature().GetBytes()
+					if len(sigBytes) == 0 {
+						resMutex.Lock()
+						droppedCount++
+						if firstDropReason == "" {
+							firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
+						}
+						resMutex.Unlock()
+						continue
+					}
+					canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
+					if !canVerify {
+						if _, perr := pubkeys.LoadPubKeyWithPrimary(t.GetSenderAddress(), sigBytes[0] == 0); perr == nil {
+							canVerify = true
+						}
+					}
+					if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+						resMutex.Lock()
+						droppedCount++
+						if firstDropReason == "" {
+							firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+						}
+						resMutex.Unlock()
+						continue
+					}
+					if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
+						resMutex.Lock()
+						storeFailures++
+						if firstStoreErr == nil {
+							firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
+						}
+						resMutex.Unlock()
+						continue
+					}
+					resMutex.Lock()
+					storedCount++
+					resMutex.Unlock()
+				}
+			}()
+		}
 		for _, v := range rawTxn {
 			for _, tb := range v {
-				tx := transactionsDefinition.Transaction{}
-				t, rest, err := tx.GetFromBytes(tb)
-				if err != nil || len(rest) > 0 {
-					undecodable++
-					if firstDecodeErr == nil {
-						if err == nil {
-							err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
-						}
-						firstDecodeErr = err
-					}
-					continue
-				}
-				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
-					skippedExisting++
-					continue
-				}
-				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
-					skippedExisting++
-					continue
-				}
-				// NP-C6: verify the signature whenever the sender's public key is
-				// available (embedded in the tx, or already registered). Only skip
-				// verification when the pubkey is genuinely not yet known during
-				// sync — the signed block merkle root still enforces integrity when
-				// the referencing block is later validated.
-				sigBytes := t.GetSignature().GetBytes()
-				if len(sigBytes) == 0 {
-					droppedCount++
-					if firstDropReason == "" {
-						firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
-					}
-					continue
-				}
-				canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
-				if !canVerify {
-					if _, perr := pubkeys.LoadPubKeyWithPrimary(t.GetSenderAddress(), sigBytes[0] == 0); perr == nil {
-						canVerify = true
-					}
-				}
-				if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
-					droppedCount++
-					if firstDropReason == "" {
-						firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
-					}
-					continue
-				}
-				if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
-					storeFailures++
-					if firstStoreErr == nil {
-						firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
-					}
-					continue
-				}
-				storedCount++
+				jobs <- tb
 			}
+		}
+		close(jobs)
+		wg.Wait()
+		// ANY bx delivery counts as link liveness - including one that carried
+		// only duplicates (a late answer to an earlier request). Counting only
+		// new transactions made the recycle watchdog kill a perfectly live
+		// connection whenever a retry round happened to deliver re-sends.
+		if storedCount > 0 || skippedExisting > 0 {
+			noteBxArrival()
 		}
 		summary := fmt.Sprintf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
 		if undecodable > 0 {
@@ -244,6 +289,36 @@ func OnMessage(addr [4]byte, m []byte) {
 			summary += fmt.Sprintf("; %d store failure(s) (first: %v)", storeFailures, firstStoreErr)
 		}
 		logger.GetLogger().Println(summary)
+	case "bz":
+		// A bz payload is a whole serialized bx message, flate-compressed by
+		// the bt handler when the answer is large. Transaction batches carry
+		// mostly high-entropy post-quantum signatures, yet still shed ~25% of
+		// their size - exactly what a saturated link needs. After validating
+		// that the inflated bytes really are a bx message, it is fed back
+		// through OnMessage, so the bx pipeline stays in one place; the head
+		// check makes nested bz impossible.
+		for _, v := range amsg.(message.TransactionsMessage).GetTransactionsBytes() {
+			for _, zb := range v {
+				fr := flate.NewReader(bytes.NewReader(zb))
+				// Decompression-bomb guard: cap the inflated size at the wire
+				// message limit; truncation then fails CheckValidMessage below.
+				raw, err := io.ReadAll(io.LimitReader(fr, int64(common.MaxMessageSizeBytes)))
+				fr.Close()
+				if err != nil {
+					logger.GetLogger().Println("bz: cannot decompress:", err)
+					tcpip.ReduceAndCheckIfBanIP(addr)
+					continue
+				}
+				ok, inner := message.CheckValidMessage(raw)
+				if !ok || string(inner.GetHead()) != "bx" {
+					logger.GetLogger().Println("bz: payload is not a valid bx message")
+					tcpip.ReduceAndCheckIfBanIP(addr)
+					continue
+				}
+				logger.GetLogger().Printf("bz: inflated %d -> %d bytes", len(zb), len(raw))
+				OnMessage(addr, raw)
+			}
+		}
 	case "st":
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {
@@ -277,6 +352,13 @@ func OnMessage(addr [4]byte, m []byte) {
 			logger.GetLogger().Println("SENT transaction is sync st to ", addr[:])
 		}
 	case "bt":
+		// A bt answer is a multi-MB message. When the outbound channel is
+		// already backed up it would only be dropped on the way out (NP-M10) -
+		// skip building it; the requester retries after its retry interval.
+		if SendChannelCongested() {
+			noteDroppedSend()
+			return
+		}
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {
 			txs := []transactionsDefinition.Transaction{}
@@ -313,7 +395,17 @@ func OnMessage(addr [4]byte, m []byte) {
 			if err != nil {
 				logger.GetLogger().Println("cannot generate transaction msg", err)
 			}
-			if !Send(addr, transactionMsg.GetBytes()) {
+			out := transactionMsg.GetBytes()
+			// Large answers CAN go out flate-compressed as a bz message (~25%
+			// less wire bytes); disabled by default, enabled with
+			// COMPRESS_BX=true on the serving node. Receivers always accept bz.
+			if common.CompressBx && len(out) > compressBxThreshold {
+				if zb, zerr := compressToBz(out, topic); zerr == nil {
+					logger.GetLogger().Printf("bt answer compressed: %d -> %d bytes", len(out), len(zb))
+					out = zb
+				}
+			}
+			if !Send(addr, out) {
 				logger.GetLogger().Println("could not send transaction is sync bt - Send failed")
 			} else {
 				logger.GetLogger().Println("SENT transaction is sync bt to ", addr[:], "count:", len(txs))

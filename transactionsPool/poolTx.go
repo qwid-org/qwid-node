@@ -39,8 +39,20 @@ func NewItem(tx transactionsDefinition.Transaction, priority int64) *Item {
 }
 
 type TransactionPool struct {
-	transactions       map[[common.HashLength]byte]transactionsDefinition.Transaction
-	transactionIndices map[[common.HashLength]byte]int // New map for tracking indices
+	transactions map[[common.HashLength]byte]transactionsDefinition.Transaction
+	// items maps a transaction hash to its live heap entry. The heap keeps
+	// every Item's index field current through PriorityQueue.Swap/Push/Pop
+	// (that is what container/heap uses to move entries), so hash->position
+	// lookup is O(1) with NO extra maintenance.
+	//
+	// The previous design kept a separate hash->index map rebuilt by a full
+	// O(pool) scan after EVERY add/remove, under the write lock. With a full
+	// pool (50k entries) each single-transaction operation cost tens of
+	// milliseconds and the lock was held almost continuously: applying a block
+	// removes its 5000 transactions one by one, while transaction gossip keeps
+	// adding — block application slowed from seconds to minutes, and recovered
+	// the moment Ctrl+C stopped the gossip loops.
+	items              map[[common.HashLength]byte]*Item
 	bannedTransactions map[[common.HashLength]byte]int
 	priorityQueue      PriorityQueue
 	maxTransactions    int
@@ -48,29 +60,12 @@ type TransactionPool struct {
 	rwmutex            sync.RWMutex
 }
 
-// Modify AddTransaction to update transactionIndices
-// Modify RemoveTransactionByHash and PopTransactionByHash to use transactionIndices for direct access
-
-func (tp *TransactionPool) updateIndices() {
-	// Call this method after any operation that might change the indices of items in the priorityQueue
-	tp.rwmutex.Lock()
-	defer tp.rwmutex.Unlock()
-	for i := range tp.priorityQueue {
-		txHash := tp.priorityQueue[i].GetHash().GetBytes()
-		var hash [common.HashLength]byte
-		copy(hash[:], txHash)
-		tp.transactionIndices[hash] = i
-	}
-}
-
-// Ensure heap operations (push, pop, remove) call updateIndices to keep the map accurate
-
 func NewTransactionPool(maxTransactions int, typePool uint8) *TransactionPool {
 	return &TransactionPool{
 		transactions:       make(map[[common.HashLength]byte]transactionsDefinition.Transaction),
 		bannedTransactions: make(map[[common.HashLength]byte]int),
 		priorityQueue:      make(PriorityQueue, 0),
-		transactionIndices: map[[common.HashLength]byte]int{},
+		items:              map[[common.HashLength]byte]*Item{},
 		typePool:           typePool,
 		maxTransactions:    maxTransactions,
 	}
@@ -107,13 +102,14 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 		}
 
 		heap.Push(&tp.priorityQueue, item)
+		tp.items[hash] = item
 		if tp.priorityQueue.Len() > tp.maxTransactions {
 			removed := heap.Pop(&tp.priorityQueue).(*Item)
 			delete(tp.transactions, removed.value)
+			delete(tp.items, removed.value)
 		}
 	}
 	tp.rwmutex.Unlock()
-	tp.updateIndices()
 	return true
 }
 func (tp *TransactionPool) HasTransaction(hash []byte) bool {
@@ -218,13 +214,14 @@ func (tp *TransactionPool) RemoveTransactionByHash(hash []byte) {
 	h := [common.HashLength]byte{}
 	copy(h[:], hash)
 	tp.rwmutex.Lock()
-	if index, exists := tp.transactionIndices[h]; exists {
-		heap.Remove(&tp.priorityQueue, index)
+	if item, exists := tp.items[h]; exists {
+		if item.index >= 0 {
+			heap.Remove(&tp.priorityQueue, item.index)
+		}
 		delete(tp.transactions, h)
-		delete(tp.transactionIndices, h) // Don't forget to clean up the indices map
+		delete(tp.items, h)
 	}
 	tp.rwmutex.Unlock()
-	tp.updateIndices()
 }
 
 func (tp *TransactionPool) BanTransactionByHash(hash []byte) {
@@ -261,14 +258,15 @@ func (tp *TransactionPool) PopTransactionByHash(hash []byte) transactionsDefinit
 	copy(h[:], hash)
 	tp.rwmutex.Lock()
 	var tx transactionsDefinition.Transaction
-	if index, exists := tp.transactionIndices[h]; exists {
+	if item, exists := tp.items[h]; exists {
 		tx = tp.transactions[h]
-		heap.Remove(&tp.priorityQueue, index)
+		if item.index >= 0 {
+			heap.Remove(&tp.priorityQueue, item.index)
+		}
 		delete(tp.transactions, h)
-		delete(tp.transactionIndices, h)
+		delete(tp.items, h)
 	}
 	tp.rwmutex.Unlock()
-	tp.updateIndices()
 	return tx
 }
 
