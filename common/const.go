@@ -42,13 +42,13 @@ var (
 	MaxTransactionDelay            int64   = 60480        // one week
 	MaxTransactionInMultiSigPool   int64   = 60480        //one week
 	// MaxNumberTransactionInChunk sizes one bt request / bx answer during
-	// missing-transaction recovery. 200 txs ≈ up to ~1.2MB with embedded
-	// pubkeys; the request itself is 200 hashes = 6.4KB. Was 500 (~3MB
-	// answers), but a single write that large monopolises a slow link long
-	// enough to trip write deadlines and starve everything else sharing it;
-	// paced at 5 chunks/s this still moves ~1000 tx/s, double the block rate,
-	// in bites a mobile-grade uplink can finish quickly.
-	MaxNumberTransactionInChunk = 200
+	// missing-transaction recovery. 500 txs ≈ up to ~3MB with embedded pubkeys,
+	// comfortably under the TransactionTopic message cap; the request itself is
+	// 500 hashes = 16KB. Paced at 5 chunks/s this moves ~2500 tx/s. Large
+	// writes are safe since the write deadline scales with message size
+	// (tcpip Send) - a flat deadline used to cut them mid-record and
+	// desynchronise the encrypted stream.
+	MaxNumberTransactionInChunk = 500
 	ConnectionMaxTries                     = 10
 	BannedTimeSeconds              int64   = 60                  // DoS hardening: was 2s; ~6 block intervals
 	MessageInitialization                  = [4]byte{2, 0, 2, 9} // will be overwrite in init() by MaxMessageSizeBytes
