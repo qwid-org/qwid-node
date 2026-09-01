@@ -142,8 +142,13 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 			break
 		}
 		if fallback == addr {
-			logger.GetLogger().Printf("cannot request %d missing transaction(s): batch server %v has no "+
-				"transaction-topic link and no other transaction-topic peer is connected", len(due), addr)
+			logger.GetLogger().Printf("cannot request %d missing transaction(s): batch server %s has no "+
+				"transaction-topic link and no other transaction-topic peer is connected - asking discovery to dial it",
+				len(due), tcpip.PeerLabel(addr))
+			// No TT link anywhere means nothing will ever answer these requests.
+			// Recycling a connection that does not exist just pushes a reconnect
+			// notification for (TT, addr), so discovery dials the batch server.
+			tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
 			return 0
 		}
 		logger.GetLogger().Printf("batch server %s has no transaction-topic link - requesting %d missing transaction(s) from %s instead",

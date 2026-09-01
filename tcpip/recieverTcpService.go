@@ -31,7 +31,15 @@ var (
 	// matching inbound stream arrives; replacing that entry must not close the
 	// outbound stream because its receive loop is still using it.
 	acceptedConnections = make(map[[2]byte]map[[4]byte]net.Conn)
-	PeersMutex          = &sync.RWMutex{}
+	// outboundConns tracks the connection each outbound receive loop is
+	// currently reading from, keyed like tcpConnections. It is NOT a send path —
+	// when an accepted connection already occupies tcpConnections the outbound
+	// stream lives only here. RecycleTopicConnection must be able to close it:
+	// otherwise the receive loop never notices the recycle, keeps holding the
+	// dialing-dedup slot, and every fresh dial dies with "connection already
+	// active or pending" while the topic has no send path at all.
+	outboundConns = make(map[[2]byte]map[[4]byte]net.Conn)
+	PeersMutex    = &sync.RWMutex{}
 	Quit                chan os.Signal
 	TransactionTopic    = [2]byte{'T', 'T'}
 	NonceTopic          = [2]byte{'N', 'N'}

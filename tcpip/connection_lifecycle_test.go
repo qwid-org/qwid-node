@@ -14,6 +14,10 @@ func resetConnectionLifecycleTestState(topic [2]byte, ip [4]byte) {
 	}
 	delete(tcpConnections[topic], ip)
 	delete(acceptedConnections[topic], ip)
+	if oc := outboundConns[topic][ip]; oc != nil {
+		_ = oc.Close()
+	}
+	delete(outboundConns[topic], ip)
 	var key [6]byte
 	copy(key[:2], topic[:])
 	copy(key[2:], ip[:])
@@ -64,6 +68,55 @@ func assertPipeWorks(t *testing.T, writer, reader net.Conn) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("peer could not read: %v", err)
+	}
+}
+
+// A recycle must terminate the outbound receive loop's stream even when that
+// stream is NOT the registered send path (an accepted connection occupied
+// tcpConnections at dial time). Before this, the receive loop survived a
+// recycle on its healthy old stream, kept holding the dialing-dedup slot, and
+// every fresh dial died with "connection already active or pending" — leaving
+// the topic with no send path at all.
+func TestRecycleClosesUnregisteredOutboundReceiveStream(t *testing.T) {
+	topic := TransactionTopic
+	ip := [4]byte{10, 20, 30, 42}
+	resetConnectionLifecycleTestState(topic, ip)
+	t.Cleanup(func() { resetConnectionLifecycleTestState(topic, ip) })
+
+	outbound, outboundPeer := net.Pipe()
+	accepted, _ := net.Pipe()
+	defer outboundPeer.Close()
+
+	publishAcceptedConn(topic, ip, accepted)
+	PeersMutex.Lock()
+	if _, ok := outboundConns[topic]; !ok {
+		outboundConns[topic] = make(map[[4]byte]net.Conn)
+	}
+	outboundConns[topic][ip] = outbound
+	PeersMutex.Unlock()
+
+	RecycleTopicConnection(topic, ip)
+
+	// The outbound stream must now be closed: a read on its peer end returns
+	// an error instead of blocking on a healthy pipe.
+	_ = outboundPeer.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 1)
+	if _, err := outboundPeer.Read(buf); err == nil {
+		t.Fatal("outbound receive stream must be closed by the recycle")
+	} else if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+		t.Fatal("outbound receive stream still open after recycle (read timed out instead of failing)")
+	}
+	PeersMutex.RLock()
+	_, still := outboundConns[topic][ip]
+	PeersMutex.RUnlock()
+	if still {
+		t.Fatal("recycle must unregister the outbound receive stream")
+	}
+	// Drain the reconnect notification so other tests see a clean channel.
+	select {
+	case <-ChanPeer:
+	case <-time.After(time.Second):
+		t.Fatal("recycle must push a reconnect notification")
 	}
 }
 

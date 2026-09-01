@@ -108,6 +108,15 @@ func closeAndRemovePeerTopic(topic [2]byte, ip [4]byte) [][]byte {
 		accepted.Close()
 		delete(acceptedConnections[topic], ip)
 	}
+	// The outbound receive loop's stream is in tcpConnections only when nothing
+	// occupied the slot at dial time; close it explicitly so the loop wakes up
+	// (read error) and re-dials a fresh, re-handshaken stream in place. Without
+	// this a recycle left the loop alive on the old stream, holding the dialing
+	// dedup slot and blocking every reconnection attempt.
+	if oc, ok := outboundConns[topic][ip]; ok {
+		oc.Close()
+		delete(outboundConns[topic], ip)
+	}
 	return deletedIP
 }
 
@@ -368,7 +377,21 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 	peersConnected[topicipBytes] = topic
 	validPeersConnected[ip] = common.ConnectionMaxTries
 	nodePeersConnected[ip] = common.ConnectionMaxTries
+	if _, ok := outboundConns[topic]; !ok {
+		outboundConns[topic] = make(map[[4]byte]net.Conn)
+	}
+	outboundConns[topic][key] = conn
 	PeersMutex.Unlock()
+
+	// key and conn are re-assigned on in-loop re-dials; the closure reads their
+	// final values, so it always unregisters the stream this loop last used.
+	defer func() {
+		PeersMutex.Lock()
+		if c, ok := outboundConns[topic][key]; ok && c == conn {
+			delete(outboundConns[topic], key)
+		}
+		PeersMutex.Unlock()
+	}()
 
 	reconnectionTries := 0
 
@@ -380,6 +403,13 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 		if outboundStoredInMap {
 			deletedIP := CloseAndRemoveConnection(conn)
 			PeersMutex.Unlock()
+			// A recycle may have already removed this connection from the maps,
+			// making deletedIP empty — the reconnect notification must still go
+			// out, or this exit is the end of the lifecycle and the topic stays
+			// down until the peer happens to dial us.
+			if len(deletedIP) == 0 {
+				deletedIP = [][]byte{append(topic[:], ip[:]...)}
+			}
 			for _, d := range deletedIP {
 				select {
 				case ChanPeer <- d:
@@ -408,6 +438,18 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			cleanupOutbound()
 		}
 	}()
+
+	// notifyReconnect asks discovery to start a fresh lifecycle for this peer and
+	// topic. Every terminal path that is not a deliberate ban must call it (or
+	// cleanupOutbound, which notifies itself) — this goroutine owns the dialing
+	// dedup slot, so if it exits silently nothing ever re-dials the peer.
+	notifyReconnect := func() {
+		select {
+		case ChanPeer <- append(topic[:], ip[:]...):
+		default:
+			logger.GetLogger().Println("NP-M2: ChanPeer full, dropping peer notification")
+		}
+	}
 
 	fa := frameAssembler{topic: topic}
 
@@ -464,8 +506,10 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 					tcpConn, err = net.DialTCP("tcp", nil, tcpAddr)
 					if err != nil {
 						logger.GetLogger().Printf("Connection attempt to %s failed: %v", ipport, err.Error())
-						// Reconnection failed — exit cleanly so subscriber can
-						// be re-established by the peer discovery loop.
+						// Reconnection failed — exit cleanly, but explicitly ask
+						// discovery to retry: this goroutine holds the dialing
+						// slot, so nobody else could have started a lifecycle.
+						notifyReconnect()
 						receiveChan <- []byte("EXIT")
 						return
 					}
@@ -481,6 +525,9 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						tcpConn.Close()
 						if isHandshakeProtocolViolation(hsErr) {
 							BanIP(ip)
+						} else {
+							// Transport-level failure, not abuse: retry later.
+							notifyReconnect()
 						}
 						receiveChan <- []byte("EXIT")
 						return
@@ -495,6 +542,7 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						if sKeys == nil {
 							logger.GetLogger().Println("re-dial handshake: no session keys derived for", ip)
 							tcpConn.Close()
+							notifyReconnect()
 							receiveChan <- []byte("EXIT")
 							return
 						}
@@ -502,30 +550,45 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 						if wrapErr != nil {
 							logger.GetLogger().Println("re-dial handshake: failed to wrap connection:", wrapErr)
 							tcpConn.Close()
+							notifyReconnect()
 							receiveChan <- []byte("EXIT")
 							return
 						}
 						conn = newConn
 						newKey := connKeyFor(rePeerID, ip)
-						if outboundStoredInMap {
-							PeersMutex.Lock()
-							if _, ok := tcpConnections[topic]; !ok {
-								tcpConnections[topic] = make(map[[4]byte]net.Conn)
-							}
-							if newKey != key {
-								// A different node answered this transport address
-								// (NAT remap); move the registration to its identity.
+						PeersMutex.Lock()
+						if _, ok := tcpConnections[topic]; !ok {
+							tcpConnections[topic] = make(map[[4]byte]net.Conn)
+						}
+						if newKey != key {
+							// A different node answered this transport address
+							// (NAT remap); move the registration to its identity.
+							if outboundStoredInMap {
 								delete(tcpConnections[topic], key)
 								var oldTopicIP [6]byte
 								copy(oldTopicIP[:], append(topic[:], key[:]...))
 								delete(peersConnected, oldTopicIP)
 							}
-							tcpConnections[topic][newKey] = conn
-							var newTopicIP [6]byte
-							copy(newTopicIP[:], append(topic[:], newKey[:]...))
-							peersConnected[newTopicIP] = topic
-							PeersMutex.Unlock()
+							delete(outboundConns[topic], key)
 						}
+						// Take the send-path slot whenever it is free. A recycle
+						// may have emptied it since the original dial; trusting the
+						// stale outboundStoredInMap=false here would leave the topic
+						// with no send path at all until the peer dials us.
+						if existing, exists := tcpConnections[topic][newKey]; !exists || existing == nil {
+							tcpConnections[topic][newKey] = conn
+							outboundStoredInMap = true
+						} else if outboundStoredInMap {
+							tcpConnections[topic][newKey] = conn
+						}
+						var newTopicIP [6]byte
+						copy(newTopicIP[:], append(topic[:], newKey[:]...))
+						peersConnected[newTopicIP] = topic
+						if _, ok := outboundConns[topic]; !ok {
+							outboundConns[topic] = make(map[[4]byte]net.Conn)
+						}
+						outboundConns[topic][newKey] = conn
+						PeersMutex.Unlock()
 						key = newKey
 					}
 					reconnectionTries = 0
