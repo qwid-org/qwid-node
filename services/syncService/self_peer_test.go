@@ -89,12 +89,11 @@ func TestNetworkHeightIgnoresSelfClaim(t *testing.T) {
 	})
 }
 
-// TestStallRewindUseful: rewinding is only a way to make a peer re-send a batch.
-// With nobody above us to ask, it gives back SyncStallRewind blocks every
-// timeout and the chain walks backwards for as long as the node runs - which is
-// exactly what a self-connection produced, its claim mirroring our own height
-// one rewind behind.
-func TestStallRewindUseful(t *testing.T) {
+// TestPeersAheadIgnoresOurOwnClaims: the watchdog decides what to do from who
+// is genuinely ahead, and our own claim - echoed back by the self-connection -
+// must never count as a peer. When it did, the node acted on its own height and
+// the stall handling chased itself.
+func TestPeersAheadIgnoresOurOwnClaims(t *testing.T) {
 	withMyIP(t, [4]byte{10, 0, 0, 7})
 
 	tests := []struct {
@@ -135,9 +134,9 @@ func TestStallRewindUseful(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			withClaims(t, tc.claims, func() {
-				useful, live := stallRewindUseful(100178)
-				if useful != tc.wantUseful {
-					t.Fatalf("stallRewindUseful() = %v, expected %v", useful, tc.wantUseful)
+				ahead, live := peersAhead(100178)
+				if (len(ahead) > 0) != tc.wantUseful {
+					t.Fatalf("peersAhead() found %d peers ahead, expected any=%v", len(ahead), tc.wantUseful)
 				}
 				if live != tc.wantLive {
 					t.Fatalf("live claims = %d, expected %d", live, tc.wantLive)
@@ -147,9 +146,11 @@ func TestStallRewindUseful(t *testing.T) {
 	}
 }
 
-// TestStallWatchdogDoesNotRewindWithSelfClaimOnly: the whole watchdog path, from
-// the production scenario - syncing, standing still, and the only height claim
-// on record is our own from before the last rewind.
+// TestStallWatchdogDoesNotRewindWithSelfClaimOnly: the watchdog must never move
+// the chain backwards. Rewinding on a stall has been removed outright - it
+// destroyed confirmed local state to recover from a lost message, and could not
+// tell that case apart from the several others that look identical from here.
+// This exercises the whole path and asserts the height is untouched.
 func TestStallWatchdogDoesNotRewindWithSelfClaimOnly(t *testing.T) {
 	withMyIP(t, [4]byte{10, 0, 0, 7})
 	resetProgress(t)

@@ -66,11 +66,6 @@ var (
 	// our "bt" request for a block's transactions or the peer's "bx" answer, and
 	// nothing in the protocol retries on its own, so the node would wait forever.
 	SyncStallTimeout = 45 * time.Second
-	// SyncStallRewind - how many blocks to give back when a stall is detected.
-	// Rewinding makes the next batch overlap what we already hold, which re-runs
-	// the missing-transaction census and re-sends the request. Kept small: the
-	// blocks are re-applied from the peer within a round or two.
-	SyncStallRewind int64 = 2
 )
 
 // recordPeerHeightClaim stores a peer's height claim.
