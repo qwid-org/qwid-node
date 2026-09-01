@@ -188,6 +188,15 @@ func SendHeaders(addr [4]byte, bHeight int64, height int64) {
 // is plenty: applying the answered batch takes far longer than that anyway.
 const headerRequestMinInterval = time.Second
 
+// headerRequestFetchingInterval throttles header requests while missing
+// transactions are being fetched. Every request makes the peer resend the
+// full multi-MB sh batch for the SAME range (requests are anchored at our
+// height), and at one per second those redundant batches saturated the link
+// the bx transaction answers needed - the fetch could never finish before the
+// next batch flood. One refresh per 15s keeps the retry path alive at ~1/15th
+// of the bandwidth cost.
+const headerRequestFetchingInterval = 15 * time.Second
+
 var (
 	lastHeaderRequest      = map[[4]byte]time.Time{}
 	lastHeaderRequestMutex sync.Mutex
@@ -196,9 +205,13 @@ var (
 // allowHeaderRequest reports whether a header request to addr may go out now,
 // and if so records it. Bounded by the peer set, so the map cannot grow.
 func allowHeaderRequest(addr [4]byte) bool {
+	interval := headerRequestMinInterval
+	if outstandingMissingTxCount() > 0 {
+		interval = headerRequestFetchingInterval
+	}
 	lastHeaderRequestMutex.Lock()
 	defer lastHeaderRequestMutex.Unlock()
-	if t, ok := lastHeaderRequest[addr]; ok && time.Since(t) < headerRequestMinInterval {
+	if t, ok := lastHeaderRequest[addr]; ok && time.Since(t) < interval {
 		return false
 	}
 	lastHeaderRequest[addr] = time.Now()

@@ -49,6 +49,18 @@ var Ports = map[[2]byte]int{
 }
 
 var MyIP [4]byte
+// HasConnection reports whether a connection exists for exactly this
+// (topic, ip) - the lookup LoopSend's targeted send performs. A targeted
+// message to an address with no connection is silently dropped there, so
+// callers that must not lose a request check here first and pick another
+// target.
+func HasConnection(topic [2]byte, ip [4]byte) bool {
+	PeersMutex.RLock()
+	defer PeersMutex.RUnlock()
+	_, ok := tcpConnections[topic][ip]
+	return ok
+}
+
 var MyIPSelfNonce [4]byte
 var InternalIP [4]byte
 

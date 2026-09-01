@@ -36,9 +36,10 @@ const (
 	// and re-dialed. The bt requests demonstrably leave this node while
 	// nothing comes back, which is the signature of a half-dead link: OUR
 	// receive loop is fine, but the peer's send side points at a stale stream
-	// (typically left over from our earlier restart) that no timeout on our
-	// side can detect. 5 tries * 30s = ~2.5 minutes of silence.
-	missingTxRecycleAfter = 5
+	// (typically left over from our earlier restart). 2 tries * 30s = ~1 minute
+	// of silence - a fresh dial replaces the peer's stale stream, and a healthy
+	// fetch never goes a full minute without a single bx.
+	missingTxRecycleAfter = 2
 	// missingTxForget drops bookkeeping for hashes not asked about for this
 	// long, so the map cannot grow without bound across a long sync.
 	missingTxForget = 10 * time.Minute
@@ -92,6 +93,17 @@ func dueMissingTxRequests(hashes [][]byte, now time.Time) (due [][]byte, escalat
 	return due, escalate, recycle
 }
 
+// outstandingMissingTxCount reports how many transaction hashes are currently
+// being chased. Non-zero means a batch is waiting on its transactions - the
+// moment when redundant header re-requests hurt the most, because every one of
+// them makes the peer resend a multi-MB sh batch over the same link the bx
+// answers need.
+func outstandingMissingTxCount() int {
+	missingTxMutex.Lock()
+	defer missingTxMutex.Unlock()
+	return len(missingTx)
+}
+
 // clearMissingTx drops all bookkeeping once a sync round finds nothing
 // missing, so a later re-miss starts a fresh escalation cycle.
 func clearMissingTx() {
@@ -111,6 +123,37 @@ func requestMissingTxs(addr [4]byte, hashes [][]byte, height int64) (requested i
 	due, escalate, recycle := dueMissingTxRequests(hashes, time.Now())
 	if len(due) == 0 {
 		return 0
+	}
+	// The batch server (known from the sync topic) does not necessarily hold a
+	// transaction-topic link with us - and a targeted send without a connection
+	// is silently dropped in LoopSend, so the request would evaporate and the
+	// fetch would starve with no error anywhere. Transactions are served by
+	// hash, so ANY peer with a transaction-topic connection can answer; fall
+	// back to one when the server has none.
+	if !tcpip.HasConnection(tcpip.TransactionTopic, addr) {
+		fallback := addr
+		for topicip := range tcpip.GetPeersConnected(tcpip.TransactionTopic) {
+			var ip [4]byte
+			copy(ip[:], topicip[2:])
+			if tcpip.IsSelfIP(ip) {
+				continue
+			}
+			fallback = ip
+			break
+		}
+		if fallback == addr {
+			logger.GetLogger().Printf("cannot request %d missing transaction(s): batch server %v has no "+
+				"transaction-topic link and no other transaction-topic peer is connected - asking discovery to dial it",
+				len(due), addr)
+			// No TT link anywhere means nothing will ever answer these requests.
+			// Recycling a connection that does not exist just pushes a reconnect
+			// notification for (TT, addr), so discovery dials the batch server.
+			tcpip.RecycleTopicConnection(tcpip.TransactionTopic, addr)
+			return 0
+		}
+		logger.GetLogger().Printf("batch server %v has no transaction-topic link - requesting %d missing transaction(s) from %v instead",
+			addr, len(due), fallback)
+		addr = fallback
 	}
 	logger.GetLogger().Printf("Sync incomplete - requesting %d missing transaction(s) from %v, first: %x",
 		len(due), addr, due[0][:8])
