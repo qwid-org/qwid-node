@@ -9,22 +9,22 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QWID Foundation — Blockchain Beyond Quantum</title>
-<meta name="description" content="QWID is a quantum-resistant blockchain running two independent post-quantum signature families side by side — Falcon-512 (lattice) and MAYO-5 (multivariate) — with EVM compatibility, Proof-of-Synergy consensus, and built-in DEX and oracles.">
+<meta name="description" content="QWID is a quantum-resistant blockchain running two independent post-quantum signature families side by side — Falcon-512 (lattice) and MAYO-2 (multivariate) — with EVM compatibility, Proof-of-Synergy consensus, and built-in DEX and oracles.">
 <link rel="canonical" href="https://qwid.org/">
 <!-- Open Graph -->
 <meta property="og:title" content="QWID — Blockchain Beyond Quantum">
-<meta property="og:description" content="Two independent post-quantum signature families in production: Falcon-512 (lattice) and MAYO-5 (multivariate). EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
+<meta property="og:description" content="Two independent post-quantum signature families in production: Falcon-512 (lattice) and MAYO-2 (multivariate). EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
 <meta property="og:image" content="https://qwid.org/og-1200x630.png">
 <meta property="og:url" content="https://qwid.org">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@QWID_org">
 <meta name="twitter:title" content="QWID — Blockchain Beyond Quantum">
-<meta name="twitter:description" content="Two independent post-quantum signature families in production: Falcon-512 (lattice) and MAYO-5 (multivariate). EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
+<meta name="twitter:description" content="Two independent post-quantum signature families in production: Falcon-512 (lattice) and MAYO-2 (multivariate). EVM smart contracts, Proof-of-Synergy consensus. Public testnet live.">
 <meta name="twitter:image" content="https://qwid.org/og-1200x630.png">
 <!-- Schema.org -->
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"Organization","name":"QWID Foundation","description":"Quantum-resistant blockchain running two independent post-quantum signature families — Falcon-512 (lattice) and MAYO-5 (multivariate) — with EVM smart contracts and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/qwid-org/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
+{"@context":"https://schema.org","@type":"Organization","name":"QWID Foundation","description":"Quantum-resistant blockchain running two independent post-quantum signature families — Falcon-512 (lattice) and MAYO-2 (multivariate) — with EVM smart contracts and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/qwid-org/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
 </script>
 <link rel="stylesheet" href="fonts/fonts.css">
 <style>
@@ -1287,7 +1287,7 @@ a.htrust-item:hover{color:var(--cyan)}
 <!-- ===================== NAV ===================== -->
 <nav class="nav" id="mainNav">
   <a href="#" class="nav-logo">
-    <span class="nav-logo-text">QWID</span>
+    <span class="nav-logo-text">QW<span>ID</span></span>
     <span class="nav-badge">Foundation</span>
   </a>
   <ul class="nav-links" id="navLinks">
@@ -1313,15 +1313,15 @@ a.htrust-item:hover{color:var(--cyan)}
   <div class="hero-radial"></div>
 
   <div class="hero-content">
-    <div class="hero-eyebrow">Two Post-Quantum Signature Families. Not One Bet.</div>
+    <div class="hero-eyebrow">Multi Post-Quantum Signature Families. Not One Bet.</div>
     <h1 class="hero-h1">
       BLOCKCHAIN
       <span class="line2">BEYOND QUANTUM</span>
     </h1>
-    <p class="hero-sub">NIST selected three post-quantum signature schemes — two of them are lattice-based, and NIST opened a separate process specifically to diversify beyond lattices. QWID runs that diversification in production today: Falcon-512 (lattice) and MAYO-5 (multivariate) as two independent mathematical families, either one retireable by on-chain vote without a hard fork.</p>
+    <p class="hero-sub">QWID is not tied to any single post-quantum scheme: today Falcon-512 (lattice) signs with MAYO-2 (multivariate) standing by, and on-chain governance can swap in any scheme the network votes for — no hard fork.</p>
     <div class="hero-actions">
       <a href="#get-started" class="btn btn-primary">Get Started</a>
-      <a href="WhitePaper_1.0.pdf" target="_blank" rel="noopener" class="btn btn-outline">Read WhitePaper</a>
+      <a href="WhitePaper_1.1.pdf" target="_blank" rel="noopener" class="btn btn-outline">Read WhitePaper</a>
       <a href="https://explorer.qwid.org" target="_blank" rel="noopener" class="btn btn-ghost">Live Explorer ↗</a>
     </div>
     <div class="hero-trust">
@@ -1387,17 +1387,17 @@ a.htrust-item:hover{color:var(--cyan)}
       <div class="arch-left">
         <div class="section-eyebrow">Post-Quantum Architecture</div>
         <h2 class="section-title">Built to Outlast Quantum Computers</h2>
-        <p class="section-sub">Post-quantum cryptography requires large public keys — Falcon-512 public keys are 897 bytes and MAYO-5 public keys are 5,554 bytes. A naive implementation into a network like Ethereum would reduce block validation rates by 14&times;, making the chain impractical.</p>
+        <p class="section-sub">Post-quantum cryptography requires large public keys — Falcon-512 public keys are 897 bytes and MAYO-2 public keys are 4,912 bytes. A naive implementation into a network like Ethereum would reduce block validation rates by 14&times;, making the chain impractical.</p>
         <ul class="arch-points">
           <li>QWID solves this elegantly: <strong style="color:#fff">public keys are included optionally inside transactions</strong> — only on a user's first interaction with the network. All subsequent transactions reference the already-registered key.</li>
           <li>Two <strong style="color:#00e5ff">independent</strong> post-quantum schemes, each from a different mathematical family:
             <span style="display:block;margin-top:.5rem;display:flex;flex-direction:column;gap:.3rem">
               <span><strong style="color:#fff">Falcon-512</strong> &mdash; lattice &middot; NIST security level 1 &middot; sig &lt;752 B</span>
-              <span><strong style="color:#a0c0ff">MAYO-5</strong> &mdash; multivariate &middot; NIST security level 5 &middot; sig 964 B</span>
+              <span><strong style="color:#a0c0ff">MAYO-2</strong> &mdash; multivariate &middot; NIST security level 1 &middot; sig 186 B</span>
             </span>
           </li>
           <li>The second scheme is a <strong style="color:#f0b429">safety net</strong>: if one scheme is ever found to be broken, the network continues operating on the other while the community votes to replace the compromised one with a new, vetted algorithm — zero downtime, zero lost funds.</li>
-          <li>Users can optimise for speed with Falcon-512 or for the highest security level with MAYO-5, depending on the value and sensitivity of each transaction.</li>
+          <li>Falcon-512 is the primary signing scheme; MAYO-2 stands by as an independent spare that takes over by on-chain vote if the primary is ever paused.</li>
           <li>The result: up to 5,000 transactions per 10-second block with quantum-resistant signatures, secured by Proof-of-Synergy consensus.</li>
         </ul>
         <div class="math-family">
@@ -1408,7 +1408,7 @@ a.htrust-item:hover{color:var(--cyan)}
               <span class="mf-math">Lattice-based math (NTRU)</span>
             </div>
             <div class="mf-scheme">
-              <span class="mf-name" style="color:#7aadff">MAYO-5</span>
+              <span class="mf-name" style="color:#7aadff">MAYO-2</span>
               <span class="mf-arrow">←</span>
               <span class="mf-math">Multivariate polynomial math</span>
             </div>
@@ -1424,9 +1424,9 @@ a.htrust-item:hover{color:var(--cyan)}
               <span class="cb-id">Block #N &mdash; &#8804; 5,000 TX &middot; 10s</span>
               <div class="cb-txlist">
                 <div class="cb-tx"><span class="cb-txid">TX 0x1a2b&hellip;</span><span class="cb-badge cb-badge--key">Falcon&#8209;512 + pubkey</span></div>
-                <div class="cb-tx"><span class="cb-txid">TX 0x3c4d&hellip;</span><span class="cb-badge cb-badge--blue">MAYO&#8209;5 + pubkey</span></div>
+                <div class="cb-tx"><span class="cb-txid">TX 0x3c4d&hellip;</span><span class="cb-badge cb-badge--blue">MAYO&#8209;2 + pubkey</span></div>
                 <div class="cb-tx"><span class="cb-txid">TX 0x5e6f&hellip;</span><span class="cb-badge cb-badge--key">Falcon&#8209;512</span></div>
-                <div class="cb-tx"><span class="cb-txid">TX 0x7a8b&hellip;</span><span class="cb-badge cb-badge--blue">MAYO&#8209;5</span></div>
+                <div class="cb-tx"><span class="cb-txid">TX 0x7a8b&hellip;</span><span class="cb-badge cb-badge--blue">MAYO&#8209;2</span></div>
               </div>
             </div>
             <div class="chain-arrow-down">&#8595;</div>
@@ -1445,7 +1445,7 @@ a.htrust-item:hover{color:var(--cyan)}
           </div>
           <div class="arch-enc-legend">
             <div class="enc-item"><span class="enc-dot enc-dot--cyan"></span><span>Falcon&#8209;512 &mdash; NIST L1 &middot; faster &middot; sig &lt;752 B</span></div>
-            <div class="enc-item"><span class="enc-dot enc-dot--blue"></span><span>MAYO&#8209;5 &mdash; multivariate &middot; NIST L5 &middot; sig 964 B</span></div>
+            <div class="enc-item"><span class="enc-dot enc-dot--blue"></span><span>MAYO&#8209;2 &mdash; multivariate &middot; NIST L1 &middot; sig 186 B</span></div>
             <div class="enc-item"><span class="enc-dot enc-dot--dim"></span><span>+ pubkey &mdash; included only on first TX (registration)</span></div>
             <div class="enc-item enc-item--full"><span class="enc-sig">&#10003; User chooses the scheme per transaction</span></div>
           </div>
@@ -1469,7 +1469,7 @@ a.htrust-item:hover{color:var(--cyan)}
           <polyline points="9 12 11 14 15 10"/>
         </svg>
         <h3>Cutting-Edge PQC Security</h3>
-        <p>Two post-quantum schemes from <strong>different mathematical families</strong>: <strong>Falcon-512</strong> (lattice-based, NIST security level 1, sig &lt;752 B) and <strong>MAYO-5</strong> (multivariate, NIST security level 5, sig 964 B). Users choose which scheme signs each transaction — and a break in one family leaves the other standing.</p>
+        <p>Two post-quantum schemes from <strong>different mathematical families</strong>: <strong>Falcon-512</strong> (lattice-based, NIST security level 1, sig &lt;752 B) and <strong>MAYO-2</strong> (multivariate, NIST security level 1, sig 186 B). Users choose which scheme signs each transaction — and a break in one family leaves the other standing.</p>
       </div>
 
       <!-- 2 Consensus -->
@@ -1730,7 +1730,7 @@ a.htrust-item:hover{color:var(--cyan)}
           </svg>
         </div>
         <h3>Generate Wallet</h3>
-        <p>Create quantum-resistant keypairs for both Falcon-512 and MAYO-5. The CLI generator derives them from a 24-word BIP-39 recovery phrase, shown once at creation, so the wallet can be restored on any machine.</p>
+        <p>Create quantum-resistant keypairs for both Falcon-512 and MAYO-2. The CLI generator derives them from a 24-word BIP-39 recovery phrase, shown once at creation, so the wallet can be restored on any machine.</p>
       </div>
 
       <div class="step-card">
@@ -1893,7 +1893,7 @@ a.htrust-item:hover{color:var(--cyan)}
             <a href="https://github.com/qwid-org/qwid-node/blob/main/common/types.go" target="_blank" rel="noopener" class="timeline-badge badge-done" style="text-decoration:none">Source ↗</a>
           </div>
           <div class="timeline-title">Phase 0 — Research &amp; Foundations</div>
-          <p class="timeline-desc">Survey of the NIST post-quantum signature candidates. Selection of Falcon-512 (lattice) and MAYO-5 (multivariate) as two schemes from independent mathematical families. Architecture design for optional in-transaction pubkey registration to address PQC key-size constraints.</p>
+          <p class="timeline-desc">Survey of the NIST post-quantum signature candidates. Selection of Falcon-512 (lattice) and MAYO-2 (multivariate) as two schemes from independent mathematical families. Architecture design for optional in-transaction pubkey registration to address PQC key-size constraints.</p>
         </div>
 
         <div class="timeline-item done">
@@ -1949,7 +1949,7 @@ a.htrust-item:hover{color:var(--cyan)}
         <div class="timeline-item active">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">2026</span>
+            <span class="timeline-date">Q2&ndash;Q3 2026</span>
             <span class="timeline-badge badge-active">In Progress</span>
           </div>
           <div class="timeline-title">Public Testnet</div>
@@ -1959,7 +1959,7 @@ a.htrust-item:hover{color:var(--cyan)}
         <div class="timeline-item upcoming">
           <div class="timeline-dot"></div>
           <div class="timeline-meta">
-            <span class="timeline-date">Q3 2026</span>
+            <span class="timeline-date">Q4 2026</span>
             <span class="timeline-badge badge-upcoming">Upcoming</span>
           </div>
           <div class="timeline-title">Mainnet Launch</div>
@@ -1988,7 +1988,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What is the QWID?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">QWID is a quantum-resistant blockchain that does not bet on a single mathematical assumption. It runs two post-quantum signature schemes from different mathematical families side by side &#8212; <strong>Falcon-512</strong> (lattice-based) and <strong>MAYO-5</strong> (multivariate) &#8212; on a Proof-of-Synergy consensus. If one family is ever broken, the chain keeps running on the other while on-chain governance retires the compromised scheme.</div>
+          <div class="faq-a">QWID is a quantum-resistant blockchain that does not bet on a single mathematical assumption. It runs two post-quantum signature schemes from different mathematical families side by side &#8212; <strong>Falcon-512</strong> (lattice-based) and <strong>MAYO-2</strong> (multivariate) &#8212; on a Proof-of-Synergy consensus. If one family is ever broken, the chain keeps running on the other while on-chain governance retires the compromised scheme.</div>
         </div>
 
         <div class="faq-item">
@@ -1996,7 +1996,7 @@ a.htrust-item:hover{color:var(--cyan)}
             How does QWID handle large post-quantum public keys?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">Post-quantum cryptography requires large public keys — Falcon-512 is 897 bytes and MAYO-5 is 5,554 bytes. A naive implementation would reduce block validation rates by 14×. QWID solves this by embedding public keys optionally inside transactions: a user includes both pubkeys only on their first transaction. All subsequent transactions are standard-sized, carrying only the signatures. The keys are stored on-chain from that first registration and reused from then on.</div>
+          <div class="faq-a">Post-quantum cryptography requires large public keys — Falcon-512 is 897 bytes and MAYO-2 is 4,912 bytes. A naive implementation would reduce block validation rates by 14×. QWID solves this by embedding public keys optionally inside transactions: a user includes both pubkeys only on their first transaction. All subsequent transactions are standard-sized, carrying only the signatures. The keys are stored on-chain from that first registration and reused from then on.</div>
         </div>
 
         <div class="faq-item">
@@ -2046,7 +2046,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What does PQC mean?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">PQC means Post-Quantum Cryptography &#8212; cryptography believed to resist attack by quantum algorithms such as Shor&#8217;s and Grover&#8217;s. QWID builds on schemes from the NIST post-quantum standardisation process: <strong>Falcon-512</strong>, selected by NIST for standardisation as FN-DSA (FIPS 206, still in draft), and <strong>MAYO-5</strong>, a round-3 candidate in the NIST Additional Signatures process.</div>
+          <div class="faq-a">PQC means Post-Quantum Cryptography &#8212; cryptography believed to resist attack by quantum algorithms such as Shor&#8217;s and Grover&#8217;s. QWID builds on schemes from the NIST post-quantum standardisation process: <strong>Falcon-512</strong>, selected by NIST for standardisation as FN-DSA (FIPS 206, still in draft), and <strong>MAYO-2</strong>, a round-3 candidate in the NIST Additional Signatures process.</div>
         </div>
 
         <div class="faq-item">
@@ -2062,7 +2062,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What encryption standard does QWID use?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">QWID supports two post-quantum signature schemes drawn from <strong>different mathematical families</strong>, so that a break in one does not compromise the other.<br><br><strong>Falcon-512</strong> &#8212; lattice-based (NTRU). NIST security level 1, comparable to 128-bit AES; public key 897 B, signature &lt;752 B. Selected by NIST for standardisation as FN-DSA (FIPS 206), which is still in draft.<br><br><strong>MAYO-5</strong> &#8212; multivariate (Oil-and-Vinegar). NIST security level 5, comparable to 256-bit AES; public key 5,554 B, signature 964 B. A round-3 candidate in the NIST Additional Signatures process, which NIST opened in 2022 precisely to reduce reliance on lattice assumptions &#8212; two of its three selected signature schemes are lattice-based.<br><br>Neither scheme is a finalised standard yet, and parameter sets in the multivariate family are under active cryptanalysis. That is the argument for running two families rather than one: each transaction is signed under a scheme the user picks, and QWID&#8217;s on-chain governance can pause or replace either scheme without a hard fork.</div>
+          <div class="faq-a">QWID supports two post-quantum signature schemes drawn from <strong>different mathematical families</strong>, so that a break in one does not compromise the other.<br><br><strong>Falcon-512</strong> &#8212; lattice-based (NTRU). NIST security level 1, comparable to 128-bit AES; public key 897 B, signature &lt;752 B. Selected by NIST for standardisation as FN-DSA (FIPS 206), which is still in draft.<br><br><strong>MAYO-2</strong> &#8212; multivariate (Oil-and-Vinegar). NIST security level 1, comparable to 128-bit AES; public key 4,912 B, signature 186 B. A round-3 candidate in the NIST Additional Signatures process, which NIST opened in 2022 precisely to reduce reliance on lattice assumptions &#8212; two of its three selected signature schemes are lattice-based.<br><br>Neither scheme is a finalised standard yet, and parameter sets in the multivariate family are under active cryptanalysis. That is the argument for running two families rather than one: each transaction is signed under a scheme the user picks, and QWID&#8217;s on-chain governance can pause or replace either scheme without a hard fork.</div>
         </div>
 
       </div>
@@ -2169,7 +2169,7 @@ a.htrust-item:hover{color:var(--cyan)}
             What is Decentralized Cryptographic Governance?
             <span class="faq-arrow">&#8964;</span>
           </button>
-          <div class="faq-a">QWID integrates an on-chain voting mechanism allowing the community to pause a compromised cryptographic scheme or upgrade it to a newly vetted post-quantum alternative &#8212; all without stopping the network. Because QWID supports two <em>independent</em> schemes, if one is ever found to be broken the network continues operating on the other while the community votes to replace the compromised one. The second scheme is a live safety net: zero downtime, zero lost funds, and no need for an emergency hard fork. This future-proofs the blockchain against vulnerabilities that may be discovered in Falcon-512 or MAYO-5 after mainnet launch.</div>
+          <div class="faq-a">QWID integrates an on-chain voting mechanism allowing the community to pause a compromised cryptographic scheme or upgrade it to a newly vetted post-quantum alternative &#8212; all without stopping the network. Because QWID supports two <em>independent</em> schemes, if one is ever found to be broken the network continues operating on the other while the community votes to replace the compromised one. The second scheme is a live safety net: zero downtime, zero lost funds, and no need for an emergency hard fork. This future-proofs the blockchain against vulnerabilities that may be discovered in Falcon-512 or MAYO-2 after mainnet launch.</div>
         </div>
 
       </div>
@@ -2460,7 +2460,7 @@ a.htrust-item:hover{color:var(--cyan)}
     <div class="footer-top">
       <div class="footer-brand">
         <a href="#" class="nav-logo" style="display:inline-flex;margin-bottom:0.5rem">
-          <span class="nav-logo-text">QWID</span>
+          <span class="nav-logo-text">QW<span>ID</span></span>
         </a>
         <p>A quantum-resistant blockchain designed to outlast quantum computers. Dual post-quantum signatures, EVM compatibility, and Proof-of-Synergy consensus.</p>
         <div class="footer-social">
@@ -2480,13 +2480,13 @@ a.htrust-item:hover{color:var(--cyan)}
         <ul>
           <li><a href="https://explorer.qwid.org" target="_blank" rel="noopener">Block Explorer ↗</a></li>
           <li><a href="https://github.com/qwid-org/qwid-node" target="_blank" rel="noopener">GitHub ↗</a></li>
-          <li><a href="WhitePaper_1.0.pdf" target="_blank" rel="noopener">WhitePaper v1.0</a></li>
+          <li><a href="WhitePaper_1.1.pdf" target="_blank" rel="noopener">WhitePaper v1.1</a></li>
         </ul>
       </div>
       <div class="footer-col">
         <h4>Developers</h4>
         <ul>
-          <li><a href="WhitePaper_1.0.pdf" target="_blank" rel="noopener">Documentation</a></li>
+          <li><a href="WhitePaper_1.1.pdf" target="_blank" rel="noopener">Documentation</a></li>
           <li><a href="https://explorer.qwid.org" target="_blank" rel="noopener">Explorer API ↗</a></li>
           <li><a href="https://github.com/qwid-org/qwid-node" target="_blank" rel="noopener">Source Code ↗</a></li>
         </ul>
