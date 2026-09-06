@@ -8,7 +8,7 @@
      tool and update privacy.html to match. -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QWID Foundation — Blockchain Beyond Quantum</title>
+<title>QWID Chain — Blockchain Beyond Quantum</title>
 <meta name="description" content="QWID is a quantum-resistant blockchain running two independent post-quantum signature families side by side — Falcon-512 (lattice) and MAYO-2 (multivariate) — with EVM compatibility, Proof-of-Synergy consensus, and built-in DEX and oracles.">
 <link rel="canonical" href="https://qwid.org/">
 <!-- Open Graph -->
@@ -24,7 +24,7 @@
 <meta name="twitter:image" content="https://qwid.org/og-1200x630.png">
 <!-- Schema.org -->
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"Organization","name":"QWID Foundation","description":"Quantum-resistant blockchain running two independent post-quantum signature families — Falcon-512 (lattice) and MAYO-2 (multivariate) — with EVM smart contracts and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/qwid-org/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
+{"@context":"https://schema.org","@type":"Organization","name":"QWID Chain","description":"Quantum-resistant blockchain running two independent post-quantum signature families — Falcon-512 (lattice) and MAYO-2 (multivariate) — with EVM smart contracts and Proof-of-Synergy consensus","url":"https://qwid.org","sameAs":["https://github.com/qwid-org/qwid-node","https://www.linkedin.com/company/86857701","https://x.com/QWID_org"]}
 </script>
 <link rel="stylesheet" href="fonts/fonts.css">
 <style>
@@ -241,6 +241,41 @@ img{max-width:100%}
     border-bottom:1px solid var(--card-border);
   }
   .nav.open .nav-cta{display:block;margin:0;padding:0 2rem 2rem}
+}
+
+/* ===================== VIDEO INTRO ===================== */
+.video-intro{
+  position:relative;
+  min-height:100vh;
+  min-height:100svh;
+  padding-top:68px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;
+  background:#000;
+}
+.video-intro video{
+  display:block;
+  width:100%;
+  height:calc(100vh - 68px);
+  height:calc(100svh - 68px);
+  object-fit:contain;
+  background:#000;
+}
+.video-intro-skip{
+  position:absolute;
+  right:clamp(1rem,3vw,2.5rem);
+  bottom:clamp(3.5rem,7vh,5rem);
+  z-index:2;
+  background:rgba(2,8,16,.78);
+  border-color:rgba(0,229,255,.6);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+}
+.video-intro-skip:focus-visible{
+  outline:2px solid #fff;
+  outline-offset:3px;
 }
 
 /* ===================== HERO ===================== */
@@ -1284,11 +1319,20 @@ a.htrust-item:hover{color:var(--cyan)}
 </head>
 <body>
 
+<!-- ===================== VIDEO INTRO ===================== -->
+<section class="video-intro" aria-label="QWID introduction video">
+  <video autoplay muted playsinline controls preload="metadata" aria-label="QWID introduction">
+    <source src="QWID_v4_1080p.mp4" type="video/mp4">
+    Your browser cannot play this video. <a href="QWID_v4_1080p.mp4">Download the QWID introduction</a>.
+  </video>
+  <a href="#hero" class="btn btn-outline video-intro-skip">Skip intro ↓</a>
+</section>
+
 <!-- ===================== NAV ===================== -->
 <nav class="nav" id="mainNav">
   <a href="#" class="nav-logo">
     <span class="nav-logo-text">QW<span>ID</span></span>
-    <span class="nav-badge">Foundation</span>
+    <span class="nav-badge">Chain</span>
   </a>
   <ul class="nav-links" id="navLinks">
     <li><a href="#features">Features</a></li>
@@ -2516,7 +2560,7 @@ a.htrust-item:hover{color:var(--cyan)}
       </div>
     </div>
     <div class="footer-bottom">
-      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Foundation. Open-source software released under MIT License. &middot; <a href="privacy.html">Privacy</a></span>
+      <span class="footer-copy">&copy; 2025&#8211;2026 QWID Chain. Open-source software released under MIT License. &middot; <a href="privacy.html">Privacy</a></span>
       <span class="footer-copy" style="color:var(--muted)">No cookies &middot; No trackers &middot; Chain ID 23</span>
     </div>
   </div>
