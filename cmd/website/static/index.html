@@ -507,7 +507,12 @@ function setAlert(id, text, isError) {
     const el = document.getElementById(id);
     if (!el) return;
     if (!text) { el.innerHTML = ''; return; }
-    el.innerHTML = `<div class="alert ${isError ? 'alert-error' : 'alert-success'}">${text}</div>`;
+    // textContent, not innerHTML: alert texts include server-echoed strings.
+    const div = document.createElement('div');
+    div.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+    div.textContent = text;
+    el.innerHTML = '';
+    el.appendChild(div);
 }
 
 async function api(url, opts) {
@@ -753,11 +758,26 @@ async function loadTokens() {
         }
         let html = '<table class="tx-table"><thead><tr><th>Token</th><th>Address</th></tr></thead><tbody>';
         for (const [addr, info] of Object.entries(data.tokens)) {
+            // Token names come from the CHAIN — an attacker's contract chooses
+            // its own name() return, so this is hostile input on every node,
+            // regardless of this site's own creation-form validation. Unescaped
+            // interpolation here executed that name in every logged-in
+            // visitor's session, with the session cookie attached
+            // (QWID-2026-27). The address moves to a data attribute for the
+            // same reason: inline onclick built by string pasting is an
+            // injection surface even for "hex-looking" values.
             const name = typeof info === 'object' ? (info.name || info.symbol || addr) : info;
-            html += `<tr><td>${name}</td><td style="font-family:monospace;font-size:12px;cursor:pointer" onclick="document.getElementById('dex-trade-addr').value='${addr}';document.getElementById('dex-token-addr').value='${addr}';document.getElementById('dex-liq-addr').value='${addr}'" title="Click to select">${truncAddr(addr)}</td></tr>`;
+            html += `<tr><td>${escapeHtml(name)}</td><td style="font-family:monospace;font-size:12px;cursor:pointer" class="dex-token-pick" data-addr="${escapeHtml(addr)}" title="Click to select">${escapeHtml(truncAddr(addr))}</td></tr>`;
         }
         html += '</tbody></table>';
         el.innerHTML = html;
+        el.querySelectorAll('.dex-token-pick').forEach(td => td.addEventListener('click', () => {
+            const a = td.dataset.addr;
+            for (const id of ['dex-trade-addr', 'dex-token-addr', 'dex-liq-addr']) {
+                const f = document.getElementById(id);
+                if (f) f.value = a;
+            }
+        }));
     } catch(e) {
         document.getElementById('dex-tokens').innerHTML = '<div style="color:#ff4757">' + e.message + '</div>';
     }
