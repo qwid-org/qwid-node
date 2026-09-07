@@ -41,10 +41,18 @@ func (at StakingAccountsType) Marshal() []byte {
 func (at *StakingAccountsType) Unmarshal(data []byte) error {
 	buffer := bytes.NewBuffer(data)
 
-	// Number of accounts
+	// Number of accounts. GetInt64FromByte panics on fewer than 8 bytes, so
+	// guard the read; then bound the count by the bytes present (each account is
+	// at least a 20-byte address) and reject a negative count before make (QWID-2026-14).
+	if buffer.Len() < 8 {
+		return fmt.Errorf("not enough data to unmarshal staking accounts: have %d", buffer.Len())
+	}
 	accountCount := common.GetInt64FromByte(buffer.Next(8))
+	if accountCount < 0 || accountCount > int64(buffer.Len())/int64(common.AddressLength) {
+		return fmt.Errorf("invalid staking account count %d for %d bytes", accountCount, buffer.Len())
+	}
 
-	at.AllStakingAccounts = make(map[[common.AddressLength]byte]StakingAccount, accountCount)
+	at.AllStakingAccounts = make(map[[common.AddressLength]byte]StakingAccount, safeMapHint(accountCount))
 
 	// Read each account
 	for i := int64(0); i < accountCount; i++ {
@@ -56,8 +64,16 @@ func (at *StakingAccountsType) Unmarshal(data []byte) error {
 			return fmt.Errorf("failed to read address: %w", err)
 		}
 
-		// The rest of the data is for the StakingAccount; unmarshal it
+		// The rest of the data is for the StakingAccount; unmarshal it. Guard the
+		// 4-byte length read and reject a length beyond the remaining bytes
+		// (QWID-2026-14).
+		if buffer.Len() < 4 {
+			return fmt.Errorf("not enough data for staking account length at index %d", i)
+		}
 		nb := int(binary.BigEndian.Uint32(buffer.Next(4)))
+		if nb > buffer.Len() {
+			return fmt.Errorf("staking account length %d exceeds remaining %d at index %d", nb, buffer.Len(), i)
+		}
 
 		if err := acc.Unmarshal(buffer.Next(nb)); err != nil {
 			return fmt.Errorf("failed to unmarshal account: %w", err)
@@ -72,6 +88,16 @@ func (at *StakingAccountsType) Unmarshal(data []byte) error {
 	return nil
 }
 
+// stakingCheckpointManifestKey returns the per-height completeness marker for a
+// staking checkpoint (QWID-2026-15). It is written LAST, only after all 256
+// shards persist, so its presence proves the whole checkpoint reached disk. The
+// two-byte "OK" suffix cannot collide with a shard key, whose suffix is a single
+// byte and whose 256 values (0x00..0xFF) are all in use.
+func stakingCheckpointManifestKey(height int64) []byte {
+	k := append(common.StakingAccountsDBPrefix[:], common.GetByteInt64(height)...)
+	return append(k, 'O', 'K')
+}
+
 func StoreStakingAccounts(height int64) error {
 	StakingRWMutex.Lock()
 	defer StakingRWMutex.Unlock()
@@ -80,10 +106,21 @@ func StoreStakingAccounts(height int64) error {
 		hb := common.GetByteInt64(height)
 		prefix := append(common.StakingAccountsDBPrefix[:], hb...)
 		prefix = append(prefix, byte(i))
-		err := database.MainDB.Put(prefix, k[:])
-		if err != nil {
-			logger.GetLogger().Println("cannot store accounts", err)
+		if err := database.MainDB.Put(prefix, k[:]); err != nil {
+			// A partial checkpoint must never be advertised as restorable: do
+			// NOT write the completeness manifest or advance the last-height
+			// meta, and surface the error so the caller learns the checkpoint
+			// failed instead of trusting a hole in the validator set (QWID-2026-15).
+			logger.GetLogger().Println("cannot store staking accounts shard", i, err)
+			return fmt.Errorf("failed to store staking shard %d at height %d: %w", i, height, err)
 		}
+	}
+	// All 256 shards persisted. Publish the completeness manifest LAST, then the
+	// last-height meta; StakingAccountsStoredAtHeight and the restore chooser key
+	// off the manifest, so a half-written checkpoint is never selected.
+	if err := database.MainDB.Put(stakingCheckpointManifestKey(height), common.GetByteInt64(height)); err != nil {
+		logger.GetLogger().Println("cannot store staking checkpoint manifest", err)
+		return fmt.Errorf("failed to store staking checkpoint manifest at height %d: %w", height, err)
 	}
 	raiseLastStoredHeightMeta(common.StakingAccountsDBPrefix, height)
 	return nil
@@ -100,21 +137,28 @@ func LoadStakingAccounts(height int64) error {
 		}
 	}
 
+	// Decode into a temporary array and swap into global state only after every
+	// shard is present and decodes. A missing or corrupt shard is a real
+	// integrity failure (each of the 256 shards is always written by a complete
+	// StoreStakingAccounts), so it now returns an error instead of silently
+	// leaving a zero/stale shard, and it never half-replaces the live validator
+	// set (QWID-2026-15).
+	var loaded [256]StakingAccountsType
 	for i := 0; i < 256; i++ {
 		hb := common.GetByteInt64(height)
 		prefix := append(common.StakingAccountsDBPrefix[:], hb...)
 		prefix = append(prefix, byte(i))
-		b, err := database.MainDB.Get(prefix)
-		if err != nil || b == nil {
-			logger.GetLogger().Println("cannot load accounts", err)
-			continue
+		b, gerr := database.MainDB.Get(prefix)
+		if gerr != nil || b == nil {
+			logger.GetLogger().Println("cannot load staking accounts shard", i, gerr)
+			return fmt.Errorf("staking checkpoint at height %d is missing shard %d (err=%v)", height, i, gerr)
 		}
-		err = (&StakingAccounts[i]).Unmarshal(b)
-		if err != nil {
-			logger.GetLogger().Println("cannot unmarshal accounts", err)
-			return err
+		if uerr := (&loaded[i]).Unmarshal(b); uerr != nil {
+			logger.GetLogger().Println("cannot unmarshal staking accounts shard", i, uerr)
+			return fmt.Errorf("staking checkpoint at height %d shard %d is corrupt: %w", height, i, uerr)
 		}
 	}
+	StakingAccounts = loaded
 	return nil
 }
 
@@ -147,6 +191,13 @@ func RemoveStakingAccountsFromDB(height int64) error {
 			return err
 		}
 	}
+	// Delete the completeness manifest too, so retention/rewind cannot leave a
+	// dangling manifest that claims a checkpoint whose shards are gone
+	// (QWID-2026-15). A missing manifest key deletes as a no-op.
+	if err := database.MainDB.Delete(stakingCheckpointManifestKey(height)); err != nil {
+		logger.GetLogger().Println("cannot remove staking checkpoint manifest", err)
+		return err
+	}
 	return nil
 }
 
@@ -156,10 +207,10 @@ func StakingAccountsStoredAtHeight(height int64) bool {
 	if height < 0 {
 		return false
 	}
-	ib := common.GetByteInt64(height)
-	prefix := append(common.StakingAccountsDBPrefix[:], ib...)
-	prefix = append(prefix, byte(1))
-	ok, err := database.MainDB.IsKey(prefix)
+	// Check the completeness manifest, not a single shard: shard 1 can be
+	// present while other shards are missing after a partial write, and the
+	// restore chooser must not select such a height (QWID-2026-15).
+	ok, err := database.MainDB.IsKey(stakingCheckpointManifestKey(height))
 	return err == nil && ok
 }
 

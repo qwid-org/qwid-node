@@ -107,6 +107,14 @@ func StorePubKey(pk common.PubKey) error {
 }
 
 func StorePubKeyInPatriciaTrie(pk common.PubKey) error {
+	// QWID-2026-16 (defense in depth): reject a key whose byte length matches no
+	// active scheme even if it reached application. Transaction.Verify already
+	// gates this, but application must not depend on that alone — a key admitted
+	// through any other path (a future caller, a verification bug) would
+	// otherwise bloat the trie with unverifiable bytes.
+	if !common.IsValidPubKeyLength(len(pk.GetBytes()), pk.Primary) {
+		return fmt.Errorf("refusing to register pubkey of length %d matching no active scheme", len(pk.GetBytes()))
+	}
 	addresses, err := pubkeys.LoadAddresses(pk.MainAddress)
 	if err != nil {
 		if err.Error() != "key not found" {
@@ -174,6 +182,14 @@ func StorePubKeyInPatriciaTrie(pk common.PubKey) error {
 	address, err := common.PubKeyToAddress(pk.GetBytes(), pk.Primary)
 	if err != nil {
 		return err
+	}
+	// QWID-2026-16: cap the number of keys one identity may register. Without
+	// this an attacker holding a single identity could sign an unbounded stream
+	// of distinct registrations, each growing this list (rebuilt in full on
+	// every registration) without limit.
+	if len(addresses) >= common.MaxKeysPerIdentity {
+		return fmt.Errorf("identity %s already registered the maximum %d public keys",
+			pk.MainAddress.GetHex(), common.MaxKeysPerIdentity)
 	}
 	addresses = append(addresses, address)
 	tree, err := pubkeys.BuildMerkleTree(pk.MainAddress, addresses, pubkeys.GlobalMerkleTree.DB)
@@ -260,6 +276,16 @@ func ProcessBlockPubKey(block Block) error {
 			continue
 		}
 
+		// Is this a genuinely NEW registration for the identity? Only new ones
+		// are journalled, so a rewind never undoes a key that a still-canonical
+		// earlier block first registered (QWID-2026-07 annex). A duplicate
+		// registration tx in a later block is a no-op in the trie and must not
+		// produce a journal entry that would later delete the canonical key.
+		isNew := true
+		if idx, ferr := pubkeys.FindAddressForMainAddress(pk.MainAddress, pk.Address); ferr == nil && idx >= 0 {
+			isNew = false
+		}
+
 		err = StorePubKey(pk)
 		if err != nil {
 			logger.GetLogger().Printf("ERROR: storing the key %s of identity %s from tx %s failed: %v",
@@ -272,9 +298,97 @@ func ProcessBlockPubKey(block Block) error {
 				pk.Address.GetHex(), pk.MainAddress.GetHex(), txh.GetHex(), err)
 			return err
 		}
+		if isNew {
+			journalPubKeyRegistration(block.GetHeader().Height, pk.Address, pk.MainAddress)
+		}
 		logger.GetLogger().Printf("registered %s key %s (%d bytes) for identity %s from tx %s",
 			map[bool]string{true: "primary", false: "secondary"}[pk.Primary],
 			pk.Address.GetHex(), len(pk.GetBytes()), pk.MainAddress.GetHex(), txh.GetHex())
 	}
 	return nil
+}
+
+// pubKeyJournalKey builds the registration-journal key for one derived address
+// at a block height (QWID-2026-07 annex).
+func pubKeyJournalKey(height int64, derived common.Address) []byte {
+	k := append(common.PubKeyRegistrationJournalDBPrefix[:], common.GetByteInt64(height)...)
+	return append(k, derived.GetBytes()...)
+}
+
+// journalPubKeyRegistration records that block `height` newly registered
+// `derived` under identity `mainAddr`, so UnregisterPubKeysAtHeight can undo
+// exactly this registration if the block is later rewound.
+func journalPubKeyRegistration(height int64, derived, mainAddr common.Address) {
+	if err := database.MainDB.Put(pubKeyJournalKey(height, derived), mainAddr.GetBytes()); err != nil {
+		// Best effort: a journal write failure only weakens rewind cleanup; it
+		// must not fail block application (the block is already valid).
+		logger.GetLogger().Printf("WARNING: could not journal pubkey registration of %s at height %d: %v",
+			derived.GetHex(), height, err)
+	}
+}
+
+// UnregisterPubKeysAtHeight undoes every pubkey registration the journal records
+// for the given block height, called from RemoveBlockFromDB during a rewind so an
+// orphaned branch's registrations do not persist and shadow the canonical chain
+// (QWID-2026-07 annex). Best-effort: errors are logged, never fatal to the rewind.
+func UnregisterPubKeysAtHeight(height int64) {
+	prefix := append(common.PubKeyRegistrationJournalDBPrefix[:], common.GetByteInt64(height)...)
+	keys, err := database.MainDB.LoadAllKeys(prefix)
+	if err != nil {
+		logger.GetLogger().Println("pubkey journal scan failed at height", height, ":", err)
+		return
+	}
+	const keyLen = 2 + 8 + common.AddressLength
+	for _, k := range keys {
+		if len(k) != keyLen {
+			continue
+		}
+		var derived common.Address
+		copy(derived.ByteValue[:], k[10:keyLen])
+		mainB, gerr := database.MainDB.Get(k)
+		if gerr != nil || len(mainB) < common.AddressLength {
+			_ = database.MainDB.Delete(k)
+			continue
+		}
+		var mainAddr common.Address
+		copy(mainAddr.ByteValue[:], mainB[:common.AddressLength])
+		unregisterPubKey(derived, mainAddr)
+		_ = database.MainDB.Delete(k)
+	}
+}
+
+// unregisterPubKey removes one key record and drops its derived address from the
+// identity's patricia trie (rebuilding the trie, or removing it entirely when the
+// identity has no keys left). Mirror of StorePubKey + StorePubKeyInPatriciaTrie.
+func unregisterPubKey(derived, mainAddr common.Address) {
+	_ = database.MainDB.Delete(append(common.PubKeyMarshalDBPrefix[:], derived.GetBytes()...))
+	pubkeys.InvalidatePubKeyCache(derived.GetBytes())
+
+	addrs, err := pubkeys.LoadAddresses(mainAddr)
+	if err != nil {
+		return
+	}
+	kept := make([]common.Address, 0, len(addrs))
+	for _, a := range addrs {
+		if !bytes.Equal(a.GetBytes(), derived.GetBytes()) {
+			kept = append(kept, a)
+		}
+	}
+	if len(kept) == len(addrs) {
+		return // nothing removed
+	}
+	if len(kept) == 0 {
+		if rerr := pubkeys.RemoveMerkleTrieFromDB(mainAddr); rerr != nil {
+			logger.GetLogger().Println("cannot remove pubkey trie for", mainAddr.GetHex(), ":", rerr)
+		}
+		return
+	}
+	tree, terr := pubkeys.BuildMerkleTree(mainAddr, kept, pubkeys.GlobalMerkleTree.DB)
+	if terr != nil {
+		logger.GetLogger().Println("cannot rebuild pubkey trie for", mainAddr.GetHex(), ":", terr)
+		return
+	}
+	if serr := tree.StoreTree(mainAddr); serr != nil {
+		logger.GetLogger().Println("cannot store rebuilt pubkey trie for", mainAddr.GetHex(), ":", serr)
+	}
 }

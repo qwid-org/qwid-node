@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math/rand"
 	"net"
 	"net/http"
@@ -41,6 +42,25 @@ var (
 )
 
 const maxWelcomePerHour = 50
+
+// registrationLocks serializes registration of the SAME username end-to-end
+// (QWID-2026-31). The old flow checked Users.Exists, then wrote wallet0.json,
+// then called the mutex-guarded Users.Create — a TOCTOU window in which two
+// concurrent registrations of one username both passed Exists and both wrote the
+// same wallet file, so the loser's write could clobber the winner's keys while
+// the winner's login hash and welcome payment pointed at overwritten material. A
+// fixed pool of sharded mutexes (keyed by username hash) bounds memory: same
+// username → same shard → serialized; unrelated usernames rarely share a shard,
+// and a spurious collision only serializes two harmless registrations.
+const registrationLockShards = 256
+
+var registrationLocks [registrationLockShards]sync.Mutex
+
+func registrationLock(username string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(username))
+	return &registrationLocks[h.Sum32()%registrationLockShards]
+}
 
 // FinancialRateLimit limits state-changing money operations per client IP.
 func FinancialRateLimit(next http.HandlerFunc) http.HandlerFunc {
@@ -199,6 +219,13 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Hold a per-username lock across the whole Exists → wallet write → Create
+	// sequence, closing the TOCTOU that let two concurrent same-username
+	// registrations clobber each other's wallet file (QWID-2026-31).
+	rlk := registrationLock(req.Username)
+	rlk.Lock()
+	defer rlk.Unlock()
+
 	if Users.Exists(req.Username) {
 		// WH-H3: do not disclose that the username exists. Return the same generic
 		// 400 as other registration failures (not a distinct "already taken"/409),
@@ -276,12 +303,16 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send welcome transaction (5000 QWD) from node wallet, subject to a global
-	// hourly cap (WH-H2). Registration still succeeds if the cap is reached.
-	if welcomeLimiter.allow("global", maxWelcomePerHour, time.Hour) {
-		go sendWelcomeTransaction(wl.MainAddress)
+	// Send welcome transaction (5000 QWD) from node wallet, subject to BOTH the
+	// hourly pacing cap (WH-H2) AND the persisted lifetime budget (QWID-2026-29).
+	// The hourly cap only slows a drain; the lifetime budget bounds the total the
+	// faucet can ever pay. Registration still succeeds if either is exhausted.
+	if !welcomeLimiter.allow("global", maxWelcomePerHour, time.Hour) {
+		logger.GetLogger().Println("welcome tx hourly cap reached; skipping for", req.Username)
+	} else if !Faucet.reserve(welcomeAmountQWD) {
+		logger.GetLogger().Println("welcome tx lifetime budget exhausted; skipping for", req.Username)
 	} else {
-		logger.GetLogger().Println("welcome tx global cap reached; skipping for", req.Username)
+		go sendWelcomeTransaction(wl.MainAddress)
 	}
 
 	// No recovery phrase here either: the phrase must never cross HTTP (design
@@ -399,6 +430,17 @@ func loadUserWallet(walletDir, password string) (*wallet.Wallet, error) {
 const welcomeAmountQWD = 5000
 
 func sendWelcomeTransaction(recipient common.Address) {
+	// QWID-2026-29: the caller reserved welcomeAmountQWD against the lifetime
+	// budget before dispatching. Refund it on any path that does not actually
+	// send the transaction, so a transient failure does not permanently burn a
+	// slice of the budget.
+	sent := false
+	defer func() {
+		if !sent {
+			Faucet.refund(welcomeAmountQWD)
+		}
+	}()
+
 	if NodeWallet == nil {
 		logger.GetLogger().Println("sendWelcomeTransaction: node wallet not loaded")
 		return
@@ -472,6 +514,7 @@ func sendWelcomeTransaction(recipient common.Address) {
 	}
 
 	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
+	sent = true
 
 	logger.GetLogger().Println("sendWelcomeTransaction: sent", welcomeAmountQWD, "QWD to", recipient.GetHex())
 }

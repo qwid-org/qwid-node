@@ -104,8 +104,15 @@ func FromBytesToEncryptionConfig(bb []byte) (ConfigEnc, error) {
 		return cached, nil
 	}
 	sigName, pubKeyLength, privateKeyLength, signatureLength, isPaused, err := GenerateParamsEncryptionSchemesFromBytes(bb)
-	if err != nil || sigName == "" {
+	if err != nil {
 		return ConfigEnc{}, err
+	}
+	if sigName == "" {
+		// An all-NUL name field parsed "successfully" and returned a nil error
+		// with an empty config; on the syncing path (which skips VerifyEncConfig)
+		// that empty config could be installed as the live scheme
+		// (QWID-2026-33). An empty name is malformed input, never success.
+		return ConfigEnc{}, errors.New("encryption config carries an empty scheme name")
 	}
 	encConfig := CreateEncryptionScheme(sigName, pubKeyLength, privateKeyLength, signatureLength, isPaused)
 	if !VerifyEncConfig(encConfig) {
@@ -241,7 +248,23 @@ func GenerateParamsEncryptionSchemesFromBytes(bb []byte) (sigName string, pubKey
 	if _, err = reader.Read(sigNameBytes); err != nil {
 		return "", 0, 0, 0, false, fmt.Errorf("failed to read SigName: %w", err)
 	}
-	sigName = string(bytes.Trim(sigNameBytes, "\x00")) // Remove trailing NULL bytes
+	// The name must be name||0x00-padding with NOTHING after the first NUL.
+	// bytes.Trim removed only edge NULs, so "MAYO-2\x00X" survived as a Go
+	// string DIFFERENT from "MAYO-2" while C.CString truncates at the NUL —
+	// the SAME liboqs algorithm under an aliased name. Every scheme-identity
+	// decision on the Go side is a string compare (duplicate-scheme guard,
+	// pause enforcement, replace-vs-pause classification), so the alias walked
+	// past all of them (QWID-2026-32).
+	if nul := bytes.IndexByte(sigNameBytes, 0); nul >= 0 {
+		for _, b := range sigNameBytes[nul:] {
+			if b != 0 {
+				return "", 0, 0, 0, false, fmt.Errorf("scheme name contains bytes after an interior NUL")
+			}
+		}
+		sigName = string(sigNameBytes[:nul])
+	} else {
+		sigName = string(sigNameBytes)
+	}
 
 	// Decode pubKeyLength (as int32)
 	var pubKeyLength32 int32

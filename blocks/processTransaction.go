@@ -368,6 +368,15 @@ func ProcessMultiSignAndEscrow(tx transactionsDefinition.Transaction) error {
 		return fmt.Errorf("account cannot be both escrow and multisign")
 	}
 
+	// Defence in depth for QWID-2026-05: escrow/multisig policy only ever
+	// modifies the signer's own account. Verify enforces this at admission, but
+	// the executor must not trust that a transaction reached it through the
+	// current admission rules (old pools, sync replay, future rule drift).
+	if (tx.TxData.EscrowTransactionsDelay > 0 || tx.TxData.MultiSignNumber > 0) &&
+		!bytes.Equal(tx.TxData.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes()) {
+		return fmt.Errorf("escrow/multisig policy may only modify the sender's own account")
+	}
+
 	acc := account.SetAccountByAddressBytes(tx.TxData.Recipient.ByteValue[:])
 
 	// modify escrow parameters

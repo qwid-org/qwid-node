@@ -104,14 +104,24 @@ func (at *AccountsType) Unmarshal(data []byte) error {
 	}
 	// Number of accounts
 	accountCount := common.GetInt64FromByte(data[:8])
+	// Each account occupies at least an address (20 bytes) plus a length prefix,
+	// so a count larger than the remaining bytes / 20 is corrupt. Reject it
+	// (and any negative count) before it drives an allocation or a slice
+	// out-of-range panic (QWID-2026-14).
+	if accountCount < 0 || accountCount > int64(len(data)-8)/int64(common.AddressLength) {
+		return fmt.Errorf("invalid account count %d for %d bytes", accountCount, len(data))
+	}
 
-	at.AllAccounts = make(map[[common.AddressLength]byte]Account, accountCount)
+	at.AllAccounts = make(map[[common.AddressLength]byte]Account, safeMapHint(accountCount))
 
 	data = data[8:]
 	// Read each account
 	for i := int64(0); i < accountCount; i++ {
 		var address [common.AddressLength]byte
 		var acc Account
+		if len(data) < common.AddressLength {
+			return fmt.Errorf("not enough data for account address at index %d", i)
+		}
 		copy(address[:], data[:20])
 		data = data[20:]
 

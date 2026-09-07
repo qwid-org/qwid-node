@@ -379,6 +379,12 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 	sa.StakedBalance = common.GetInt64FromByte(buffer.Next(8))
 	sa.StakingRewards = common.GetInt64FromByte(buffer.Next(8))
 	numLocked := common.GetInt64FromByte(buffer.Next(8))
+	// Each locked entry is three int64s (24 bytes). Bound the count by the bytes
+	// present so a corrupt count cannot drive an out-of-range read inside the
+	// loop, and reject a negative one (QWID-2026-14).
+	if numLocked < 0 || numLocked > int64(buffer.Len())/24 {
+		return fmt.Errorf("invalid locked-amount count %d for %d bytes", numLocked, buffer.Len())
+	}
 
 	sa.LockedAmount = []int64{}
 	sa.ReleasePerBlock = []int64{}
@@ -388,6 +394,12 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 		sa.ReleasePerBlock = append(sa.ReleasePerBlock, common.GetInt64FromByte(buffer.Next(8)))
 		sa.LockedInitBlock = append(sa.LockedInitBlock, common.GetInt64FromByte(buffer.Next(8)))
 	}
+	// The two addresses, the one-byte operational flag, and the 8-byte details
+	// count must all be present before they are read: buffer.Next(1)[0] panics
+	// on an empty buffer and GetInt64FromByte panics on a short slice (QWID-2026-14).
+	if buffer.Len() < 2*common.AddressLength+1+8 {
+		return fmt.Errorf("insufficient data for staking account addresses and details count")
+	}
 	// Address
 	copy(sa.DelegatedAccount[:], buffer.Next(common.AddressLength))
 	copy(sa.Address[:], buffer.Next(common.AddressLength))
@@ -395,9 +407,12 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 	if buffer.Next(1)[0] > 0 {
 		sa.OperationalAccount = true
 	}
-	// StakingDetails
+	// StakingDetails. Each outer entry is at least a key + inner count (16 bytes).
 	detailsCount := common.GetInt64FromByte(buffer.Next(8))
-	sa.StakingDetails = make(map[int64][]StakingDetail, detailsCount)
+	if detailsCount < 0 || detailsCount > int64(buffer.Len())/16 {
+		return fmt.Errorf("invalid staking details count %d for %d bytes", detailsCount, buffer.Len())
+	}
+	sa.StakingDetails = make(map[int64][]StakingDetail, safeMapHint(detailsCount))
 
 	for i := int64(0); i < detailsCount; i++ {
 		// Ensure there's enough data for the key and the detail count
@@ -406,6 +421,11 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 		}
 		key := common.GetInt64FromByte(buffer.Next(8))
 		detailCount := common.GetInt64FromByte(buffer.Next(8))
+		// Each StakingDetail is three int64s (24 bytes); bound the count by the
+		// bytes present and reject a negative one before make (QWID-2026-14).
+		if detailCount < 0 || detailCount > int64(buffer.Len())/24 {
+			return fmt.Errorf("invalid staking detail count %d for %d bytes at detail %d", detailCount, buffer.Len(), i)
+		}
 
 		details := make([]StakingDetail, detailCount)
 		for j := int64(0); j < detailCount; j++ {

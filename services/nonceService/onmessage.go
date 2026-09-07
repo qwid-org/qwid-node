@@ -56,6 +56,11 @@ func OnMessage(addr [4]byte, m []byte) {
 		nonceTransaction := map[[2]byte]transactionsDefinition.Transaction{}
 
 		for k, v := range txn {
+			// Skip a topic with no items: v[0] panics on an empty list, which a
+			// malformed peer message can produce (QWID-2026-17).
+			if len(v) == 0 {
+				continue
+			}
 			nonceTransaction[k] = v[0]
 		}
 		var transaction transactionsDefinition.Transaction
@@ -183,7 +188,36 @@ func OnMessage(addr [4]byte, m []byte) {
 		// are equal here thanks to the guard above, but this must not silently
 		// diverge from validation if that guard ever changes.
 		txs = blocks.FilterUnbuildableTransactions(txs, nonceHeight)
-		txsBytes := make([][]byte, len(txs))
+		// Gas-aware selection: keep transactions only while their cumulative gas
+		// fits the block gas limit. Validation caps a block's total gas at
+		// MaxGasUsage (QWID-2026-11); selecting purely by COUNT produced
+		// candidates over that cap, which every node then rejected — and because
+		// nothing was evicted, the same over-budget set was re-selected every
+		// round and no node could produce a block (QWID-2026-38(a)).
+		// PeekTransactions returns the best-paying first, so truncating to the
+		// budget keeps the most valuable transactions.
+		{
+			budgeted := make([]transactionsDefinition.Transaction, 0, len(txs))
+			var gas int64
+			for _, tx := range txs {
+				g := tx.GasUsage
+				if g < 0 {
+					g = 0
+				}
+				if g > common.MaxGasUsage {
+					continue // a single transaction over the whole block budget can never fit
+				}
+				if gas+g > common.MaxGasUsage {
+					break
+				}
+				gas += g
+				budgeted = append(budgeted, tx)
+			}
+			txs = budgeted
+		}
+		// Clean capacity so the producer's merkle root matches the validator's
+		// (both build cleanly now) — see QWID-2026-23 in processBlock.go.
+		txsBytes := make([][]byte, 0, len(txs))
 		transactionsHashes := []common.Hash{}
 		for _, tx := range txs {
 			hash := tx.GetHash().GetBytes()
@@ -241,7 +275,11 @@ func OnMessage(addr [4]byte, m []byte) {
 		bls := map[[2]byte]blocks.Block{}
 		for k, v := range txnbytes {
 			if k[0] == byte('N') {
-
+				// v[0] panics on an empty item list from a malformed peer
+				// message (QWID-2026-17).
+				if len(v) == 0 {
+					continue
+				}
 				bls[k], err = bls[k].GetFromBytes(v[0])
 				newBlock := bls[k]
 				if err != nil {
@@ -297,6 +335,14 @@ func OnMessage(addr [4]byte, m []byte) {
 
 				err = account.StoreStakingAccounts(newBlock.GetHeader().Height)
 				if err != nil {
+					logger.GetLogger().Println(err)
+				}
+				// DEX pools and per-provider balances are consensus state read
+				// by later swaps, yet they were the ONE component never stored
+				// with an accepted block — every restart silently reverted them
+				// to genesis while other nodes kept the live values, splitting
+				// execution results with no error anywhere (QWID-2026-12).
+				if err := account.StoreDexAccounts(newBlock.GetHeader().Height); err != nil {
 					logger.GetLogger().Println(err)
 				}
 				// Each of the two stores above writes a full copy of its state

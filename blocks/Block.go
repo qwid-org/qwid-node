@@ -75,6 +75,12 @@ func (tb Block) GetFromBytes(b []byte) (Block, error) {
 	if err != nil {
 		return Block{}, err
 	}
+	// BaseBlock consumes variable-length oracle fields, so the remainder can be
+	// shorter than the 40-byte block-hash + fee tail sliced next. Re-check before
+	// slicing, or b[0:32]/b[0:8] panic (QWID-2026-17).
+	if len(b) < 40 {
+		return Block{}, fmt.Errorf("not enough bytes for block hash and fee: have %d", len(b))
+	}
 	tb.BlockHash = common.GetHashFromBytes(b[0:32])
 	b = b[32:]
 	tb.BlockFee = common.GetInt64FromByte(b[0:8])
@@ -133,6 +139,20 @@ func (bl Block) StoreBlock() error {
 
 func RemoveBlockFromDB(height int64) error {
 	bh := common.GetByteInt64(height)
+	// Clear the included-index for this block's transactions before removing it,
+	// so a genuinely reverted transaction becomes re-appliable on the canonical
+	// chain rather than being wrongly rejected as a duplicate forever
+	// (QWID-2026-19). Best-effort: a load failure must not block the rewind.
+	if bl, lerr := LoadBlock(height); lerr == nil {
+		for _, th := range bl.TransactionsHashes {
+			transactionsPool.UnmarkTxIncluded(th.GetBytes())
+		}
+	}
+	// Undo any public-key registrations this block newly made, so an orphaned
+	// branch's keys do not persist in the registry and shadow the canonical
+	// chain after a rewind (QWID-2026-07 annex). Keyed by height in the journal,
+	// so it does not depend on the block's transactions still being loadable.
+	UnregisterPubKeysAtHeight(height)
 	hb, err := database.MainDB.Get(append(common.BlockByHeightDBPrefix[:], bh...))
 	if err != nil {
 		return err

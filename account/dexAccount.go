@@ -64,8 +64,10 @@ func (da DexAccount) Marshal() []byte {
 func (da *DexAccount) Unmarshal(data []byte) error {
 
 	buffer := bytes.NewBuffer(data)
-	// Ensure there's enough data
-	if buffer.Len() < 8*3+common.AddressLength {
+	// Ensure there's enough data for the three int64 pools, the token address,
+	// AND the 8-byte balance count that follows — the count read below panics on
+	// a short slice otherwise (QWID-2026-14).
+	if buffer.Len() < 8*4+common.AddressLength {
 		return fmt.Errorf("insufficient data for dex accounts unmarshaling")
 	}
 
@@ -85,7 +87,12 @@ func (da *DexAccount) Unmarshal(data []byte) error {
 	copy(da.TokenAddress.ByteValue[:], buffer.Next(common.AddressLength))
 
 	detailsCount := common.GetInt64FromByte(buffer.Next(8))
-	da.Balances = make(map[[common.AddressLength]byte]CoinTokenDetails, detailsCount)
+	// Each balance entry is a 20-byte address plus 16 bytes of details; bound the
+	// count by the bytes present and reject a negative one before make (QWID-2026-14).
+	if detailsCount < 0 || detailsCount > int64(buffer.Len())/(16+int64(common.AddressLength)) {
+		return fmt.Errorf("invalid dex balance count %d for %d bytes", detailsCount, buffer.Len())
+	}
+	da.Balances = make(map[[common.AddressLength]byte]CoinTokenDetails, safeMapHint(detailsCount))
 	addrb20 := [20]byte{}
 	for i := int64(0); i < detailsCount; i++ {
 		// Ensure there's enough data for the key and the detail count

@@ -199,7 +199,7 @@ func ShowAccountPage() *widgets.QTabWidget {
 		for i := 0; i < 4; i++ {
 			num, err := strconv.Atoi(ips[i])
 			if err != nil {
-				v = fmt.Sprintf("Invalid IP address segment:", ips[i])
+				v = fmt.Sprintf("Invalid IP address segment: %v", ips[i])
 				return
 			}
 			ip[i] = byte(num)

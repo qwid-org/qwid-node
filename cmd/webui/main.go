@@ -172,8 +172,52 @@ func isAllowedOrigin(origin string) bool {
 // 512 KB contract-compile payload.
 const maxRequestBodyBytes = 2 << 20
 
+// rejectCrossSite refuses requests that provably come from another web origin
+// (QWID-2026-28). The old middleware only WITHHELD CORS headers from foreign
+// origins, which stops a page from reading responses but not from SENDING
+// no-preflight requests — and the wallet-establishing endpoints need no
+// session, so a drive-by page could fire wallet/create blind, or a
+// DNS-rebound origin could talk to us with same-origin credentials. Origin
+// (and Referer as fallback) catches the drive-by; the Host check catches
+// rebinding, whose whole trick is a foreign hostname resolving here — a
+// browser always sends that hostname in Host.
+func rejectCrossSite(w http.ResponseWriter, r *http.Request) bool {
+	hostOnly := r.Host
+	if h, _, err := net.SplitHostPort(r.Host); err == nil {
+		hostOnly = h
+	}
+	if hostOnly != "localhost" && hostOnly != "127.0.0.1" && hostOnly != "::1" {
+		if ip := net.ParseIP(hostOnly); ip == nil || !ip.IsLoopback() {
+			jsonError(w, "requests must address the wallet UI via localhost", http.StatusForbidden)
+			return true
+		}
+	}
+	src := r.Header.Get("Origin")
+	if src == "" {
+		src = r.Header.Get("Referer")
+	}
+	if src != "" {
+		if u, err := url.Parse(src); err != nil || u.Hostname() == "" || !isLoopbackHost(u.Hostname()) {
+			jsonError(w, "cross-site requests to the wallet UI are refused", http.StatusForbidden)
+			return true
+		}
+	}
+	return false
+}
+
+func isLoopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if rejectCrossSite(w, r) {
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes) // WH-H9
 		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)

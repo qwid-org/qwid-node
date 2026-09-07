@@ -318,6 +318,13 @@ func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The 176-byte floor above was measured on the ORIGINAL input, but
+	// BaseHeader.GetFromBytes consumes four variable-length fields, so the
+	// remainder can be shorter than the 66-byte fixed tail sliced below. Re-check
+	// the remainder before slicing, or b[42:50]/b[58:66] panic (QWID-2026-17).
+	if len(b) < 66 {
+		return nil, fmt.Errorf("not enough bytes for BaseBlock fixed fields after header: have %d", len(b))
+	}
 	bb.BlockHeaderHash = common.GetHashFromBytes(b[:32])
 	bb.BlockTimeStamp = common.GetInt64FromByte(b[32:40])
 	bb.RewardPercentage = common.GetInt16FromByte(b[40:42])

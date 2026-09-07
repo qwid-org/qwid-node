@@ -75,7 +75,12 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 	copy(hash[:], tx.GetHash().GetBytes())
 	tp.rwmutex.Lock()
 	if numBans, exists := tp.bannedTransactions[hash]; exists {
-		if numBans > common.NumberWhenWillBan {
+		// Refuse once the ban count passes MaxNumberOfTxBans. Previously this
+		// compared against NumberWhenWillBan (100) while BanTransactionByHash
+		// deleted the counter at MaxNumberOfTxBans (50), so the count could
+		// never reach 100 and every ban — bad tx, confirmed duplicate, owner
+		// cancellation — was a no-op (QWID-2026-22).
+		if numBans > common.MaxNumberOfTxBans {
 			tp.rwmutex.Unlock()
 			logger.GetLogger().Println("transaction not added. banned")
 			tp.BanTransactionByHash(hash[:])
@@ -104,7 +109,29 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 		heap.Push(&tp.priorityQueue, item)
 		tp.items[hash] = item
 		if tp.priorityQueue.Len() > tp.maxTransactions {
-			removed := heap.Pop(&tp.priorityQueue).(*Item)
+			// The queue is a MAX-heap (basePool.Less), so heap.Pop removes the
+			// HIGHEST-priority item — exactly the one PeekTransactions would
+			// serve first for block inclusion. Evicting it handed an attacker
+			// free censorship of all paying traffic and, for the escrow/multisig
+			// pools, silently dropped consensus-critical pending settlements
+			// (QWID-2026-20). Fix: evict the LOWEST-priority entry instead; and
+			// for the escrow/multisig pools never evict at all — refuse the new
+			// entry so no pending settlement is ever lost.
+			if tp.typePool != 0 {
+				heap.Remove(&tp.priorityQueue, item.index)
+				delete(tp.transactions, hash)
+				delete(tp.items, hash)
+				tp.rwmutex.Unlock()
+				logger.GetLogger().Println("escrow/multisign pool full: refusing new entry rather than evicting a pending settlement")
+				return false
+			}
+			minIdx := 0
+			for i := 1; i < len(tp.priorityQueue); i++ {
+				if tp.priorityQueue[i].priority < tp.priorityQueue[minIdx].priority {
+					minIdx = i
+				}
+			}
+			removed := heap.Remove(&tp.priorityQueue, minIdx).(*Item)
 			delete(tp.transactions, removed.value)
 			delete(tp.items, removed.value)
 		}
@@ -230,8 +257,12 @@ func (tp *TransactionPool) BanTransactionByHash(hash []byte) {
 	tp.rwmutex.Lock()
 	defer tp.rwmutex.Unlock()
 	tp.bannedTransactions[h]++
-	if tp.bannedTransactions[h] > common.MaxNumberOfTxBans {
-		delete(tp.bannedTransactions, h)
+	// Cap the counter instead of deleting it. Deleting recycled the count back
+	// to zero before the refusal threshold could ever be reached, which is what
+	// made bans ineffective (QWID-2026-22); the cap keeps a banned transaction
+	// banned while still bounding the per-entry value.
+	if tp.bannedTransactions[h] > common.NumberWhenWillBan {
+		tp.bannedTransactions[h] = common.NumberWhenWillBan
 	}
 }
 

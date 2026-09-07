@@ -209,6 +209,22 @@ func PubKeyLength2(withPrev bool) int {
 	}
 }
 
+// IsValidPubKeyLength reports whether n is the public-key byte length of an
+// active signature scheme for the given slot (primary or secondary). A newly
+// registered key must match either the current scheme or the one it superseded
+// (both are consulted so a registration made during a scheme migration still
+// validates). It returns false for a zero or unrecognised length, which is the
+// QWID-2026-16 gate against registering arbitrary-length junk keys.
+func IsValidPubKeyLength(n int, primary bool) bool {
+	if n <= 0 {
+		return false
+	}
+	if primary {
+		return n == PubKeyLength(false) || n == PubKeyLength(true)
+	}
+	return n == PubKeyLength2(false) || n == PubKeyLength2(true)
+}
+
 func PrivateKeyLength() int {
 	encryptionConfigInstance.mu.RLock()
 	defer encryptionConfigInstance.mu.RUnlock()

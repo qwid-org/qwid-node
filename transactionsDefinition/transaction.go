@@ -324,6 +324,19 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 			logger.GetLogger().Println("transaction gas usage must be at least ", tx.GasUsageEstimate())
 			return false
 		}
+		// Upper bounds too (QWID-2026-11). MaxGasUsage/MaxGasPrice existed as
+		// constants but nothing enforced them, so the declared block gas limit
+		// was not a limit at all: with gas price 1, a modestly funded sender
+		// could request billions of gas and every validator would execute it —
+		// the fee only prices the gas, it does not bound the computation.
+		if tx.GasUsage > common.MaxGasUsage {
+			logger.GetLogger().Printf("transaction gas usage %d exceeds the protocol maximum %d", tx.GasUsage, common.MaxGasUsage)
+			return false
+		}
+		if tx.GasPrice > common.MaxGasPrice {
+			logger.GetLogger().Printf("transaction gas price %d exceeds the protocol maximum %d", tx.GasPrice, common.MaxGasPrice)
+			return false
+		}
 	}
 	if tx.GetData().Amount < 0 && err != nil && n < 512 {
 		logger.GetLogger().Println("transaction amount has to be larger or equal 0")
@@ -376,6 +389,18 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 		}
 	}
 
+	// Escrow/multisig policy is a SELF-modification: it may only target the
+	// signer's own account. Without this a third party could send a zero-amount
+	// transfer that names a victim as recipient and carries policy fields,
+	// permanently imposing a one-week escrow delay or an attacker-controlled
+	// multisig policy on an account it does not own (QWID-2026-05). Every
+	// legitimate setup flow already sets Recipient == Sender.
+	if (tx.TxData.EscrowTransactionsDelay > 0 || tx.TxData.MultiSignNumber > 0) &&
+		!bytes.Equal(tx.TxData.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes()) {
+		logger.GetLogger().Println("escrow/multisig policy may only be set on the sender's own account")
+		return false
+	}
+
 	canAccountBeModified := account.CanBeModifiedAccount(tx.TxData.Recipient.GetBytes())
 
 	if canAccountBeModified == false && (tx.TxData.EscrowTransactionsDelay > 0 || tx.TxData.MultiSignNumber > 0) {
@@ -398,6 +423,20 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 	if tx.TxData.MultiSignNumber > 0 {
 		if int(tx.TxData.MultiSignNumber) > len(tx.TxData.MultiSignAddresses) {
 			logger.GetLogger().Println("number of signatures cannot overflow number of defined addresses in multi sign account")
+			return false
+		}
+	}
+
+	// DEX shape check at admission, not only at execution. A recipient that is
+	// a delegated account above 512 routes this transaction into the DEX parser
+	// during block application, where OptData's first eight bytes are the token
+	// amount. Rejecting the wrong shape here keeps such a transaction out of
+	// pools and candidate blocks entirely; the parser re-checks it regardless,
+	// because admission rules can drift and the executor must never rely on
+	// them (QWID-2026-13).
+	if n, derr := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient); derr == nil && n > 512 {
+		if len(tx.TxData.OptData) != 8 {
+			logger.GetLogger().Printf("DEX transaction opt data must be exactly 8 bytes, got %d", len(tx.TxData.OptData))
 			return false
 		}
 	}
@@ -478,6 +517,19 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 
 		// Use the pubkey's own Primary flag for address derivation
 		pkPrimary := pk.Primary
+		// QWID-2026-16: a newly enclosed key may only register if its byte
+		// length matches an active signature scheme's public-key length for
+		// its slot (current or the one it superseded). PubKeyToAddress hashes
+		// any input, so without this an attacker enclosing megabytes of junk
+		// would derive a valid-looking address and, once in a block, bloat the
+		// pubkey trie and decode cache with a key no scheme can ever verify.
+		if !common.IsValidPubKeyLength(len(pkb), pkPrimary) {
+			if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+				logger.GetLogger().Printf("Verify: sender %s enclosed a key of length %d that matches no active scheme%s",
+					senderAddr.GetHex(), len(pkb), suppressedNote(skipped))
+			}
+			return false
+		}
 		pkAddr, err := common.PubKeyToAddress(pkb, pkPrimary)
 		if err != nil {
 			if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {

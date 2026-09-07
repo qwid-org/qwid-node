@@ -93,8 +93,16 @@ func LoadMultiSignPoolFromDB() error {
 			continue
 		}
 		if !verifyPersistedMultiSign(&tx) {
-			logger.GetLogger().Println("persisted multisig transaction signature is invalid")
-			_ = database.MainDB.Delete(keys[i])
+			// QUARANTINE, do not delete. A signature that fails to verify here
+			// is not necessarily corrupt: after a voted scheme replacement every
+			// entry signed under the superseded scheme fails verification under
+			// the now-current scheme, and deleting it permanently erased pending
+			// settlements that still-running nodes go on to perform — a silent,
+			// unrecoverable balance divergence (QWID-2026-36). Leaving it in the
+			// pool DB unloaded preserves it until a restart with the correct
+			// scheme installed can verify and load it; malformed entries
+			// (decode/hash/trailing failures above) are still deleted.
+			logger.GetLogger().Println("persisted multisig transaction signature did not verify under the current scheme; quarantining (kept, not loaded)")
 			continue
 		}
 		PoolTxMultiSign.AddTransaction(tx, MultiSignPoolKeyFor(tx))

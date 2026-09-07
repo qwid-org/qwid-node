@@ -72,7 +72,7 @@ func ShowEscrowPage() *widgets.QTabWidget {
 
 		escrowDelay, err := strconv.ParseInt(delayEscrow1.Text(), 10, 64)
 		if err != nil {
-			v = fmt.Sprint("cannot parse int from escrow delay %v", err.Error())
+			v = fmt.Sprintf("cannot parse int from escrow delay %v", err.Error())
 			info = &v
 			return
 		}
@@ -81,12 +81,12 @@ func ShowEscrowPage() *widgets.QTabWidget {
 		}
 		numMulti, err := strconv.ParseInt(numMulti1.Text(), 10, 64)
 		if err != nil {
-			v = fmt.Sprint("cannot parse int from num multi %v", err.Error())
+			v = fmt.Sprintf("cannot parse int from num multi %v", err.Error())
 			info = &v
 			return
 		}
 		if numMulti > 255 || numMulti < 0 {
-			v = fmt.Sprint("number of multisign approvals must be less than 256 and more or equal than 0, currently %v", numMulti)
+			v = fmt.Sprintf("number of multisign approvals must be less than 256 and more or equal than 0, currently %v", numMulti)
 			info = &v
 			return
 		}
@@ -103,7 +103,7 @@ func ShowEscrowPage() *widgets.QTabWidget {
 					return
 				}
 				if len(addrb) != common.AddressLength {
-					v = fmt.Sprint("adddresses in multisignature must be of length 20, currently %v", len(addrb))
+					v = fmt.Sprintf("adddresses in multisignature must be of length 20, currently %v", len(addrb))
 					info = &v
 					return
 				}
@@ -113,7 +113,7 @@ func ShowEscrowPage() *widgets.QTabWidget {
 			}
 		}
 		if len(multiAddresses_mod) < int(numMulti) {
-			v = fmt.Sprint("number of adddresses in multisignature must be more or equal to %v, currently %v", numMulti, len(multiAddresses_mod))
+			v = fmt.Sprintf("number of adddresses in multisignature must be more or equal to %v, currently %v", numMulti, len(multiAddresses_mod))
 			info = &v
 			return
 		}

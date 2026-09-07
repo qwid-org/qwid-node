@@ -214,19 +214,6 @@ func main() {
 	// Initialize statistics
 	statistics.InitStatsManager()
 
-	// Restore pending escrow transactions so a restart between an escrow's
-	// acceptance and its maturity still settles it (avoids consensus divergence).
-	if err := transactionsPool.LoadEscrowPoolFromDB(); err != nil {
-		logger.GetLogger().Println("could not load persisted escrow pool", err)
-	}
-	// Same for pending multisig transfers: the pool accumulates the main tx and
-	// its confirmations across an arbitrary number of blocks, and a restart
-	// that emptied it made any later confirmation-carrying block unappliable
-	// ("no main transaction in multi signature pool").
-	if err := transactionsPool.LoadMultiSignPoolFromDB(); err != nil {
-		logger.GetLogger().Println("could not load persisted multisig pool", err)
-	}
-
 	// Keep a BTC/USD quote warm in the background. The nonce path reads the
 	// cache without blocking, so an unreachable feed costs this node its
 	// contribution to the price median and nothing else — never a stalled
@@ -240,6 +227,22 @@ func main() {
 		// Initialize genesis block
 		logger.GetLogger().Println("Initializing genesis block with processing transactions...")
 		genesis.InitGenesis(true)
+	}
+
+	// Restore pending escrow/multisig transactions AFTER the chain's encryption
+	// config is installed (SetBlockHeightAfterCheck / InitGenesis above). These
+	// reloads verify each entry's signature under the CURRENT scheme; running
+	// them earlier verified against the compile-time default scheme, so on a
+	// chain that had voted in a different scheme every valid entry failed and
+	// was lost on every restart (QWID-2026-36). A restart between an escrow's
+	// acceptance and its maturity must still settle it, and the multisig pool
+	// must keep a main tx across the blocks that carry its confirmations
+	// ("no main transaction in multi signature pool").
+	if err := transactionsPool.LoadEscrowPoolFromDB(); err != nil {
+		logger.GetLogger().Println("could not load persisted escrow pool", err)
+	}
+	if err := transactionsPool.LoadMultiSignPoolFromDB(); err != nil {
+		logger.GetLogger().Println("could not load persisted multisig pool", err)
 	}
 
 	// Initialize services

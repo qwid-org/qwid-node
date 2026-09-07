@@ -485,6 +485,17 @@ func opDifficulty(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) 
 }
 
 func opRandom(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	// Random is a pointer, and this fork runs the merge jump table
+	// unconditionally — upstream only selects it when the block carries a
+	// prevRandao, so upstream may deref freely and we may not. With a nil
+	// guard absent, ONE transaction touching block.difficulty/block.prevrandao
+	// (opcode 0x44) panicked block application identically on every validator
+	// and stalled the chain (QWID-2026-26). Zero is the deterministic answer
+	// for a chain with no beacon randomness.
+	if interpreter.evm.Context.Random == nil {
+		scope.Stack.push(new(uint256.Int))
+		return nil, nil
+	}
 	v := new(uint256.Int).SetBytes(interpreter.evm.Context.Random.Bytes())
 	scope.Stack.push(v)
 	return nil, nil

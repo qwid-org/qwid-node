@@ -36,6 +36,23 @@ const (
 
 var globalMutex sync.RWMutex
 
+// walletMuInit serializes lazy initialization of each Wallet's per-instance
+// mutex pointer (QWID-2026-18). Only Wallet.lock touches the mu field, always
+// under this guard, so the field itself is never raced.
+var walletMuInit sync.Mutex
+
+// lock returns this wallet's per-instance RWMutex, creating it on first use.
+// See the mu field comment for why the mutex is a lazily-initialized pointer.
+func (w *Wallet) lock() *sync.RWMutex {
+	walletMuInit.Lock()
+	if w.mu == nil {
+		w.mu = &sync.RWMutex{}
+	}
+	m := w.mu
+	walletMuInit.Unlock()
+	return m
+}
+
 type Account struct {
 	secretKey          common.PrivKey
 	EncryptedSecretKey []byte         `json:"encrypted_secret_key"`
@@ -70,6 +87,13 @@ type Wallet struct {
 	Account1          Account            `json:"account_1"`
 	Account2          Account            `json:"account_2"`
 	Accounts          map[string]Account `json:"accounts"`
+	// mu guards the live key material (Account{1,2}.signer / .secretKey and the
+	// scheme names) against concurrent Sign / Wipe / scheme-change rewrites
+	// (QWID-2026-18). It is a POINTER, not an embedded value, so copying a Wallet
+	// neither trips go vet's lock-copy check nor detaches a value snapshot from
+	// the live wallet's lock; being unexported it is never marshalled, so the
+	// wallet file format is unchanged. Obtain it via w.lock() (lazy init).
+	mu *sync.RWMutex `json:"-"`
 }
 
 var activeWallet *Wallet
@@ -127,6 +151,12 @@ func (w *Wallet) VerifyPassword(password string) bool {
 // wallet is no longer needed (e.g. session end) to limit exposure in core dumps
 // or swap (CW-C4, CW-H2).
 func (w *Wallet) Wipe() {
+	// Exclusive lock: wait for any in-flight Sign to finish before freeing the
+	// signer context and zeroing key bytes, so a signer never operates on freed
+	// or partially-zeroed material (QWID-2026-18).
+	m := w.lock()
+	m.Lock()
+	defer m.Unlock()
 	for i := range w.password {
 		w.password[i] = 0
 	}
@@ -409,6 +439,13 @@ func GenerateNewAccount(w Wallet, sigName string) (Account, error) {
 }
 
 func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) error {
+	// Exclusive lock: this rewrites Account{1,2}.{PublicKey,Address,secretKey,
+	// signer} and the scheme name in place; a concurrent Sign must not observe a
+	// half-swapped signer/key pair (QWID-2026-18). It calls neither Sign nor
+	// StoreJSON, so there is no reentrancy on this lock.
+	m := w.lock()
+	m.Lock()
+	defer m.Unlock()
 
 	if len(w.password) < 1 {
 		return fmt.Errorf("password cannot be empty")
@@ -726,6 +763,14 @@ func (w *Wallet) normalizeAccountRoles() {
 }
 
 func (w *Wallet) StoreJSON() error {
+	// Exclusive lock: StoreJSON re-encrypts and rewrites Account{1,2}.
+	// EncryptedSecretKey and the archive map, which must not race a concurrent
+	// scheme-change rewrite or Wipe (QWID-2026-18). It is never called while this
+	// wallet's lock is already held (Sign/Wipe/AddNewEncryption do not call it),
+	// so there is no reentrancy.
+	m := w.lock()
+	m.Lock()
+	defer m.Unlock()
 	if w.GetSecretKey().GetBytes() == nil {
 		return fmt.Errorf("you need load wallet first")
 	}
@@ -850,11 +895,74 @@ func (w *Wallet) StoreJSON() error {
 		return err
 	}
 
-	// Write the wallet to the JSON file
-	if err := os.WriteFile(walletFile+".json", wm, 0600); err != nil {
+	// Write the wallet atomically (QWID-2026-04): a crash, power loss, short
+	// write, or full disk mid-write must never leave a truncated or empty
+	// wallet — for a phrase-less website wallet that is unrecoverable fund loss.
+	// atomicWriteFile writes a sibling temp file, fsyncs it, and renames it over
+	// the destination, so a reader always sees either the old complete file or
+	// the new complete file. The rename also replaces the inode, so a legacy
+	// 0644 wallet is repaired to 0600 on the next save. Two concurrent website
+	// logins can no longer truncate the same file at once — each renames its own
+	// complete temp file, last writer wins with an intact result.
+	if err := atomicWriteFile(walletFile+".json", wm, 0600); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// atomicWriteFile writes data to path via a same-directory temp file that is
+// flushed to disk and then atomically renamed over the destination. On success
+// the destination carries exactly perm (repairing legacy permissions, since the
+// rename installs a fresh inode) and the containing directory is fsynced so the
+// rename itself is durable. On any error the temp file is removed and the
+// existing destination is left untouched.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	// os.CreateTemp creates the file 0600, so there is no window in which the
+	// wallet material is world-readable.
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// Rename succeeded: the temp path no longer exists, so the deferred cleanup
+	// must not run (it would race a subsequent writer's temp of the same name).
+	removeTmp = false
+	// Belt-and-suspenders against umask having widened the temp file's mode.
+	if err := os.Chmod(path, perm); err != nil {
+		return err
+	}
+	// fsync the directory so the rename survives a crash right after it.
+	if d, derr := os.Open(dir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 
@@ -997,8 +1105,6 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 				err = signer.Init(w.SigName, ds)
 				if err == nil {
 					w.Account1.signer = signer
-					cnz := CountNonZeroBytes(ds)
-					logger.GetLogger().Println("cnz:", cnz)
 					err = w.Account1.secretKey.Init(ds, w.Account1.Address, true)
 					if err == nil {
 						account1OK = true
@@ -1029,8 +1135,6 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 				err = signer2.Init(w.SigName2, ds)
 				if err == nil {
 					w.Account2.signer = signer2
-					cnz := CountNonZeroBytes(ds)
-					logger.GetLogger().Println("cnz:", cnz)
 					err = w.Account2.secretKey.Init(ds, w.Account2.Address, false)
 					if err == nil {
 						account2OK = true
@@ -1107,7 +1211,19 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 	w.Account2.secretKey.Primary = false
 
 	w.HomePath = homePath
-	w.StoreJSON()
+	// QWID-2026-04 (annex): propagate the persist error instead of discarding
+	// it. On a scheme-change load branch a newly derived key exists only in
+	// memory until this write lands; swallowing the error left the wallet
+	// believing it had saved a key it had not, so a later crash lost it with no
+	// warning. The write is now atomic (see StoreJSON), so surfacing the error
+	// is the only remaining gap. (The write still runs on every load because
+	// StoreJSON re-encrypts under a fresh GCM nonce each time, making a
+	// "changed?" byte comparison meaningless; atomicity, not skipping, is what
+	// removes the corruption window.)
+	if err := w.StoreJSON(); err != nil {
+		logger.GetLogger().Println("failed to persist wallet after load:", err)
+		return nil, err
+	}
 	logger.GetLogger().Println("MainAddress:", w.MainAddress.GetHex())
 	return w, nil
 }
@@ -1442,8 +1558,22 @@ func (w *Wallet) ChangePasswordInPlace(password, newPassword string) error {
 }
 
 func (w *Wallet) Sign(data []byte, primary bool) (*common.Signature, error) {
+	// Read-lock the live signer against a concurrent Wipe (website re-login) or
+	// scheme-change rewrite (AddNewEncryptionToActiveWallet during block apply),
+	// either of which would otherwise free or replace the CGO signer context
+	// mid-Sign — a use-after-free or a signature computed over a torn key
+	// (QWID-2026-18).
+	m := w.lock()
+	m.RLock()
+	defer m.RUnlock()
 	if len(data) > 0 {
 		if primary {
+			// After Wipe the secret key is nilled; signing with the cleaned
+			// signer panics inside liboqs. Refuse instead of touching freed
+			// material (QWID-2026-18).
+			if len(w.Account1.secretKey.GetBytes()) == 0 {
+				return nil, fmt.Errorf("primary key unavailable (wallet locked or wiped)")
+			}
 			signature, err := w.Account1.signer.Sign(data)
 			if err != nil {
 				return nil, err
@@ -1456,6 +1586,9 @@ func (w *Wallet) Sign(data []byte, primary bool) (*common.Signature, error) {
 			}
 			return sig, nil
 		} else {
+			if len(w.Account2.secretKey.GetBytes()) == 0 {
+				return nil, fmt.Errorf("secondary key unavailable (wallet locked or wiped)")
+			}
 			signature2, err := w.Account2.signer.Sign(data)
 			if err != nil {
 				return nil, err

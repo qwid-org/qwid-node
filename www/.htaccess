@@ -64,7 +64,7 @@ RewriteRule ^author/ https://qwid.org/#team [R=301,NE,L]
 
 # The Green Paper was superseded by the WhitePaper. Point every uploaded copy
 # at the current document rather than 404ing.
-RewriteRule ^wp-content/uploads/.*(GreenPaper|WhitePaper).*\.pdf$ https://qwid.org/WhitePaper_1.0.pdf [R=301,NC,L]
+RewriteRule ^wp-content/uploads/.*(GreenPaper|WhitePaper).*\.pdf$ https://qwid.org/WhitePaper_1.1.pdf [R=301,NC,L]
 RewriteRule ^wp-content/ https://qwid.org/ [R=301,L]
 
 # Remaining WordPress plumbing: send it home rather than leaking 404s or,
@@ -80,7 +80,7 @@ RewriteRule ^sitemap_index\.xml$ https://qwid.org/sitemap.xml [R=301,L]
 RewriteRule ^xmlrpc\.php$ - [G]
 
 # Other legacy top-level pages.
-RewriteRule ^whitepaper/?$ https://qwid.org/WhitePaper_1.0.pdf [R=301,L]
+RewriteRule ^whitepaper/?$ https://qwid.org/WhitePaper_1.1.pdf [R=301,L]
 RewriteRule ^roadmap/?$    https://qwid.org/#roadmap    [R=301,NE,L]
 RewriteRule ^team/?$       https://qwid.org/#team       [R=301,NE,L]
 RewriteRule ^contact/?$    https://qwid.org/#contact    [R=301,NE,L]

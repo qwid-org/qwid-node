@@ -119,6 +119,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// QWID-2026-29: hard lifetime budget for the welcome faucet, persisted so it
+	// survives restarts.
+	if err := handlers.InitFaucetLedger(basePath); err != nil {
+		fmt.Println("Failed to initialize faucet ledger:", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 
 	// Public routes (no auth required)
@@ -144,9 +151,9 @@ func main() {
 	mux.HandleFunc("/api/dex/execute", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.FinancialRateLimit(handlers.ExecuteDex))))
 	mux.HandleFunc("/api/token/create", handlers.CorsMiddleware(handlers.AuthMiddleware(handlers.FinancialRateLimit(handlers.CreateToken))))
 
-	// Serve static files
+	// Serve static files behind a security-headers middleware (QWID-2026-27).
 	staticFS, _ := fs.Sub(staticFiles, "static")
-	mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	mux.Handle("/", staticSecurityHeaders(http.FileServer(http.FS(staticFS))))
 
 	fmt.Printf("\n===========================================\n")
 	fmt.Printf("  QWID Public Wallet Website\n")
@@ -188,4 +195,35 @@ func main() {
 		fmt.Println("Server shutdown error:", err)
 	}
 	fmt.Println("Server stopped")
+}
+
+// staticSecurityHeaders sets defense-in-depth response headers on the static
+// site (QWID-2026-27). The single-page app carries inline <script>, inline
+// <style>, and inline on*= handlers, so a fully strict CSP (as the explorer
+// uses) would break it — that would require moving all inline code into separate
+// files first, left as a follow-up. This pragmatic policy still adds real
+// protection: default-src 'self' plus connect-src/img-src/font-src 'self' block
+// exfiltration of a stolen session or data to an attacker-controlled host,
+// object-src 'none' blocks plugin vectors, and frame-ancestors 'none' blocks
+// clickjacking. 'unsafe-inline' is present ONLY for script-src/style-src, which
+// the inline SPA requires.
+func staticSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-inline'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; "+
+				"font-src 'self'; "+
+				"connect-src 'self'; "+
+				"object-src 'none'; "+
+				"base-uri 'none'; "+
+				"form-action 'self'; "+
+				"frame-ancestors 'none'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "same-origin")
+		next.ServeHTTP(w, r)
+	})
 }
