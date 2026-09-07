@@ -1,6 +1,6 @@
 name: CI
 
-# Builds the native dependencies (RocksDB v10.2.1 static, liboqs 0.16.0 shared)
+# Builds the native dependencies (RocksDB v10.4.2 static, liboqs 0.16.0 shared)
 # and runs `go test` over the whole module EXCEPT the Qt-based commands
 # (github.com/therecipe/qt needs a full Qt build toolchain that is impractical in
 # CI). The native libs are cached, so only the first run pays the RocksDB compile.
@@ -14,7 +14,7 @@ on:
 
 env:
   DEPS_PREFIX: ${{ github.workspace }}/qwid-deps
-  ROCKSDB_VERSION: v10.2.1
+  ROCKSDB_VERSION: v10.4.2
   LIBOQS_VERSION: "0.16.0"
 
 jobs:
@@ -49,7 +49,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$DEPS_PREFIX"
 
-          # --- RocksDB v10.2.1, static. PORTABLE=1 keeps the cached binary usable
+          # --- RocksDB v10.4.2, static. PORTABLE=1 keeps the cached binary usable
           # on any runner CPU (no -march=native). We copy the artifacts by hand
           # into the (user-writable) prefix instead of `make install-static`,
           # which targets /usr/local (needs sudo) and generates a pkg-config file

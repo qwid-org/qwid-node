@@ -26,7 +26,7 @@ Install RocksDB:
 
     git clone https://github.com/facebook/rocksdb.git
     cd rocksdb
-    git checkout v10.2.1
+    git checkout v10.4.2
     make static_lib
     sudo make install-static
     sudo ldconfig
@@ -299,6 +299,6 @@ If you don't have Qt5 installed, skip the Qt-based commands (`cmd/gui`,
 
 Continuous integration (`.github/workflows/ci.yml`) runs `go build`, `go vet`
 and `go test` on every push and pull request to `main` and `dev`. It builds
-RocksDB v10.2.1 (static) and liboqs 0.16.0 (shared) from source into a cached
+RocksDB v10.4.2 (static) and liboqs 0.16.0 (shared) from source into a cached
 prefix, sets the matching `CGO_CFLAGS`/`CGO_LDFLAGS`/`PKG_CONFIG_PATH`, and
 excludes the Qt commands.
