@@ -204,10 +204,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				if g < 0 {
 					g = 0
 				}
-				if g > common.MaxGasUsage {
+				if g > common.MaxGasUsagePerBlock {
 					continue // a single transaction over the whole block budget can never fit
 				}
-				if gas+g > common.MaxGasUsage {
+				if gas+g > common.MaxGasUsagePerBlock {
 					break
 				}
 				gas += g

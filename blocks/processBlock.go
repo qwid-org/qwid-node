@@ -378,9 +378,9 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 					block.GetHeader().Height, hash[:8], poolTx.GasUsage, common.MaxGasUsage)
 			}
 			totalGas += poolTx.GasUsage
-			if totalGas > common.MaxGasUsage {
+			if totalGas > common.MaxGasUsagePerBlock {
 				return 0, 0, fmt.Errorf("block %d exceeds the block gas limit: %d > %d",
-					block.GetHeader().Height, totalGas, common.MaxGasUsage)
+					block.GetHeader().Height, totalGas, common.MaxGasUsagePerBlock)
 			}
 		}
 		amount := poolTx.TxData.Amount

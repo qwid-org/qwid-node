@@ -25,7 +25,15 @@ var (
 	MinNumberOfBlocksInStake       int64   = 36 // should be 36 but for testnet is released this number
 	MaxBlockForwardInTime          int64   = 15
 	DifficultyChange               float32 = 10
-	MaxGasUsage                    int64   = 13700000 // circa 6.5k transactions in block
+	MaxGasUsage                    int64   = 13700000 // per-transaction / per-EVM-call gas ceiling
+	// MaxGasUsagePerBlock caps the SUM of every transaction's declared GasUsage in
+	// one block. It must accommodate a full block of minimum-gas transfers, each
+	// of which declares GasUsageEstimate()'s 30000 floor, so it is sized as
+	// MaxTransactionsPerBlock * 30000. Using the per-call MaxGasUsage (13.7M) as
+	// the block sum cap instead limited a block to 13.7M/30000 ~= 456 transfers
+	// (QWID-2026-38 regression): MaxGasUsage bounds a SINGLE transaction / EVM
+	// call, not the whole block's fee-basis gas total.
+	MaxGasUsagePerBlock int64 = int64(MaxTransactionsPerBlock) * 30000
 	MaxGasPrice                    int64   = 100000
 	MaxTransactionsPerBlock        int16   = 5000 // on average 500 TPS
 	MaxTransactionInPool                   = 50000
