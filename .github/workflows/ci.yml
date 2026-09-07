@@ -75,6 +75,17 @@ jobs:
           go-version: '1.25.13'
           cache: true
 
+      - name: Provision node config for tests
+        # common.init-style config loader reads ~/.qwid/.env (and node startup
+        # reads the genesis config) and calls logger.Fatal if absent, so the
+        # wallet/voting tests need a real node config present — same files the
+        # README tells an operator to copy.
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.qwid/genesis/config"
+          cp .qwid/.env "$HOME/.qwid/.env"
+          cp genesis/config/genesis_internal_tests.json "$HOME/.qwid/genesis/config/genesis.json"
+
       - name: Build and test (excluding Qt commands)
         env:
           CGO_CFLAGS: "-isystem ${{ env.DEPS_PREFIX }}/include"
