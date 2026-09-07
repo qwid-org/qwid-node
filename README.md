@@ -1,6 +1,11 @@
 # Node go QWID
 
-Works for Ubuntu 24.04 (gcc 11) and go1.23.6+
+![CI](https://github.com/qwid-org/qwid-node/actions/workflows/ci.yml/badge.svg)
+
+Works for Ubuntu 24.04 and Go 1.25.13. The build toolchain is pinned in `go.mod`
+(`toolchain go1.25.13`; the language floor stays at 1.23.6), so with the default
+`GOTOOLCHAIN=auto` any installed Go ≥ 1.23.6 fetches 1.25.13 automatically when
+building.
 
 Only one network interface should be with external public IP
 
@@ -40,10 +45,10 @@ Compile OQS with `-DBUILD_SHARED_LIBS=ON` and install
     sudo ninja install
     cd ~/
 
-Install go1.23.6 if not installed:
+Install Go 1.25.13 if not installed (matches the toolchain pinned in `go.mod`):
 
-    wget https://go.dev/dl/go1.23.6.linux-amd64.tar.gz
-    sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.6.linux-amd64.tar.gz
+    wget https://go.dev/dl/go1.25.13.linux-amd64.tar.gz
+    sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.13.linux-amd64.tar.gz
 
 Add on the end of ~/.bashrc
 
@@ -280,3 +285,20 @@ Encryption schemes summary:
     ├───────────────────────────┼───────┼─────────┼───────────┼────────┼─────────┤
     │ MAYO-5                    │ 5554  │ 964     │ 214,33    │ 4 666  │ 467,9   │
     └───────────────────────────┴───────┴─────────┴───────────┴────────┴─────────┘
+
+## Tests and CI
+
+With the prerequisites above installed, run the test suite:
+
+    go test ./...
+
+If you don't have Qt5 installed, skip the Qt-based commands (`cmd/gui`,
+`cmd/sendingTransaction`), which need a full Qt build toolchain:
+
+    go test $(go list ./... | grep -vE '/cmd/gui|/cmd/sendingTransaction')
+
+Continuous integration (`.github/workflows/ci.yml`) runs `go build`, `go vet`
+and `go test` on every push and pull request to `main` and `dev`. It builds
+RocksDB v10.2.1 (static) and liboqs 0.16.0 (shared) from source into a cached
+prefix, sets the matching `CGO_CFLAGS`/`CGO_LDFLAGS`/`PKG_CONFIG_PATH`, and
+excludes the Qt commands.
