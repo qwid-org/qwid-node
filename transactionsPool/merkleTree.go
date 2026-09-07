@@ -109,15 +109,17 @@ func (t *MerkleTree) IsTxHashInTree(hash []byte) bool {
 	}
 	globalMutex.RLock()
 	defer globalMutex.RUnlock()
-	left, _ := t.Root[0].containsTxHash(0, hash)
-	if left {
-		return true
+	// Compare against the raw transaction-hash list, not the tree nodes. A leaf
+	// node stores H(txhash), so comparing a raw txhash against node data never
+	// matched — the check was structurally dead (QWID-2026-23) — and indexing
+	// t.Root[0] panicked on an empty tree (QWID-2026-21). Iterating TxHashes is
+	// correct and empty-safe, and needs no change to root computation.
+	for _, h := range t.TxHashes {
+		if bytes.Equal(h, hash) {
+			return true
+		}
 	}
-	var right bool
-	if len(t.Root) > 1 {
-		right, _ = t.Root[1].containsTxHash(0, hash)
-	}
-	return right
+	return false
 }
 
 func (n *MerkleNode) containsTxHash(index int64, hash []byte) (bool, int64) {

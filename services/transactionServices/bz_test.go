@@ -74,3 +74,53 @@ func TestBzRoundTrip(t *testing.T) {
 		t.Fatal("inflated payload is not a valid bx message")
 	}
 }
+
+// QWID-2026-08: bz decompression must be bounded. A frame carrying more than
+// one compressed item, or one that inflates past the bx policy cap, must be
+// rejected — a single small frame must not force many/large decompressions.
+func TestQWID08_BzDecompressionIsBounded(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+
+	// A legitimate single-payload bz still inflates.
+	sigBytes := make([]byte, 700)
+	sigBytes[0] = 1
+	sig, _ := common.GetSignatureFromBytes(sigBytes, common.EmptyAddress())
+	tx := transactionsDefinition.Transaction{
+		TxParam:   transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: common.EmptyAddress(), Nonce: 1},
+		TxData:    transactionsDefinition.TxData{Recipient: common.EmptyAddress(), Amount: 1},
+		Height:    1, Signature: sig,
+	}
+	_ = tx.CalcHashAndSet()
+	bxMsg, _ := GenerateTransactionMsg([]transactionsDefinition.Transaction{tx}, []byte("bx"), tcpip.TransactionTopic)
+	bzBytes, err := compressToBz(bxMsg.GetBytes(), tcpip.TransactionTopic)
+	if err != nil {
+		t.Fatalf("compressToBz: %v", err)
+	}
+	_, outer := message.CheckValidMessage(bzBytes)
+	if _, err := validateAndInflateBz(outer.(message.TransactionsMessage).GetTransactionsBytes()); err != nil {
+		t.Fatalf("a legitimate single-payload bz was rejected: %v", err)
+	}
+
+	// Two compressed items in one frame: rejected (the amplification vector).
+	one := outer.(message.TransactionsMessage).GetTransactionsBytes()
+	var zb []byte
+	for _, v := range one {
+		zb = v[0]
+	}
+	multi := map[[2]byte][][]byte{tcpip.TransactionTopic: {zb, zb}}
+	if _, err := validateAndInflateBz(multi); err == nil {
+		t.Fatal("a bz with two compressed items was accepted — one frame can force many decompressions (QWID-2026-08)")
+	}
+
+	// A payload that inflates past the cap: rejected, not truncated-and-accepted.
+	var buf bytes.Buffer
+	zw, _ := flate.NewWriter(&buf, flate.BestCompression)
+	zeros := make([]byte, maxBzInflatedBytes+1024)
+	_, _ = zw.Write(zeros)
+	_ = zw.Close()
+	bomb := map[[2]byte][][]byte{tcpip.TransactionTopic: {buf.Bytes()}}
+	if _, err := validateAndInflateBz(bomb); err == nil {
+		t.Fatal("a bz inflating past the cap was accepted — decompression-bomb guard is ineffective (QWID-2026-08)")
+	}
+}

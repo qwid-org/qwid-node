@@ -7,7 +7,9 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
 	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 type WalletInfoResponse struct {
@@ -164,8 +166,19 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.NewPassword) < 6 {
-		JsonError(w, "New password must be at least 6 characters", http.StatusBadRequest)
+	// Enforce the documented minimum (8) at the HTTP boundary too, so the error
+	// is clear rather than surfacing from deep in ChangePasswordInPlace
+	// (QWID-2026-30).
+	if err := wallet.ValidatePasswordStrength(req.NewPassword); err != nil {
+		JsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Compute the new login hash BEFORE mutating the wallet, so a hashing
+	// failure aborts with both stores still on the old password (QWID-2026-30).
+	newHash, err := bcryptHash(req.NewPassword)
+	if err != nil {
+		JsonError(w, "Password change failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -175,18 +188,34 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update user registry password hash
+	// The wallet file is now encrypted under the NEW password. Persist the
+	// matching login hash; if that fails, roll the wallet back to the old
+	// password so the login hash and the wallet file never diverge into a
+	// permanent lockout (QWID-2026-30). Errors are surfaced, never swallowed.
 	if Users != nil {
 		Users.mu.Lock()
 		entry, ok := Users.users[sess.Username]
+		var saveErr error
+		var oldHash string
 		if ok {
-			hash, err := bcryptHash(req.NewPassword)
-			if err == nil {
-				entry.PasswordHash = hash
-				Users.save()
+			oldHash = entry.PasswordHash
+			entry.PasswordHash = newHash
+			saveErr = Users.save()
+			if saveErr != nil {
+				entry.PasswordHash = oldHash // undo the in-memory change
 			}
 		}
 		Users.mu.Unlock()
+
+		if ok && saveErr != nil {
+			if rbErr := wl.ChangePasswordInPlace(req.NewPassword, req.CurrentPassword); rbErr != nil {
+				logger.GetLogger().Printf("CRITICAL: password-change desync for %q: registry save failed (%v) and wallet rollback failed (%v); wallet is under the NEW password but the login hash is OLD", sess.Username, saveErr, rbErr)
+				JsonError(w, "Password change failed and could not be rolled back; contact support before logging out", http.StatusInternalServerError)
+				return
+			}
+			JsonError(w, "Password change failed; no changes were applied", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	JsonResponse(w, map[string]string{"success": "Password changed"})

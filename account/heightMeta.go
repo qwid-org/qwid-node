@@ -60,4 +60,8 @@ func raiseLastStoredHeightMeta(prefix [2]byte, height int64) {
 func SetLastStoredSnapshotHeights(height int64) {
 	setLastStoredHeightMeta(common.AccountsDBPrefix, height)
 	setLastStoredHeightMeta(common.StakingAccountsDBPrefix, height)
+	// The rewind removes DEX snapshots above its target too, so the DEX meta
+	// must be lowered with the others or the next load would chase a deleted
+	// key (QWID-2026-12).
+	setLastStoredHeightMeta(common.DexAccountsDBPrefix, height)
 }

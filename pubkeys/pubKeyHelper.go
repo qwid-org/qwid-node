@@ -25,6 +25,12 @@ import (
 var (
 	pubKeyCacheMu sync.RWMutex
 	pubKeyCache   = map[string]common.PubKey{}
+	// pubKeyCacheBytes tracks the approximate resident size of pubKeyCache (the
+	// sum of cached key byte lengths). Entry count alone is a poor bound when
+	// key sizes vary six-fold across schemes (Falcon ~0.9 KB vs MAYO-5 ~5.5 KB):
+	// 100k large-key entries would be over half a gigabyte. Bounding by bytes
+	// caps memory regardless of which scheme's keys dominate (QWID-2026-16).
+	pubKeyCacheBytes uint64
 	// pubKeyCacheGen counts invalidations. A reader samples it before going to
 	// the database and refuses to cache what it read if the count moved,
 	// because a write landed in between and what it holds may already be
@@ -41,12 +47,26 @@ var (
 // make affordable.
 const pubKeyCacheMaxEntries = 100000
 
+// pubKeyCacheMaxBytes bounds the cache's approximate resident size. 64 MiB is
+// ample for the cache's purpose — keeping the large-key schemes affordable to
+// verify — while capping memory no matter how many oversized keys are touched.
+const pubKeyCacheMaxBytes = 64 * 1024 * 1024
+
+// pubKeyEntrySize approximates one cache entry's resident cost: the key bytes
+// plus the map key (the derived address string).
+func pubKeyEntrySize(pk common.PubKey) uint64 {
+	return uint64(len(pk.GetBytes()) + common.AddressLength)
+}
+
 // InvalidatePubKeyCache drops the cached entry for one key address. Called by
 // the writer after a key is stored, so a re-registration cannot be served from
 // a stale decode.
 func InvalidatePubKeyCache(a []byte) {
 	pubKeyCacheMu.Lock()
-	delete(pubKeyCache, string(a))
+	if old, ok := pubKeyCache[string(a)]; ok {
+		pubKeyCacheBytes -= pubKeyEntrySize(old)
+		delete(pubKeyCache, string(a))
+	}
 	pubKeyCacheGen++
 	pubKeyCacheMu.Unlock()
 }
@@ -150,17 +170,31 @@ func LoadPubKey(a []byte) (common.PubKey, error) {
 		pubKeyCacheMu.Unlock()
 		return pk, nil
 	}
-	if len(pubKeyCache) >= pubKeyCacheMaxEntries {
-		// Evict one arbitrary entry to stay at the bound. Go randomises map
-		// iteration order, so this is random eviction — good enough here,
-		// where every entry costs the same to rebuild and no access pattern
-		// is worth tracking.
-		for k := range pubKeyCache {
+	entry := clonePubKey(pk)
+	sz := pubKeyEntrySize(entry)
+	// A racing reader may have inserted this same key while we were decoding
+	// (inserts do not bump the generation); account for the entry we are about
+	// to overwrite so the byte counter stays exact.
+	if prev, ok := pubKeyCache[ck]; ok {
+		pubKeyCacheBytes -= pubKeyEntrySize(prev)
+		delete(pubKeyCache, ck)
+	}
+	// Evict arbitrary entries until this one fits within BOTH the entry-count
+	// and byte bounds. Go randomises map iteration order, so eviction is random
+	// — good enough here, where every entry costs about the same to rebuild and
+	// no access pattern is worth tracking. A single entry larger than the whole
+	// budget is still cached (after everything else is evicted): the bound is
+	// best-effort, not a hard per-entry rejection.
+	for len(pubKeyCache) > 0 &&
+		(len(pubKeyCache) >= pubKeyCacheMaxEntries || pubKeyCacheBytes+sz > pubKeyCacheMaxBytes) {
+		for k, v := range pubKeyCache {
+			pubKeyCacheBytes -= pubKeyEntrySize(v)
 			delete(pubKeyCache, k)
 			break
 		}
 	}
-	pubKeyCache[ck] = clonePubKey(pk)
+	pubKeyCache[ck] = entry
+	pubKeyCacheBytes += sz
 	pubKeyCacheMu.Unlock()
 
 	return pk, nil

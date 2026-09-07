@@ -174,6 +174,14 @@ func LoadWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Throttle load attempts to defeat a localhost password brute-force
+	// (QWID-2026-28). A successful load resets the counter below, so a
+	// legitimate single user is never locked out by their own use.
+	if !loadWalletThrottleAllow(time.Now()) {
+		jsonError(w, "Too many wallet-load attempts; please wait a minute and try again", http.StatusTooManyRequests)
+		return
+	}
+
 	sigName, sigName2, err := SetCurrentEncryptions()
 	if err != nil {
 		jsonError(w, "Error retrieving encryption", http.StatusInternalServerError)
@@ -186,6 +194,7 @@ func LoadWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	loadWalletThrottleReset() // correct password: clear the brute-force counter
 	MainWallet = loadedWallet
 	TestAndSetEncryption()
 	startSession(w) // WH-C3: authenticate this browser session
@@ -224,9 +233,29 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Wallet number should be between 0 and 255", http.StatusBadRequest)
 		return
 	}
-	if len(req.Password) < 1 {
-		jsonError(w, "Password cannot be empty", http.StatusBadRequest)
+	// Enforce the documented password minimum on wallet creation (QWID-2026-30);
+	// this endpoint previously accepted any non-empty password.
+	if err := wallet.ValidatePasswordStrength(req.Password); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// Refuse to overwrite an existing wallet, unconditionally (QWID-2026-28).
+	// This endpoint is reachable without a session, and a wallet file holds
+	// keys that may control staked funds — for a phrase-less wallet the old
+	// keys are unrecoverable the moment the new file lands. The CLI generator
+	// demands a typed confirmation naming the wallet number before overwriting;
+	// an HTTP endpoint has no operator at the keyboard, so the only safe answer
+	// is no. Deleting the file manually is the explicit operator action that
+	// re-enables creation under this number.
+	home, herr := os.UserHomeDir()
+	if herr == nil {
+		existing := filepath.Join(home, common.DefaultWalletHomePath+strconv.Itoa(req.WalletNumber),
+			fmt.Sprintf("wallet%d.json", req.WalletNumber))
+		if _, serr := os.Stat(existing); serr == nil {
+			jsonError(w, fmt.Sprintf("wallet %d already exists; refusing to overwrite it — remove the file manually if you really mean to", req.WalletNumber), http.StatusConflict)
+			return
+		}
 	}
 
 	sigName, sigName2, err := SetCurrentEncryptions()
@@ -327,8 +356,10 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.NewPassword) < 1 {
-		jsonError(w, "New password cannot be empty", http.StatusBadRequest)
+	// Enforce the documented minimum (8) at the HTTP boundary for a clear error
+	// (QWID-2026-30); ChangePassword also enforces it internally.
+	if err := wallet.ValidatePasswordStrength(req.NewPassword); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

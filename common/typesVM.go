@@ -55,12 +55,36 @@ func CheckQuotationAndRetainString(base string) (string, bool) {
 	return base, false
 }
 
+// GetStringFromSCBytes decodes an ABI-style dynamic string return value.
+//
+// The input is CONTRACT-CONTROLLED: it is whatever bytes a deployed contract
+// chose to return from a metadata call, so nothing about its shape can be
+// assumed. The previous version sliced [startIndex:+32] and then
+// [startIndex+64 : +64+length] with the length itself read from those bytes —
+// a return that was short, or declared an oversized length, panicked every
+// validator applying the block (QWID-2026-09), turning one user deployment
+// into a deterministic chain halt. Malformed input now decodes to "", which
+// is deterministic across nodes and simply registers the token with an empty
+// name rather than deciding block validity.
 func GetStringFromSCBytes(code []byte, startIndex uint) string {
+	if uint64(startIndex)+32 > uint64(len(code)) {
+		return ""
+	}
 	o1 := code[startIndex : startIndex+32]
 	l := GetUintFromSCByte(o1)
-	o2 := code[startIndex+64 : startIndex+64+l]
-	st := string(o2)
-	return st
+	// Cap the declared length before doing arithmetic with it: the value is a
+	// full 64-bit integer chosen by the contract, so unchecked addition could
+	// overflow as well as overrun.
+	const maxSCString = 4096
+	if l > maxSCString {
+		return ""
+	}
+	start := uint64(startIndex) + 64
+	end := start + uint64(l)
+	if end > uint64(len(code)) {
+		return ""
+	}
+	return string(code[start:end])
 }
 
 func RoundCoin(v float64) float64 {
@@ -93,12 +117,23 @@ func IsHexVMAddress(s string) bool {
 	return len(s) == 2*AddressLength && isHex(s)
 }
 
+// GetUintFromSCByte reads the trailing 8 bytes of a 32-byte ABI word. The
+// input comes from contract return data; anything shorter than a full word
+// decodes to zero instead of panicking (QWID-2026-09 — the panic was reachable
+// from block application, so it was a consensus halt, not a local bug).
 func GetUintFromSCByte(bs []byte) uint {
-	return uint(binary.BigEndian.Uint64(bs[3*8:]))
+	if len(bs) < 32 {
+		return 0
+	}
+	return uint(binary.BigEndian.Uint64(bs[3*8 : 32]))
 }
 
+// GetInt64FromSCByte: same contract-controlled input, same rule as above.
 func GetInt64FromSCByte(bs []byte) int64 {
-	return int64(binary.BigEndian.Uint64(bs[3*8:]))
+	if len(bs) < 32 {
+		return 0
+	}
+	return int64(binary.BigEndian.Uint64(bs[3*8 : 32]))
 }
 
 func GetInt64ToBytesSC(value int64) []byte {
@@ -249,12 +284,24 @@ func (a Address) MarshalText() ([]byte, error) {
 
 // UnmarshalText parses a hash in hex syntax.
 func (a *Address) UnmarshalText(input []byte) error {
-	return hexutil.UnmarshalFixedText("Address", input, a.GetBytes())
+	if err := hexutil.UnmarshalFixedText("Address", input, a.GetBytes()); err != nil {
+		return err
+	}
+	// A hex address carries no primary/secondary flag (MarshalText emits only the
+	// 20 value bytes), so decode it as primary — matching Init/BytesToVMAddress
+	// for a bare 20-byte value, so a JSON/text round-trip equals the value
+	// constructors.
+	a.Primary = true
+	return nil
 }
 
 // UnmarshalJSON parses a hash in hex syntax.
 func (a *Address) UnmarshalJSON(input []byte) error {
-	return hexutil.UnmarshalFixedJSON(addressT, input, a.GetBytes())
+	if err := hexutil.UnmarshalFixedJSON(addressT, input, a.GetBytes()); err != nil {
+		return err
+	}
+	a.Primary = true // see UnmarshalText
+	return nil
 }
 
 // MixedcaseAddress retains the original string, which may or may not be

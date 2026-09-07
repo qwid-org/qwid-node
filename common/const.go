@@ -25,7 +25,15 @@ var (
 	MinNumberOfBlocksInStake       int64   = 36 // should be 36 but for testnet is released this number
 	MaxBlockForwardInTime          int64   = 15
 	DifficultyChange               float32 = 10
-	MaxGasUsage                    int64   = 13700000 // circa 6.5k transactions in block
+	MaxGasUsage                    int64   = 13700000 // per-transaction / per-EVM-call gas ceiling
+	// MaxGasUsagePerBlock caps the SUM of every transaction's declared GasUsage in
+	// one block. It must accommodate a full block of minimum-gas transfers, each
+	// of which declares GasUsageEstimate()'s 30000 floor, so it is sized as
+	// MaxTransactionsPerBlock * 30000. Using the per-call MaxGasUsage (13.7M) as
+	// the block sum cap instead limited a block to 13.7M/30000 ~= 456 transfers
+	// (QWID-2026-38 regression): MaxGasUsage bounds a SINGLE transaction / EVM
+	// call, not the whole block's fee-basis gas total.
+	MaxGasUsagePerBlock int64 = int64(MaxTransactionsPerBlock) * 30000
 	MaxGasPrice                    int64   = 100000
 	MaxTransactionsPerBlock        int16   = 5000 // on average 500 TPS
 	MaxTransactionInPool                   = 50000
@@ -145,6 +153,29 @@ var (
 	MerkleNodeDBPrefix                 = [2]byte{'N', 'N'}
 	RootHashMerkleTreeDBPrefix         = [2]byte{'R', 'R'}
 	TransactionDBPrefix                = [2]byte{'T', 'T'}
+	// IncludedTxDBPrefix maps a transaction hash to the height of the block that
+	// committed it on the current canonical chain. It is written when a block is
+	// applied and cleared for any block a rewind removes, so its presence is the
+	// authoritative "already in a block" signal — independent of the
+	// sender-declared height that the old duplicate check searched by
+	// (QWID-2026-19).
+	IncludedTxDBPrefix = [2]byte{'I', 'X'}
+	// MaxKeysPerIdentity bounds how many distinct public keys one identity
+	// (MainAddress) may register in the pubkey patricia trie. A legitimate
+	// identity accumulates at most a handful over the chain's life: its primary
+	// self-registration, its secondary, and one more per voted scheme change.
+	// The cap stops QWID-2026-16, an attacker signing an unbounded stream of
+	// registrations under a single controlled identity to make its address list
+	// — rebuilt in full on every registration — grow without bound.
+	MaxKeysPerIdentity = 32
+	// PubKeyRegistrationJournalDBPrefix records, per block height, which pubkey
+	// addresses that block NEWLY registered, so a rewind can undo exactly those
+	// registrations and no others (QWID-2026-07 annex). Without it a fork rewind
+	// left orphaned-branch key registrations in place, where the newest-first
+	// scan of LoadPubKeyWithPrimaryOfLength could let a stale same-length key
+	// shadow the canonical one. Key: prefix + height(8) + derivedAddr(20);
+	// value: mainAddress(20).
+	PubKeyRegistrationJournalDBPrefix = [2]byte{'P', 'J'}
 	//StakingDBPrefix                    = [2]byte{'S', 'S'}
 	TransactionPoolHashesDBPrefix    = [2]byte{'D', '0'}
 	TransactionToSendHashesDBPrefix  = [2]byte{'E', '0'}

@@ -180,15 +180,26 @@ func (fa *frameAssembler) push(r []byte) (payloads [][]byte, violation bool) {
 		}
 		idx := bytes.Index(fa.buf[start:], frameEnd)
 		if idx < 0 {
-			fa.scanned = len(fa.buf)
-			if !fa.discarding && int32(len(fa.buf)) > MaxMessageSizeForTopic(fa.topic) {
+			// A trailing delimiter prefix may finish in the next read. It is
+			// framing, not body data, and must survive entry into discard mode.
+			pending := min(len(fa.buf), len(frameEnd)-1)
+			for pending > 0 && !bytes.Equal(fa.buf[len(fa.buf)-pending:], frameEnd[:pending]) {
+				pending--
+			}
+			if !fa.discarding && len(fa.buf)-pending > int(MaxMessageSizeForTopic(fa.topic)) {
 				logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
 					fa.topic[0], fa.topic[1], len(fa.buf), MaxMessageSizeForTopic(fa.topic))
 				violation = true
 				fa.discarding = true
-				fa.buf = nil
-				fa.scanned = 0
 			}
+			if fa.discarding {
+				// Retain at most six bytes, in a fresh allocation: reslicing
+				// the old buffer would keep the oversized backing array alive.
+				tail := make([]byte, pending)
+				copy(tail, fa.buf[len(fa.buf)-pending:])
+				fa.buf = tail
+			}
+			fa.scanned = len(fa.buf)
 			return payloads, violation
 		}
 		idx += start
@@ -201,7 +212,7 @@ func (fa *frameAssembler) push(r []byte) (payloads [][]byte, violation bool) {
 			logger.GetLogger().Printf("resynchronised on topic %c%c after discarding an over-long message", fa.topic[0], fa.topic[1])
 			continue
 		}
-		if int32(len(frame)) > MaxMessageSizeForTopic(fa.topic) {
+		if len(frame) > int(MaxMessageSizeForTopic(fa.topic)) {
 			logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
 				fa.topic[0], fa.topic[1], len(frame), MaxMessageSizeForTopic(fa.topic))
 			violation = true

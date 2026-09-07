@@ -75,6 +75,12 @@ func (tb Block) GetFromBytes(b []byte) (Block, error) {
 	if err != nil {
 		return Block{}, err
 	}
+	// BaseBlock consumes variable-length oracle fields, so the remainder can be
+	// shorter than the 40-byte block-hash + fee tail sliced next. Re-check before
+	// slicing, or b[0:32]/b[0:8] panic (QWID-2026-17).
+	if len(b) < 40 {
+		return Block{}, fmt.Errorf("not enough bytes for block hash and fee: have %d", len(b))
+	}
 	tb.BlockHash = common.GetHashFromBytes(b[0:32])
 	b = b[32:]
 	tb.BlockFee = common.GetInt64FromByte(b[0:8])
@@ -133,6 +139,19 @@ func (bl Block) StoreBlock() error {
 
 func RemoveBlockFromDB(height int64) error {
 	bh := common.GetByteInt64(height)
+	// Clear the included-index for this block's transactions before removing it,
+	// so a genuinely reverted transaction becomes re-appliable on the canonical
+	// chain rather than being wrongly rejected as a duplicate forever
+	// (QWID-2026-19). Best-effort: a load failure must not block the rewind.
+	if bl, lerr := LoadBlock(height); lerr == nil {
+		for _, th := range bl.TransactionsHashes {
+			transactionsPool.UnmarkTxIncluded(th.GetBytes())
+		}
+	}
+	// NOTE: pubkey-registration rollback (QWID-2026-07 annex) is NOT done here
+	// per block — that created one RocksDB iterator per rewound block. The
+	// rewind driver (ResetAccountsAndBlocksSyncLocked) instead calls
+	// UnregisterPubKeysAboveHeight ONCE for the whole rewound range.
 	hb, err := database.MainDB.Get(append(common.BlockByHeightDBPrefix[:], bh...))
 	if err != nil {
 		return err

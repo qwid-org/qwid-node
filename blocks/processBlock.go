@@ -82,10 +82,41 @@ func VerifyStakeDependent(newBlock Block) error {
 	return nil
 }
 
+// validateBlockTxHashes rejects a transaction-hash list that repeats a hash or
+// exceeds the per-block maximum.
+//
+// Honest producers cannot emit either (the pool is hash-keyed and capped), but
+// nothing on the validator side used to reject a received block that repeated a
+// hash: the merkle root recomputed over the duplicated list matched the
+// attacker's own header root, and each occurrence loaded from the pool DB and
+// applied again, so a producer could include any victim's transfer N times and
+// every validator executed it N times (QWID-2026-35). The count cap likewise
+// bound only the producer's own selection, never a received block.
+func validateBlockTxHashes(txs []common.Hash) error {
+	if len(txs) > int(common.MaxTransactionsPerBlock) {
+		return fmt.Errorf("block has %d transactions, above the maximum %d", len(txs), common.MaxTransactionsPerBlock)
+	}
+	seen := make(map[[common.HashLength]byte]struct{}, len(txs))
+	for _, h := range txs {
+		var k [common.HashLength]byte
+		copy(k[:], h.GetBytes())
+		if _, dup := seen[k]; dup {
+			return fmt.Errorf("block includes transaction %x more than once", h.GetBytes()[:8])
+		}
+		seen[k] = struct{}{}
+	}
+	return nil
+}
+
 func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*transactionsPool.MerkleTree, error) {
 	blockHeight := newBlock.GetHeader().Height
 	if newBlock.GetBlockSupply() > common.MaxTotalSupply {
 		return nil, fmt.Errorf("supply is too high")
+	}
+	// Reject repeated or over-count transaction hashes before any per-tx work
+	// (QWID-2026-35); this runs on the sync path too since CheckBaseBlock does.
+	if err := validateBlockTxHashes(newBlock.TransactionsHashes); err != nil {
+		return nil, err
 	}
 
 	if newBlock.GetHeader().Height > 0 && !bytes.Equal(lastBlock.BlockHash.GetBytes(), newBlock.GetHeader().PreviousHash.GetBytes()) {
@@ -105,7 +136,12 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	}
 	rootMerkleTrie := newBlock.GetHeader().RootMerkleTree
 	txs := newBlock.TransactionsHashes
-	txsBytes := make([][]byte, len(txs))
+	// Clean capacity, not length: make([][]byte, len(txs)) prepended len(txs)
+	// nil leaves before the real hashes, so every tree committed to n nils + n
+	// hashes. Producer and validator shared the bug so roots agreed, but any
+	// correct future caller would diverge — a consensus trap (QWID-2026-23).
+	// Genesis already builds cleanly; this brings block validation in line.
+	txsBytes := make([][]byte, 0, len(txs))
 	for _, tx := range txs {
 		hash := tx.GetBytes()
 		txsBytes = append(txsBytes, hash)
@@ -267,6 +303,12 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	accounts := map[[common.AddressLength]byte]account.Account{}
 	stakingAccounts := map[[common.AddressLength]byte]account.StakingAccount{}
 	totalFee := int64(0)
+	// Cumulative EVM gas across the block. MaxGasUsage was documented as the
+	// block limit but never summed anywhere, so a block full of maximal
+	// transactions carried an unbounded aggregate compute budget
+	// (QWID-2026-11). Checked during BOTH passes — verification rejects the
+	// block before any state is touched.
+	totalGas := int64(0)
 	// Name the pass. This function runs twice for every block — once to verify
 	// it and once to apply it — and the two lines were identical, so a healthy
 	// block looked like it was being processed twice.
@@ -323,6 +365,24 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			return 0, 0, feeErr
 		}
 		totalFee += fee
+		if poolTx.GasUsage > 0 {
+			// Bound the single addend BEFORE summing, regardless of any Verify
+			// exemption. Nonce- and genesis-shaped transactions skip the
+			// upper-gas check in Verify, so one could declare GasUsage=MaxInt64
+			// and overflow totalGas to a negative value, silently disabling the
+			// cap for the rest of the block (QWID-2026-38(b)). With every addend
+			// <= MaxGasUsage and the running sum rejected once it passes
+			// MaxGasUsage, totalGas can never exceed ~2*MaxGasUsage — no wrap.
+			if poolTx.GasUsage > common.MaxGasUsage {
+				return 0, 0, fmt.Errorf("block %d: transaction %x declares gas %d above the block maximum %d",
+					block.GetHeader().Height, hash[:8], poolTx.GasUsage, common.MaxGasUsage)
+			}
+			totalGas += poolTx.GasUsage
+			if totalGas > common.MaxGasUsagePerBlock {
+				return 0, 0, fmt.Errorf("block %d exceeds the block gas limit: %d > %d",
+					block.GetHeader().Height, totalGas, common.MaxGasUsagePerBlock)
+			}
+		}
 		amount := poolTx.TxData.Amount
 		total_amount := fee + amount
 		address := poolTx.GetSenderAddress()
@@ -406,10 +466,15 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 }
 
 func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.MerkleTree) error {
-	err := ProcessTransactionsEscrow(block.GetHeader().Height, tree)
-	if err != nil {
-		logger.GetLogger().Println("ProcessTransactionsEscrow: ", err)
-	}
+	// Escrow settlement runs at the END of this function, not the start
+	// (QWID-2026-37). It moves balances and then removes the escrow entry from
+	// the pool and its DB mirror; running it first meant that when a LATER
+	// per-transaction step failed and the whole block was rolled back via the
+	// state snapshot, the escrow entry was already gone and never came back —
+	// so re-application (or the canonical block at that height) settled nothing,
+	// while nodes that did not process the failing candidate settled normally,
+	// a silent permanent balance divergence. Deferring it past every failable
+	// step means a settlement only happens when the block genuinely commits.
 
 	txs := block.TransactionsHashes
 	for _, tx := range txs {
@@ -492,6 +557,13 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 		return fmt.Errorf("this shouldn't happen anytime: ProcessBlockTransfers")
 	}
 
+	// Last, after every failable step above: settle matured escrows. If this is
+	// reached the block commits, so a settlement can no longer be stranded by a
+	// later rollback (QWID-2026-37).
+	if err := ProcessTransactionsEscrow(block.GetHeader().Height, tree); err != nil {
+		logger.GetLogger().Println("ProcessTransactionsEscrow: ", err)
+	}
+
 	return nil
 }
 
@@ -539,7 +611,45 @@ func EvaluateSmartContracts(bl *Block) bool {
 	return true
 }
 
+// verifyBlockHeaderSignature authenticates the block producer's header
+// signature against the encryption configuration in force BEFORE this block —
+// the parent's, not the one this block declares.
+//
+// A block that changes the configuration is signed under the OLD rules, because
+// that is all its producer had when it signed. Judging it by the rules it
+// introduces makes it invalidate its own signature: a block announcing "the
+// primary scheme is paused" is signed with the primary scheme, so verifying it
+// under its own config rejects it, and the pause can never be recorded. The
+// same holds for a scheme replacement. This was masked while two schemes were
+// live at once and surfaced once exactly one scheme could be active.
+//
+// It is called FIRST in both apply paths (QWID-2026-07): the operator key is
+// resolved from the registry (state before this block), so authentication needs
+// nothing this block computes, and running it before transaction lookup, EVM
+// execution, pool mutation, or the persistent public-key writes in
+// ProcessBlockPubKey means a forged candidate cannot drive any expensive or
+// persistent work — least of all a key registration that a later failed
+// authentication would not roll back.
+func verifyBlockHeaderSignature(newBlock *Block, lastBlock Block) error {
+	head := newBlock.GetHeader()
+	sigName, sigName2, isPaused, isPaused2, err := lastBlock.GetSigNames()
+	if err != nil {
+		return fmt.Errorf("%v: verifyBlockHeaderSignature", err)
+	}
+	if head.Verify(sigName, sigName2, isPaused, isPaused2) == false {
+		return fmt.Errorf("header fails to verify")
+	}
+	return nil
+}
+
 func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *transactionsPool.MerkleTree, checkFinal bool) error {
+	// Authenticate the producer BEFORE any expensive or persistent work
+	// (QWID-2026-07). Unconditional, matching the original end-of-function
+	// check this replaces; the operator key is already in the registry before
+	// the block, so nothing this block computes is needed.
+	if err := verifyBlockHeaderSignature(newBlock, lastBlock); err != nil {
+		return fmt.Errorf("%v: CheckBlockAndTransactions", err)
+	}
 
 	// NOTE: deliberately NO deferred RemoveAllTransactionsRelatedToBlock here.
 	// That defer ran on FAILURE too, so a block that could not apply because
@@ -592,29 +702,8 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 		return fmt.Errorf("block supply checking fails vs account balances: CheckBlockAndTransactions")
 	}
 
-	head := newBlock.GetHeader()
-	// Verify the header against the encryption configuration in force BEFORE
-	// this block — the parent's — not the one this block declares.
-	//
-	// A block that changes the configuration is signed under the OLD rules,
-	// because that is all its producer had when it signed. Judging it by the
-	// rules it introduces makes it invalidate its own signature: a block
-	// announcing "the primary scheme is paused" is signed with the primary
-	// scheme, so verifying it under its own config rejects it, and the pause
-	// can never be recorded. The same holds for a scheme replacement.
-	//
-	// This was masked while two schemes were live at once — there was always a
-	// second, unpaused scheme to sign with — and surfaced as soon as exactly
-	// one scheme could be active.
-	sigName, sigName2, isPaused, isPaused2, err := lastBlock.GetSigNames()
-	if err != nil {
-		// AC-M6: previously the fmt.Errorf result was discarded, swallowing the
-		// GetSigNames failure and proceeding with zero-value sig names.
-		return fmt.Errorf("%v: CheckBlockAndTransactions", err)
-	}
-	if head.Verify(sigName, sigName2, isPaused, isPaused2) == false {
-		return fmt.Errorf("header fails to verify: CheckBlockAndTransactions")
-	}
+	// Header signature already authenticated at the top of this function
+	// (QWID-2026-07).
 	return nil
 }
 
@@ -647,9 +736,19 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	// confirmed DB and cleans the pool itself (the txStore loop below), and
 	// genuinely invalid transactions are removed point-wise by
 	// RemoveBadTransactionByHash where they are detected.
+	// Authenticate the producer BEFORE any expensive or persistent work
+	// (QWID-2026-07): a forged candidate must not reach transaction lookup, EVM
+	// execution, pool mutation, or the persistent public-key writes below. The
+	// operator key is resolved from the registry (pre-block state).
+	phase := time.Now()
+	if err := verifyBlockHeaderSignature(newBlock, lastBlock); err != nil {
+		return fmt.Errorf("%v: CheckBlockAndTransferFunds", err)
+	}
+	tHeader = time.Since(phase)
+
 	// Stake-snapshot-dependent checks, run against the parent (height-1) state
 	// that is in memory before this block's transactions are applied.
-	phase := time.Now()
+	phase = time.Now()
 	if err := VerifyStakeDependent(*newBlock); err != nil {
 		return err
 	}
@@ -712,30 +811,8 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 		return err
 	}
 	tPubKeys = time.Since(phase)
-	phase = time.Now()
-	head := newBlock.GetHeader()
-	// Verify the header against the encryption configuration in force BEFORE
-	// this block — the parent's — not the one this block declares.
-	//
-	// A block that changes the configuration is signed under the OLD rules,
-	// because that is all its producer had when it signed. Judging it by the
-	// rules it introduces makes it invalidate its own signature: a block
-	// announcing "the primary scheme is paused" is signed with the primary
-	// scheme, so verifying it under its own config rejects it, and the pause
-	// can never be recorded. The same holds for a scheme replacement.
-	//
-	// This was masked while two schemes were live at once — there was always a
-	// second, unpaused scheme to sign with — and surfaced as soon as exactly
-	// one scheme could be active.
-	sigName, sigName2, isPaused, isPaused2, err := lastBlock.GetSigNames()
-	if err != nil {
-		return fmt.Errorf("%v: CheckBlockAndTransferFunds", err)
-	}
-	if head.Verify(sigName, sigName2, isPaused, isPaused2) == false {
-		return fmt.Errorf("header fails to verify: CheckBlockAndTransferFunds")
-	}
-	tHeader = time.Since(phase)
-
+	// Header signature already authenticated at the top of this function
+	// (QWID-2026-07).
 	phase = time.Now()
 	err = merkleTrie.StoreTree(newBlock.GetHeader().Height)
 	if err != nil {
@@ -747,21 +824,38 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	}
 	tProcess = time.Since(phase)
 	phase = time.Now()
+	// Batch every transaction's three DB writes — confirmed-store, included-mark
+	// (QWID-2026-19) and pool-hash delete — into a SINGLE RocksDB write per block
+	// instead of ~3 individually-locked ops per transaction. For a full 5000-tx
+	// block that collapses ~15k locked cgo writes into one, which is what a weak
+	// node needs to keep up during sync (sync-perf). It is also more atomic: the
+	// whole block's tx-store either lands or does not.
+	heightBytes := common.GetByteInt64(newBlock.GetHeader().Height)
+	batch := database.NewBatch()
 	for _, h := range hashes {
-		tx, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], h.GetBytes())
-		if err != nil {
-			logger.GetLogger().Println(err)
+		hb := h.GetBytes()
+		poolKey := append(append([]byte{}, common.TransactionPoolHashesDBPrefix[:]...), hb...)
+		// Move the RAW stored bytes pool->confirmed. The transaction was already
+		// decoded and verified earlier in this apply (CheckBlockTransfers), and
+		// the stored form is exactly what a re-encode would produce, so decoding
+		// it again here (the old LoadFromDBPoolTx + GetBytes) is pure wasted CPU
+		// per transaction — costly on a weak node during sync (sync-perf).
+		txBytes, err := database.MainDB.Get(poolKey)
+		if err != nil || len(txBytes) == 0 {
+			logger.GetLogger().Printf("commit: transaction %x missing from pool DB: %v", hb, err)
 			continue
 		}
-		err = tx.StoreToDBPoolTx(common.TransactionDBPrefix[:])
-		if err != nil {
-			return err
-		}
-		transactionsPool.PoolsTx.RemoveTransactionByHash(h.GetBytes())
-		err = tx.RemoveFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:])
-		if err != nil {
-			logger.GetLogger().Println(err)
-		}
+		// Reproduce StoreToDBPoolTx(TransactionDBPrefix), MarkTxIncluded and
+		// RemoveFromDBPoolTx(TransactionPoolHashesDBPrefix) as batch operations.
+		// Fresh key slices (append onto []byte{}) so the 2-byte global prefixes
+		// are never mutated.
+		batch.Put(append(append([]byte{}, common.TransactionDBPrefix[:]...), hb...), txBytes)
+		batch.Put(append(append([]byte{}, common.IncludedTxDBPrefix[:]...), hb...), heightBytes)
+		batch.Delete(poolKey)
+		transactionsPool.PoolsTx.RemoveTransactionByHash(hb)
+	}
+	if err := database.MainDB.CommitBatch(batch); err != nil {
+		return err
 	}
 	tTxStore = time.Since(phase)
 	// Success: sweep any in-memory pool remnants of this block (the loop above

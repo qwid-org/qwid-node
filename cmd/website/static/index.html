@@ -507,7 +507,12 @@ function setAlert(id, text, isError) {
     const el = document.getElementById(id);
     if (!el) return;
     if (!text) { el.innerHTML = ''; return; }
-    el.innerHTML = `<div class="alert ${isError ? 'alert-error' : 'alert-success'}">${text}</div>`;
+    // textContent, not innerHTML: alert texts include server-echoed strings.
+    const div = document.createElement('div');
+    div.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+    div.textContent = text;
+    el.innerHTML = '';
+    el.appendChild(div);
 }
 
 async function api(url, opts) {
@@ -647,7 +652,7 @@ async function loadAccount() {
         details.innerHTML = '';
         if (data.stakingDetails && data.stakingDetails.length > 0) {
             data.stakingDetails.forEach(d => {
-                details.innerHTML += `<div class="staking-row"><span>${truncAddr(d.delegatedAddress)}</span><span>Staked: ${d.staked.toFixed(8)}</span><span>Rewards: ${d.rewards.toFixed(8)}</span></div>`;
+                details.innerHTML += `<div class="staking-row"><span>${escapeHtml(truncAddr(d.delegatedAddress))}</span><span>Staked: ${d.staked.toFixed(8)}</span><span>Rewards: ${d.rewards.toFixed(8)}</span></div>`;
             });
         }
     } catch(e) {
@@ -730,15 +735,15 @@ async function loadHistory() {
             const addr = isSent ? tx.recipient : tx.sender;
             body.innerHTML += `<tr>
                 <td class="${isSent ? 'tx-type-sent' : 'tx-type-received'}">${isSent ? 'Sent' : 'Received'}</td>
-                <td style="font-family:monospace;font-size:12px" title="${addr}">${truncAddr(addr)}</td>
+                <td style="font-family:monospace;font-size:12px" title="${escapeHtml(addr)}">${escapeHtml(truncAddr(addr))}</td>
                 <td>${(tx.amount || 0).toFixed(8)}</td>
                 <td>${tx.height || '-'}</td>
-                <td style="font-family:monospace;font-size:12px" title="${tx.hash}">${truncAddr(tx.hash)}</td>
+                <td style="font-family:monospace;font-size:12px" title="${escapeHtml(tx.hash)}">${escapeHtml(truncAddr(tx.hash))}</td>
             </tr>`;
         });
     } catch(e) {
         loading.classList.add('hidden');
-        body.innerHTML = '<tr><td colspan="5" style="color:#ff4757;text-align:center">' + e.message + '</td></tr>';
+        body.innerHTML = '<tr><td colspan="5" style="color:#ff4757;text-align:center">' + escapeHtml(e.message) + '</td></tr>';
     }
 }
 
@@ -753,13 +758,28 @@ async function loadTokens() {
         }
         let html = '<table class="tx-table"><thead><tr><th>Token</th><th>Address</th></tr></thead><tbody>';
         for (const [addr, info] of Object.entries(data.tokens)) {
+            // Token names come from the CHAIN — an attacker's contract chooses
+            // its own name() return, so this is hostile input on every node,
+            // regardless of this site's own creation-form validation. Unescaped
+            // interpolation here executed that name in every logged-in
+            // visitor's session, with the session cookie attached
+            // (QWID-2026-27). The address moves to a data attribute for the
+            // same reason: inline onclick built by string pasting is an
+            // injection surface even for "hex-looking" values.
             const name = typeof info === 'object' ? (info.name || info.symbol || addr) : info;
-            html += `<tr><td>${name}</td><td style="font-family:monospace;font-size:12px;cursor:pointer" onclick="document.getElementById('dex-trade-addr').value='${addr}';document.getElementById('dex-token-addr').value='${addr}';document.getElementById('dex-liq-addr').value='${addr}'" title="Click to select">${truncAddr(addr)}</td></tr>`;
+            html += `<tr><td>${escapeHtml(name)}</td><td style="font-family:monospace;font-size:12px;cursor:pointer" class="dex-token-pick" data-addr="${escapeHtml(addr)}" title="Click to select">${escapeHtml(truncAddr(addr))}</td></tr>`;
         }
         html += '</tbody></table>';
         el.innerHTML = html;
+        el.querySelectorAll('.dex-token-pick').forEach(td => td.addEventListener('click', () => {
+            const a = td.dataset.addr;
+            for (const id of ['dex-trade-addr', 'dex-token-addr', 'dex-liq-addr']) {
+                const f = document.getElementById(id);
+                if (f) f.value = a;
+            }
+        }));
     } catch(e) {
-        document.getElementById('dex-tokens').innerHTML = '<div style="color:#ff4757">' + e.message + '</div>';
+        document.getElementById('dex-tokens').innerHTML = '<div style="color:#ff4757">' + escapeHtml(e.message) + '</div>';
     }
 }
 
@@ -784,7 +804,7 @@ async function loadDexInfo() {
         html += '</div>';
         el.innerHTML = html;
     } catch(e) {
-        document.getElementById('dex-pool-info').innerHTML = '<div style="color:#ff4757">' + e.message + '</div>';
+        document.getElementById('dex-pool-info').innerHTML = '<div style="color:#ff4757">' + escapeHtml(e.message) + '</div>';
     }
 }
 
@@ -892,7 +912,7 @@ async function searchExplorer() {
         html += '</div>';
         el.innerHTML = html;
     } catch(e) {
-        el.innerHTML = `<div class="alert alert-error" style="margin-top:15px">${e.message}</div>`;
+        el.innerHTML = `<div class="alert alert-error" style="margin-top:15px">${escapeHtml(e.message)}</div>`;
     }
 }
 
@@ -907,8 +927,8 @@ async function showMnemonic() {
     document.getElementById('user-dropdown').classList.remove('show');
     try {
         const data = await api('/api/wallet/mnemonic');
-        document.getElementById('mnemonic-primary').innerHTML = '<strong>Primary:</strong><br>' + (data.primaryMnemonic || data.primaryError || 'N/A');
-        document.getElementById('mnemonic-secondary').innerHTML = '<strong>Secondary:</strong><br>' + (data.secondaryMnemonic || data.secondaryError || 'N/A');
+        document.getElementById('mnemonic-primary').innerHTML = '<strong>Primary:</strong><br>' + escapeHtml(data.primaryMnemonic || data.primaryError || 'N/A');
+        document.getElementById('mnemonic-secondary').innerHTML = '<strong>Secondary:</strong><br>' + escapeHtml(data.secondaryMnemonic || data.secondaryError || 'N/A');
         const modal = document.getElementById('mnemonic-modal');
         modal.classList.remove('hidden');
         modal.style.display = 'flex';

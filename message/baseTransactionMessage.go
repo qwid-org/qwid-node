@@ -13,6 +13,12 @@ import (
 
 var validTopics = [][2]byte{{'N', 'N'}, {'S', 'S'}, {'T', 'T'}, {'B', 'B'}}
 
+// Envelope limits apply across ALL fields, including unrecognized field keys.
+// Current producers use at most four fields (hi). Leave bounded headroom for
+// extensions without allowing arbitrary map growth. The largest normal item
+// batch is transaction gossip/live recovery; sh has two items per block.
+const maxMessageFields = 16
+
 type TransactionsMessage struct {
 	BaseMessage       BaseMessage          `json:"base_message"`
 	TransactionsBytes map[[2]byte][][]byte `json:"transactions_bytes"`
@@ -99,15 +105,17 @@ func (a TransactionsMessage) GetBytes() []byte {
 }
 
 func (a TransactionsMessage) GetFromBytes(b []byte) (AnyMessage, error) {
+	// Also protect direct callers (e.g. decompression) that bypass transport
+	// framing. Payloads below are zero-copy slices of this bounded input.
+	if len(b) > int(common.MaxMessageSizeBytes) {
+		return nil, fmt.Errorf("message exceeds byte limit %d", common.MaxMessageSizeBytes)
+	}
 	if len(b) < 4 {
 		return nil, fmt.Errorf("insufficient bytes for base message")
 	}
 
 	var err error
 	a.BaseMessage.GetFromBytes(b[:4])
-	if err != nil {
-		return nil, err
-	}
 
 	b = b[4:]
 
@@ -117,8 +125,17 @@ func (a TransactionsMessage) GetFromBytes(b []byte) (AnyMessage, error) {
 
 	n := common.GetInt32FromByte(b[:4])
 	b = b[4:]
+	// Each field needs a two-byte key and a four-byte count. Check before
+	// allocating the map, even if the declared count is within the policy cap.
+	if n < 0 || int(n) > maxMessageFields || int(n) > len(b)/6 {
+		return nil, fmt.Errorf("invalid message field count: %d", n)
+	}
 
 	a.TransactionsBytes = make(map[[2]byte][][]byte)
+	maxMessageItems := max(int(common.MaxTransactionsPerBlock),
+		common.MaxNumberTransactionInChunk, 2*(int(common.NumberOfHashesInBucket)+1),
+		common.MaxPeersSharedInHi+3)
+	totalItems := 0
 
 	for i := int32(0); i < n; i++ {
 		if len(b) < 2 {
@@ -127,6 +144,9 @@ func (a TransactionsMessage) GetFromBytes(b []byte) (AnyMessage, error) {
 		var key [2]byte
 		copy(key[:], b[:2])
 		b = b[2:]
+		if _, exists := a.TransactionsBytes[key]; exists {
+			return nil, fmt.Errorf("duplicate message field: %x", key)
+		}
 
 		if len(b) < 4 {
 			return nil, fmt.Errorf("insufficient bytes for transactions size")
@@ -134,9 +154,19 @@ func (a TransactionsMessage) GetFromBytes(b []byte) (AnyMessage, error) {
 
 		size := common.GetInt32FromByte(b[:4])
 		b = b[4:]
+		// Every item costs at least four wire bytes, but that wire-derived
+		// bound alone allows millions of slice headers. Enforce the remaining
+		// aggregate policy budget before allocating any item slice.
+		if size < 0 || int(size) > maxMessageItems-totalItems || int(size) > len(b)/4 {
+			return nil, fmt.Errorf("invalid item count %d in message field %x", size, key)
+		}
+		totalItems += int(size)
 
 		var sb []byte
 		var transactions [][]byte
+		if size > 0 {
+			transactions = make([][]byte, int(size))
+		}
 		for j := int32(0); j < size; j++ {
 			if len(b) < 4 {
 				return nil, fmt.Errorf("insufficient bytes for transaction length")
@@ -147,10 +177,13 @@ func (a TransactionsMessage) GetFromBytes(b []byte) (AnyMessage, error) {
 				logger.GetLogger().Println("unmarshal AnyNonceMessage from bytes fails")
 				return nil, err
 			}
-			transactions = append(transactions, sb)
+			transactions[j] = sb
 		}
 
 		a.TransactionsBytes[key] = transactions
+	}
+	if len(b) != 0 {
+		return nil, fmt.Errorf("trailing bytes after message: %d", len(b))
 	}
 
 	return AnyMessage(a), nil

@@ -28,3 +28,10 @@ qtbox
 /explorer
 /explorer.new
 /sending
+
+# Locally built binaries that must never be committed (audit F-5)
+/sendingTransaction
+/genWallet
+/resetWallet
+# Pentest output: a list of this infrastructure's weaknesses
+deploy/qwid_logs/

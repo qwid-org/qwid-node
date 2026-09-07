@@ -186,9 +186,11 @@ func (a *Account) Unmarshal(data []byte) error {
 	if len(data) >= 16 {
 		nts := common.GetInt64FromByte(data[:8])
 		data = data[8:]
-		// check if enough data
-		if len(data) < int(nts)*32 {
-			return fmt.Errorf("not enough data for sender transactions: need %d, have %d", int(nts)*32, len(data))
+		// Bound the count by the bytes present (overflow-safe: int(nts)*32 could
+		// wrap for a huge nts) and reject a negative count, which would panic
+		// make([]Hash, nts) (QWID-2026-14).
+		if nts < 0 || nts > int64(len(data))/32 {
+			return fmt.Errorf("invalid sender transaction count %d for %d bytes", nts, len(data))
 		}
 
 		a.TransactionsSender = make([]common.Hash, nts)
@@ -198,11 +200,18 @@ func (a *Account) Unmarshal(data []byte) error {
 			a.TransactionsSender[i] = th
 			data = data[32:]
 		}
+		// The recipient count must still be present after the sender list;
+		// data[:8] panics on a short buffer otherwise (QWID-2026-14).
+		if len(data) < 8 {
+			return fmt.Errorf("not enough data for recipient transaction count: have %d", len(data))
+		}
 		ntr := common.GetInt64FromByte(data[:8])
 		data = data[8:]
-		// check if enough data
-		if len(data) < int(ntr)*32 {
-			return fmt.Errorf("not enough data for recipient transactions: need %d, have %d", int(nts)*32, len(data))
+		// Bound by remaining bytes and reject a negative count (overflow-safe;
+		// a negative ntr passed the old `len < int(ntr)*32` check and then
+		// panicked make([]Hash, ntr) / data[:32]) (QWID-2026-14).
+		if ntr < 0 || ntr > int64(len(data))/32 {
+			return fmt.Errorf("invalid recipient transaction count %d for %d bytes", ntr, len(data))
 		}
 		a.TransactionsRecipient = make([]common.Hash, ntr)
 		for i := int64(0); i < ntr; i++ {

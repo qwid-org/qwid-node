@@ -19,6 +19,53 @@ import (
 	"github.com/qwid-org/qwid-node/transactionsPool"
 )
 
+// maxBzInflatedBytes bounds a decompressed bz payload. A bz wraps a bx answer,
+// which carries up to MaxNumberTransactionInChunk transactions; 16MB is ~5x the
+// observed real sync-batch maximum and far below the 151MB global wire limit,
+// so it bounds the decompression bomb without rejecting a legitimate bx
+// (QWID-2026-08).
+var maxBzInflatedBytes = int(common.MaxMsgSizeSync)
+
+// bzDecompressSem bounds concurrent bz decompression across all peers so a
+// burst of compressed frames cannot allocate unbounded memory at once
+// (QWID-2026-08).
+var bzDecompressSem = make(chan struct{}, 4)
+
+// validateAndInflateBz enforces the bz shape and decompression bounds and
+// returns the inflated bx bytes (QWID-2026-08): exactly one compressed payload;
+// inflated size capped at maxBzInflatedBytes (read limit+1 so an over-cap
+// stream is rejected, not silently truncated); concurrency bounded by
+// bzDecompressSem; and the result must be a valid bx message.
+func validateAndInflateBz(items map[[2]byte][][]byte) ([]byte, error) {
+	total := 0
+	var zb []byte
+	for _, v := range items {
+		for _, b := range v {
+			total++
+			zb = b
+		}
+	}
+	if len(items) != 1 || total != 1 {
+		return nil, fmt.Errorf("bz: must carry exactly one compressed payload (got %d topic(s), %d item(s))", len(items), total)
+	}
+	bzDecompressSem <- struct{}{}
+	fr := flate.NewReader(bytes.NewReader(zb))
+	raw, err := io.ReadAll(io.LimitReader(fr, int64(maxBzInflatedBytes)+1))
+	fr.Close()
+	<-bzDecompressSem
+	if err != nil {
+		return nil, fmt.Errorf("bz: cannot decompress: %w", err)
+	}
+	if len(raw) > maxBzInflatedBytes {
+		return nil, fmt.Errorf("bz: inflated payload exceeds the %d-byte cap", maxBzInflatedBytes)
+	}
+	ok, inner := message.CheckValidMessage(raw)
+	if !ok || string(inner.GetHead()) != "bx" {
+		return nil, fmt.Errorf("bz: payload is not a valid bx message")
+	}
+	return raw, nil
+}
+
 func OnMessage(addr [4]byte, m []byte) {
 
 	//logger.GetLogger().Println("New message nonce from:", addr)
@@ -290,35 +337,29 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 		logger.GetLogger().Println(summary)
 	case "bz":
-		// A bz payload is a whole serialized bx message, flate-compressed by
-		// the bt handler when the answer is large. Transaction batches carry
-		// mostly high-entropy post-quantum signatures, yet still shed ~25% of
-		// their size - exactly what a saturated link needs. After validating
-		// that the inflated bytes really are a bx message, it is fed back
-		// through OnMessage, so the bx pipeline stays in one place; the head
-		// check makes nested bz impossible.
-		for _, v := range amsg.(message.TransactionsMessage).GetTransactionsBytes() {
-			for _, zb := range v {
-				fr := flate.NewReader(bytes.NewReader(zb))
-				// Decompression-bomb guard: cap the inflated size at the wire
-				// message limit; truncation then fails CheckValidMessage below.
-				raw, err := io.ReadAll(io.LimitReader(fr, int64(common.MaxMessageSizeBytes)))
-				fr.Close()
-				if err != nil {
-					logger.GetLogger().Println("bz: cannot decompress:", err)
-					tcpip.ReduceAndCheckIfBanIP(addr)
-					continue
-				}
-				ok, inner := message.CheckValidMessage(raw)
-				if !ok || string(inner.GetHead()) != "bx" {
-					logger.GetLogger().Println("bz: payload is not a valid bx message")
-					tcpip.ReduceAndCheckIfBanIP(addr)
-					continue
-				}
-				logger.GetLogger().Printf("bz: inflated %d -> %d bytes", len(zb), len(raw))
-				OnMessage(addr, raw)
-			}
+		// A bz payload is a whole serialized bx message, flate-compressed by the
+		// bt handler when the answer is large. It is fed back through OnMessage
+		// so the bx pipeline stays in one place; the head check makes nested bz
+		// impossible.
+		//
+		// Hardened against a decompression bomb (QWID-2026-08). The previous
+		// handler iterated over EVERY item in the outer frame and inflated each
+		// up to the 151MB wire limit, so one small authenticated frame packed
+		// with many highly-compressible items could force many 151MB
+		// allocations while costing a single rate-limit event. Now: exactly one
+		// compressed payload is permitted; the inflated size is capped at the
+		// bx policy bound (16MB, ~5x the observed sync-batch max), not the
+		// global 151MB; the reader takes limit+1 bytes so an over-cap stream is
+		// rejected rather than silently truncated; and a small global semaphore
+		// bounds concurrent decompression across all peers.
+		raw, err := validateAndInflateBz(amsg.(message.TransactionsMessage).GetTransactionsBytes())
+		if err != nil {
+			logger.GetLogger().Println(err)
+			tcpip.ReduceAndCheckIfBanIP(addr)
+			return
 		}
+		logger.GetLogger().Printf("bz: inflated to %d bytes", len(raw))
+		OnMessage(addr, raw)
 	case "st":
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 		for topic, v := range txn {

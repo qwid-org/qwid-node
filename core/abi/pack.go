@@ -42,6 +42,13 @@ func packElement(t Type, reflectValue reflect.Value) ([]byte, error) {
 	case StringTy:
 		return packBytesSlice([]byte(reflectValue.String()), reflectValue.Len()), nil
 	case AddressTy:
+		// In this fork common.Address is a struct (the ABI type's Go
+		// representation per type.go, and what unpack returns), so accept it
+		// directly. A raw [20]byte array or byte slice is still handled for
+		// backward compatibility.
+		if addr, ok := reflectValue.Interface().(common.Address); ok {
+			return common.LeftPadBytes(addr.GetBytes(), 32), nil
+		}
 		if reflectValue.Kind() == reflect.Array {
 			reflectValue = mustArrayToByteSlice(reflectValue)
 		}

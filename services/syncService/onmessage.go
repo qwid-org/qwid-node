@@ -119,6 +119,20 @@ func peerGenesisAccepted(txn map[[2]byte][][]byte) (bool, string) {
 	return true, ""
 }
 
+// firstItemOfLen returns the first value stored under key when the topic is
+// present, has at least one item, and that item is at least minLen bytes. It
+// guards the map-index → [0] → fixed-width-decode chain that a malformed peer
+// message would otherwise panic on (QWID-2026-17): an absent topic yields a nil
+// slice, an empty item list makes [0] panic, and GetInt64FromByte panics on a
+// slice shorter than 8 bytes.
+func firstItemOfLen(txn map[[2]byte][][]byte, key [2]byte, minLen int) ([]byte, bool) {
+	v, ok := txn[key]
+	if !ok || len(v) == 0 || len(v[0]) < minLen {
+		return nil, false
+	}
+	return v[0], true
+}
+
 var (
 	genesisRejectionLogTimes      = make(map[[4]byte]time.Time)
 	genesisRejectionLogTimesMutex sync.Mutex
@@ -553,8 +567,14 @@ func OnMessage(addr [4]byte, m []byte) {
 				}
 			}
 		}
-		lastOtherHeight := common.GetInt64FromByte(txn[[2]byte{'L', 'H'}][0])
-		lastOtherBlockHashBytes := txn[[2]byte{'L', 'B'}][0]
+		lhb, okLH := firstItemOfLen(txn, [2]byte{'L', 'H'}, 8)
+		lbb, okLB := firstItemOfLen(txn, [2]byte{'L', 'B'}, common.HashLength)
+		if !okLH || !okLB {
+			logger.GetLogger().Printf("malformed hi from %v: missing/short height or block-hash tag; dropping", addr)
+			return
+		}
+		lastOtherHeight := common.GetInt64FromByte(lhb)
+		lastOtherBlockHashBytes := lbb
 
 		// Record this peer's height claim for consensus tracking
 		recordPeerHeightClaim(addr, lastOtherHeight, lastOtherBlockHashBytes)
@@ -626,6 +646,13 @@ func OnMessage(addr [4]byte, m []byte) {
 		for k, tx := range txn {
 			for _, t := range tx {
 				if k == [2]byte{'I', 'H'} {
+					// GetInt64FromByte panics on a slice shorter than 8 bytes;
+					// skip a malformed index item rather than crash the handler
+					// (QWID-2026-17).
+					if len(t) < 8 {
+						logger.GetLogger().Printf("malformed sh from %v: short index item (%d bytes); skipping", addr, len(t))
+						continue
+					}
 					index := common.GetInt64FromByte(t)
 					indices = append(indices, index)
 				} else if k == [2]byte{'H', 'V'} {
@@ -941,6 +968,13 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 			timing.staking += time.Since(phase)
 
+			// Same cadence as accounts/staking/EVM: batch-end heights are the
+			// restorable rewind targets, so the DEX snapshot must exist at every
+			// one of them (QWID-2026-12).
+			if err := account.StoreDexAccounts(hNow); err != nil {
+				logger.GetLogger().Println(err)
+			}
+
 			logger.GetLogger().Println("sync batch timing:", timing.summary())
 		}()
 
@@ -1038,8 +1072,14 @@ func OnMessage(addr [4]byte, m []byte) {
 		logger.GetLogger().Printf("Received gh (get headers) request from %v", addr)
 		txn := amsg.(message.TransactionsMessage).GetTransactionsBytes()
 
-		bHeight := common.GetInt64FromByte(txn[[2]byte{'B', 'H'}][0])
-		eHeight := common.GetInt64FromByte(txn[[2]byte{'E', 'H'}][0])
+		bhb, okBH := firstItemOfLen(txn, [2]byte{'B', 'H'}, 8)
+		ehb, okEH := firstItemOfLen(txn, [2]byte{'E', 'H'}, 8)
+		if !okBH || !okEH {
+			logger.GetLogger().Printf("malformed gh from %v: missing/short begin/end height; dropping", addr)
+			return
+		}
+		bHeight := common.GetInt64FromByte(bhb)
+		eHeight := common.GetInt64FromByte(ehb)
 		bHeight, eHeight = clampHeaderSpan(bHeight, eHeight) // NP-M13: bound the requested span
 		logger.GetLogger().Printf("gh request: bHeight=%d, eHeight=%d, sending headers to %v", bHeight, eHeight, addr)
 		SendHeaders(addr, bHeight, eHeight)

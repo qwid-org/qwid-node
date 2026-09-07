@@ -192,6 +192,15 @@ func ResetAccountsAndBlocksSyncLocked(height int64) {
 		common.IsSyncing.Store(true)
 		return
 	}
+	// DEX state must come back to the rewind target with everything else; the
+	// loader falls back to the newest snapshot at or below the target when the
+	// exact height has none (QWID-2026-12). Tolerated on failure only because a
+	// database from before DEX snapshots existed has nothing to load — the
+	// state then legitimately stays as-is rather than blocking the rewind.
+	if err := account.LoadDexAccounts(height); err != nil {
+		logger.GetLogger().Println("cannot load dex accounts at height", height, ":", err,
+			"- continuing the rewind with in-memory dex state")
+	}
 
 	ha, err := account.LastHeightStoredInAccounts()
 	if err != nil {
@@ -225,6 +234,10 @@ func ResetAccountsAndBlocksSyncLocked(height int64) {
 			logger.GetLogger().Println(err)
 		}
 	}
+	// Undo public-key registrations above the rewind target in a single journal
+	// sweep, instead of one RocksDB iterator per removed block (QWID-2026-07
+	// annex; sync-perf optimization).
+	blocks.UnregisterPubKeysAboveHeight(height)
 	for i := ha; i > height; i-- {
 		err := account.RemoveAccountsFromDB(i)
 		if err != nil {

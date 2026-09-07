@@ -182,8 +182,44 @@ func scaleTokenPrice(price float64, coinDecimals, tokenDecimals uint8) (int64, b
 	return scaleToInt64(price, int(coinDecimals)+int(tokenDecimals))
 }
 
+// dexPoolShare returns amount/pool as a fraction, or 0 when the pool side is
+// empty. Dividing by a zero pool produced NaN (0/0) or Inf (x/0), and the bare
+// int64(NaN)/int64(Inf) that followed is implementation-defined — amd64 yields
+// the minimum int64, arm64 saturates to the maximum — so two architectures
+// wrote different LP balances for the same block and forked (QWID-2026-24).
+func dexPoolShare(amount, pool int64) float64 {
+	if pool <= 0 {
+		return 0
+	}
+	return float64(amount) / float64(pool)
+}
+
+// checkedRoundToken rounds v to the given decimals and converts to int64,
+// returning ok=false on NaN/Inf/overflow so the caller can skip a hostile or
+// degenerate value rather than write implementation-defined garbage into
+// consensus DEX state (QWID-2026-24).
+func checkedRoundToken(v float64, decimals int) (int64, bool) {
+	r := common.RoundToken(v, decimals)
+	if math.IsNaN(r) || math.IsInf(r, 0) || math.Abs(r) >= float64(math.MaxInt64) {
+		return 0, false
+	}
+	return int64(r), true
+}
+
 func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {
 	// 2 - adding liquidity, 3 - buy trade, 4 -sell trade, 5 - withdraw token, 6 - withdraw KURA (5,6 inactive, just withdraw is selling opposite)
+
+	// OptData is sender-controlled and no earlier layer enforces a DEX shape:
+	// Transaction.Verify accepts any byte slice here, and the producer's
+	// preflight does not run this parser. GetInt64FromByte panics below eight
+	// bytes, so without this check one validly signed transaction addressed to
+	// a DEX delegated account was a deterministic panic inside block
+	// application on every validator (QWID-2026-13). An error, by contrast,
+	// takes the ordinary invalid-transaction branch.
+	if len(tx.TxData.OptData) != 8 {
+		return nil, common.Address{}, 0, 0, 0, fmt.Errorf(
+			"DEX transaction opt data must be exactly 8 bytes (token amount), got %d", len(tx.TxData.OptData))
+	}
 	amountToken := common.GetInt64FromByte(tx.TxData.OptData)
 	sender := tx.TxParam.Sender
 	tokenAddress := tx.ContractAddress
@@ -313,6 +349,20 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 	}
 	if balanceToken+amountTokenInt64 < 0 {
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("not enough tokens in account")
+	}
+
+	// The trade must not drive either side of THIS pool negative. The checks
+	// above bound only the SHARED dex native account, which holds every pool's
+	// coins together, so a rounded-average-price payout larger than this pool's
+	// own reserve drained other pools' liquidity from the shared account
+	// (QWID-2026-25). accDex holds the pre-trade pool state; applying the trade
+	// does CoinPool -= amountCoinInt64 / TokenPool -= amountTokenInt64, so a
+	// payout (positive amount) above the reserve is refused here.
+	if amountCoinInt64 > accDex.CoinPool {
+		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex trade would overdraw the pool coin reserve: %d > %d", amountCoinInt64, accDex.CoinPool)
+	}
+	if amountTokenInt64 > accDex.TokenPool {
+		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex trade would overdraw the pool token reserve: %d > %d", amountTokenInt64, accDex.TokenPool)
 	}
 
 	if accDex.Balances[senderAccount.Address].CoinBalance-amountCoinInt64 < 0 && (operation == 6 || operation == 5) {
@@ -461,13 +511,20 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 				}
 				accDex.Balances = balances
 			} else {
-				coinPercentTmp := float64(-coinAmount) / float64(accDex.CoinPool)
-				tokenPercentTmp := float64(-tokenAmount) / float64(accDex.TokenPool)
+				// Guarded shares (zero when the pool side is empty) and
+				// checked conversions, so a degenerate pool cannot inject
+				// NaN/Inf into consensus LP balances (QWID-2026-24).
+				coinPercentTmp := dexPoolShare(-coinAmount, accDex.CoinPool)
+				tokenPercentTmp := dexPoolShare(-tokenAmount, accDex.TokenPool)
 
 				for addr, acc := range accDex.Balances {
 					balances := accDex.Balances[addr]
-					balances.TokenBalance += int64(common.RoundToken(tokenPercentTmp*float64(acc.TokenBalance), int(ti.Decimals)))
-					balances.CoinBalance += int64(common.RoundToken(coinPercentTmp*float64(acc.CoinBalance), int(common.Decimals)))
+					if tv, ok := checkedRoundToken(tokenPercentTmp*float64(acc.TokenBalance), int(ti.Decimals)); ok {
+						balances.TokenBalance += tv
+					}
+					if cv, ok := checkedRoundToken(coinPercentTmp*float64(acc.CoinBalance), int(common.Decimals)); ok {
+						balances.CoinBalance += cv
+					}
 					accDex.Balances[addr] = balances
 				}
 			}
@@ -562,6 +619,36 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 	return true, logs, addresses, optDatas, rets
 }
 
+// evmGasBudget converts a transaction's declared gas into the budget handed to
+// the VM. It is the LAST line of defence for QWID-2026-11: admission and block
+// verification enforce GasUsage <= MaxGasUsage, but this executor must not
+// trust that they did — old pools, sync replays and future rule drift all
+// deliver transactions that never passed the current Verify. The clamp keeps
+// the historic x10 headroom multiplier while making the product incapable of
+// exceeding ten block limits or wrapping (both factors are bounded first).
+// randaoFromParent supplies the EVM's PREVRANDAO value from the committed
+// parent-block hash. See the comment at its use sites; the nil-guard in
+// opRandom remains as defence in depth.
+func randaoFromParent(bl Block) *common.Hash {
+	h := common.BytesToHash(bl.GetHeader().PreviousHash.GetBytes())
+	return &h
+}
+
+func evmGasBudget(declared int64) uint64 {
+	if declared < 0 {
+		return 0
+	}
+	if declared > common.MaxGasUsage {
+		declared = common.MaxGasUsage
+	}
+	return uint64(declared) * uint64(gasHeadroomMult)
+}
+
+// gasHeadroomMult is the historic execution-headroom multiplier applied to a
+// transaction's declared gas. Kept as an integer so the budget arithmetic in
+// evmGasBudget stays provably non-wrapping.
+const gasHeadroomMult = 10
+
 func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, ret []byte, address common.Address, leftOverGas uint64, err error) {
 	if len(tx.TxData.OptData) == 0 {
 		loggerMain.GetLogger().Println("no smart contract in transaction")
@@ -581,10 +668,24 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		Coinbase:    common.EmptyAddress(),
 		GasLimit:    uint64(common.MaxGasUsage) * uint64(gasMult),
 		BlockNumber: new(big.Int).SetInt64(bl.GetHeader().Height),
-		Time:        new(big.Int).SetInt64(common.GetCurrentTimeStampInSecond()),
+		// The COMMITTED block timestamp, never the wall clock. Every validator
+		// replays this block at a different moment; TIMESTAMP fed from the
+		// local clock gave the same transaction different environmental input
+		// on each node, so a contract branching on it could split state
+		// silently — the header commits no post-state root, so nothing would
+		// ever flag the divergence (QWID-2026-10). Replaying old blocks would
+		// also be unable to reconstruct the original state.
+		Time:        new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
 		Difficulty:  new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
 		BaseFee:     new(big.Int).SetInt64(int64(0)),
-		Random:      nil,
+		// Consensus-committed and replay-stable: the parent block hash from
+		// the header every validator already agreed on. Deterministic across
+		// nodes and across time, which is the property QWID-2026-10 demands of
+		// every environmental input; deliberately NOT node-local. It is of
+		// course miner-known — PREVRANDAO here is an anti-panic determinism
+		// value, not a randomness source; contracts needing randomness must
+		// use the RAND oracle.
+		Random:      randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
 	jumpTable := vm.GetGenericJumpTable()
@@ -627,7 +728,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	State.PrepareAccessList(tx.TxParam.Sender, accessDest, vm.ActivePrecompiles(rules), nil)
 
 	if tx.TxData.Recipient == common.EmptyAddress() {
-		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, uint64(tx.GasUsage)*uint64(gasMult), big.NewInt(tx.TxData.Amount), nonce)
+		ret, address, leftOverGas, err = VM.Create(vm.AccountRef(origin), code, evmGasBudget(tx.GasUsage), big.NewInt(tx.TxData.Amount), nonce)
 
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
@@ -635,7 +736,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		}
 	} else {
 		address = tx.TxData.Recipient
-		ret, leftOverGas, err = VM.Call(vm.AccountRef(origin), address, code, uint64(tx.GasUsage)*uint64(gasMult), big.NewInt(tx.TxData.Amount))
+		ret, leftOverGas, err = VM.Call(vm.AccountRef(origin), address, code, evmGasBudget(tx.GasUsage), big.NewInt(tx.TxData.Amount))
 		if err != nil {
 			loggerMain.GetLogger().Println(err)
 			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err
@@ -677,10 +778,24 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 		Coinbase:    common.EmptyAddress(),
 		GasLimit:    uint64(common.MaxGasUsage) * uint64(gasMult),
 		BlockNumber: new(big.Int).SetInt64(bl.GetHeader().Height),
-		Time:        new(big.Int).SetInt64(common.GetCurrentTimeStampInSecond()),
+		// The COMMITTED block timestamp, never the wall clock. Every validator
+		// replays this block at a different moment; TIMESTAMP fed from the
+		// local clock gave the same transaction different environmental input
+		// on each node, so a contract branching on it could split state
+		// silently — the header commits no post-state root, so nothing would
+		// ever flag the divergence (QWID-2026-10). Replaying old blocks would
+		// also be unable to reconstruct the original state.
+		Time:        new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
 		Difficulty:  new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
 		BaseFee:     new(big.Int).SetInt64(int64(0)),
-		Random:      nil,
+		// Consensus-committed and replay-stable: the parent block hash from
+		// the header every validator already agreed on. Deterministic across
+		// nodes and across time, which is the property QWID-2026-10 demands of
+		// every environmental input; deliberately NOT node-local. It is of
+		// course miner-known — PREVRANDAO here is an anti-panic determinism
+		// value, not a randomness source; contracts needing randomness must
+		// use the RAND oracle.
+		Random:      randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
 	jumpTable := vm.GetGenericJumpTable()
@@ -735,10 +850,24 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 		Coinbase:    common.EmptyAddress(),
 		GasLimit:    uint64(common.MaxGasUsage),
 		BlockNumber: new(big.Int).SetInt64(bl.GetHeader().Height),
-		Time:        new(big.Int).SetInt64(common.GetCurrentTimeStampInSecond()),
+		// The COMMITTED block timestamp, never the wall clock. Every validator
+		// replays this block at a different moment; TIMESTAMP fed from the
+		// local clock gave the same transaction different environmental input
+		// on each node, so a contract branching on it could split state
+		// silently — the header commits no post-state root, so nothing would
+		// ever flag the divergence (QWID-2026-10). Replaying old blocks would
+		// also be unable to reconstruct the original state.
+		Time:        new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
 		Difficulty:  new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
 		BaseFee:     new(big.Int).SetInt64(int64(0)),
-		Random:      nil,
+		// Consensus-committed and replay-stable: the parent block hash from
+		// the header every validator already agreed on. Deterministic across
+		// nodes and across time, which is the property QWID-2026-10 demands of
+		// every environmental input; deliberately NOT node-local. It is of
+		// course miner-known — PREVRANDAO here is an anti-panic determinism
+		// value, not a randomness source; contracts needing randomness must
+		// use the RAND oracle.
+		Random:      randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
 	jumpTable := vm.GetGenericJumpTable()
@@ -769,10 +898,14 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	State.ResetTransient()
 
 	ret, leftOverGas, err = VM.StaticCall(vm.AccountRef(origin), contractAddr, input, uint64(common.MaxGasUsage))
-	// Convert hex to bytes
+	// Convert hex to bytes. The tracer output is normally well-formed hex, but
+	// this function sits on the block-application path (token metadata probes),
+	// so a decode failure must be an error the caller skips over — killing the
+	// process here would let one contract deployment stop the node.
 	dataBytes, err := hex.DecodeString(logger.Output)
 	if err != nil {
-		loggerMain.GetLogger().Fatal(err)
+		loggerMain.GetLogger().Println("view call: tracer output is not valid hex:", err)
+		return "", "", ret, address, leftOverGas, err
 	}
 
 	// Convert bytes to UTF-8

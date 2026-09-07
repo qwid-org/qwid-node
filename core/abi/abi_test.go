@@ -338,7 +338,7 @@ func ExampleJSON() {
 		panic(err)
 	}
 	addr := common.HexToVMAddress("0x0000000000000000000000000000000000000001")
-	out, err := abi.Pack("isBar", addr.ByteValue)
+	out, err := abi.Pack("isBar", addr)
 	if err != nil {
 		panic(err)
 	}

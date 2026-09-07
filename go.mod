@@ -2,6 +2,12 @@ module github.com/qwid-org/qwid-node
 
 go 1.23.6
 
+// Pin the build toolchain to a patched release (QWID-2026 audit): go1.25.13
+// carries the stdlib fixes for the 17 govulncheck-reported vulnerabilities. The
+// language floor stays at 1.23.6 (no source changes), while GOTOOLCHAIN=auto
+// builders compile with the patched standard library.
+toolchain go1.25.13
+
 require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/holiman/uint256 v1.3.2

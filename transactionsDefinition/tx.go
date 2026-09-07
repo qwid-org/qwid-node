@@ -145,11 +145,27 @@ func (TxData) GetFromBytes(data []byte) (TxData, []byte, error) {
 	md.OptData = opt
 
 	ma, left, err := common.BytesWithLenToBytes(left)
-	mainAddress := common.Address{}
-	err = mainAddress.Init(ma)
-	zeros = make([]byte, len(ma[1:]))
-	if err != nil && !bytes.Equal(ma[1:], zeros) {
+	if err != nil {
+		// Previously the decode error was overwritten by Init below and never
+		// checked, so a malformed length prefix left ma nil and the ma[1:]
+		// slice panicked (QWID-2026-03).
 		return TxData{}, nil, err
+	}
+	mainAddress := common.Address{}
+	initErr := mainAddress.Init(ma)
+	// The main-address field may legitimately be absent or all-zero (an
+	// unchanged/unset identity); in that case Init returns an error we tolerate.
+	// It is only a real error when the field actually carries a non-zero
+	// address body. The body is ma minus its leading primary-flag byte — and ma
+	// can be empty (attacker-chosen length 0), so strip the flag only when a
+	// byte is present rather than slicing ma[1:] unconditionally.
+	body := ma
+	if len(body) > 0 {
+		body = body[1:]
+	}
+	zeros = make([]byte, len(body))
+	if initErr != nil && !bytes.Equal(body, zeros) {
+		return TxData{}, nil, initErr
 	}
 	pk, left, err := common.BytesWithLenToBytes(left)
 	if err != nil {
@@ -205,21 +221,39 @@ func (TxData) GetFromBytes(data []byte) (TxData, []byte, error) {
 	md.MultiSignNumber = msn[0]
 
 	if len(left) > 0 {
-		lenAccMS := len(left) / 20
-		if int(md.MultiSignNumber) > lenAccMS {
-			return TxData{}, nil, fmt.Errorf("wrongly defined multisign account in transaction")
-		}
-		d := []byte{}
-		if lenAccMS > 0 {
-			md.MultiSignAddresses = make([][common.AddressLength]byte, lenAccMS)
-			for i := 0; i < lenAccMS; i++ {
-				d, left, err = common.BytesWithLenToBytes(left)
-				if err != nil {
-					return TxData{}, nil, err
-				}
-				copy(md.MultiSignAddresses[i][:], d)
+		// Parse each signer entry until the sub-buffer is empty, rather than
+		// pre-computing a count as len(left)/20. Every entry is a length-prefix
+		// (4 bytes) plus a 20-byte address = 24 bytes, so the old quotient
+		// over-counted from five entries up (120/20 = 6) and made every valid
+		// 5+-signer definition fail to decode (QWID-2026-06). Parsing to
+		// exhaustion consumes exactly the bytes the encoder wrote and decodes
+		// one-to-four-signer definitions byte-for-byte as before, so no node
+		// disagrees on any policy that exists today — the broken counts could
+		// never have been created.
+		var addrs [][common.AddressLength]byte
+		for len(left) > 0 {
+			var d []byte
+			d, left, err = common.BytesWithLenToBytes(left)
+			if err != nil {
+				return TxData{}, nil, err
 			}
+			if len(d) != common.AddressLength {
+				return TxData{}, nil, fmt.Errorf("multisign signer address must be %d bytes, got %d",
+					common.AddressLength, len(d))
+			}
+			// MultiSignNumber is a byte, so the address list cannot exceed 255.
+			if len(addrs) >= 255 {
+				return TxData{}, nil, fmt.Errorf("too many multisign signer addresses")
+			}
+			var a [common.AddressLength]byte
+			copy(a[:], d)
+			addrs = append(addrs, a)
 		}
+		if int(md.MultiSignNumber) > len(addrs) {
+			return TxData{}, nil, fmt.Errorf("multisign threshold %d exceeds the %d signer address(es)",
+				md.MultiSignNumber, len(addrs))
+		}
+		md.MultiSignAddresses = addrs
 	}
 
 	return md, leftBl, nil

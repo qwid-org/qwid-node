@@ -132,8 +132,14 @@ func TestLoadEscrowPoolRejectsInvalidSignature(t *testing.T) {
 	t.Cleanup(func() { verifyPersistedEscrow = saved })
 
 	assert.NoError(t, LoadEscrowPoolFromDB())
+	// An entry whose signature does not verify is NOT loaded into the active
+	// pool...
 	assert.False(t, PoolTxEscrow.HasTransaction(tx.GetHash().GetBytes()))
-	assert.False(t, transactionsDefinition.CheckFromDBPoolTx(common.EscrowPoolDBPrefix[:], tx.GetHash().GetBytes()))
+	// ...but it is QUARANTINED, not deleted: a signature failure after a voted
+	// scheme replacement is not corruption, and erasing it would lose a pending
+	// settlement that still-running nodes perform (QWID-2026-36). It stays in
+	// the DB so a restart under the correct scheme can verify and load it.
+	assert.True(t, transactionsDefinition.CheckFromDBPoolTx(common.EscrowPoolDBPrefix[:], tx.GetHash().GetBytes()))
 }
 
 // Pins the decision that reloading a persisted transaction does not apply the
