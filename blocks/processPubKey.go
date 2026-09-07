@@ -357,6 +357,39 @@ func UnregisterPubKeysAtHeight(height int64) {
 	}
 }
 
+// UnregisterPubKeysAboveHeight undoes, in a SINGLE journal sweep, every pubkey
+// registration recorded above target — the whole rewound range at once
+// (QWID-2026-07 annex). It replaces calling UnregisterPubKeysAtHeight once per
+// rewound block, which created a RocksDB iterator per block: on a deep rewind
+// (common on a slow node that keeps falling behind) that was thousands of
+// iterator allocations, almost all finding nothing, adding directly to the lag.
+// Registrations are rare, so one scan of the small journal prefix is far cheaper.
+func UnregisterPubKeysAboveHeight(target int64) {
+	keys, err := database.MainDB.LoadAllKeys(common.PubKeyRegistrationJournalDBPrefix[:])
+	if err != nil {
+		logger.GetLogger().Println("pubkey journal sweep failed:", err)
+		return
+	}
+	const keyLen = 2 + 8 + common.AddressLength
+	for _, k := range keys {
+		if len(k) != keyLen {
+			continue
+		}
+		if common.GetInt64FromByte(k[2:10]) <= target {
+			continue // registration at or below the rewind target stays canonical
+		}
+		var derived common.Address
+		copy(derived.ByteValue[:], k[10:keyLen])
+		mainB, gerr := database.MainDB.Get(k)
+		if gerr == nil && len(mainB) >= common.AddressLength {
+			var mainAddr common.Address
+			copy(mainAddr.ByteValue[:], mainB[:common.AddressLength])
+			unregisterPubKey(derived, mainAddr)
+		}
+		_ = database.MainDB.Delete(k)
+	}
+}
+
 // unregisterPubKey removes one key record and drops its derived address from the
 // identity's patricia trie (rebuilding the trie, or removing it entirely when the
 // identity has no keys left). Mirror of StorePubKey + StorePubKeyInPatriciaTrie.

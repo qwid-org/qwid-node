@@ -824,24 +824,38 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	}
 	tProcess = time.Since(phase)
 	phase = time.Now()
+	// Batch every transaction's three DB writes — confirmed-store, included-mark
+	// (QWID-2026-19) and pool-hash delete — into a SINGLE RocksDB write per block
+	// instead of ~3 individually-locked ops per transaction. For a full 5000-tx
+	// block that collapses ~15k locked cgo writes into one, which is what a weak
+	// node needs to keep up during sync (sync-perf). It is also more atomic: the
+	// whole block's tx-store either lands or does not.
+	heightBytes := common.GetByteInt64(newBlock.GetHeader().Height)
+	batch := database.NewBatch()
 	for _, h := range hashes {
-		tx, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], h.GetBytes())
-		if err != nil {
-			logger.GetLogger().Println(err)
+		hb := h.GetBytes()
+		poolKey := append(append([]byte{}, common.TransactionPoolHashesDBPrefix[:]...), hb...)
+		// Move the RAW stored bytes pool->confirmed. The transaction was already
+		// decoded and verified earlier in this apply (CheckBlockTransfers), and
+		// the stored form is exactly what a re-encode would produce, so decoding
+		// it again here (the old LoadFromDBPoolTx + GetBytes) is pure wasted CPU
+		// per transaction — costly on a weak node during sync (sync-perf).
+		txBytes, err := database.MainDB.Get(poolKey)
+		if err != nil || len(txBytes) == 0 {
+			logger.GetLogger().Printf("commit: transaction %x missing from pool DB: %v", hb, err)
 			continue
 		}
-		err = tx.StoreToDBPoolTx(common.TransactionDBPrefix[:])
-		if err != nil {
-			return err
-		}
-		// Record the real inclusion height so this transaction cannot be
-		// replayed into a later block (QWID-2026-19).
-		transactionsPool.MarkTxIncluded(h.GetBytes(), newBlock.GetHeader().Height)
-		transactionsPool.PoolsTx.RemoveTransactionByHash(h.GetBytes())
-		err = tx.RemoveFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:])
-		if err != nil {
-			logger.GetLogger().Println(err)
-		}
+		// Reproduce StoreToDBPoolTx(TransactionDBPrefix), MarkTxIncluded and
+		// RemoveFromDBPoolTx(TransactionPoolHashesDBPrefix) as batch operations.
+		// Fresh key slices (append onto []byte{}) so the 2-byte global prefixes
+		// are never mutated.
+		batch.Put(append(append([]byte{}, common.TransactionDBPrefix[:]...), hb...), txBytes)
+		batch.Put(append(append([]byte{}, common.IncludedTxDBPrefix[:]...), hb...), heightBytes)
+		batch.Delete(poolKey)
+		transactionsPool.PoolsTx.RemoveTransactionByHash(hb)
+	}
+	if err := database.MainDB.CommitBatch(batch); err != nil {
+		return err
 	}
 	tTxStore = time.Since(phase)
 	// Success: sweep any in-memory pool remnants of this block (the loop above

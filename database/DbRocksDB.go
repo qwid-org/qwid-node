@@ -167,6 +167,80 @@ func (d *BlockchainDB) Close() {
 	logger.GetLogger().Println("Database closed")
 }
 
+// Batch accumulates Put/Delete operations in memory (a RocksDB WriteBatch, with
+// NO DB lock held) and applies them all in ONE locked write via CommitBatch.
+// This is the batched-write path for the block-commit hot loop: instead of
+// thousands of individually-locked Put/Delete calls per block — each a cgo
+// crossing, a WriteOptions allocation and a WAL append — the whole block commits
+// in a single write, which is what lets a weak node keep up during sync.
+//
+// A Batch is owned by ONE goroutine and is not safe for concurrent use. Batching
+// is deliberately a caller-owned object, NOT a global "batched" flag on the DB:
+// during block apply other goroutines (the bx tx-receive stream) write to the DB
+// concurrently, so a single shared buffer would interleave their writes with the
+// block's, or flush a half-built block batch. A per-caller Batch keeps each
+// producer's writes isolated until it commits.
+type Batch struct {
+	wb *gorocksdb.WriteBatch
+}
+
+// NewBatch returns an empty in-memory write batch.
+func NewBatch() *Batch {
+	return &Batch{wb: gorocksdb.NewWriteBatch()}
+}
+
+// Put buffers a key=value write. RocksDB copies the key/value into the batch
+// immediately, so the caller may reuse the slices afterwards. No DB lock taken.
+func (b *Batch) Put(key, value []byte) {
+	b.wb.Put(key, value)
+}
+
+// Delete buffers a key deletion. No DB lock taken.
+func (b *Batch) Delete(key []byte) {
+	b.wb.Delete(key)
+}
+
+// Count reports how many operations are currently buffered.
+func (b *Batch) Count() int {
+	if b == nil || b.wb == nil {
+		return 0
+	}
+	return b.wb.Count()
+}
+
+// CommitBatch applies every buffered operation atomically in a single locked
+// write, then frees the batch (which must not be used afterwards). Committing a
+// nil or empty batch is a no-op. The RLock (not Lock) matches Put/Get/Delete:
+// it guards the db-handle lifecycle, not the contents — RocksDB serialises the
+// batch write internally.
+func (db *BlockchainDB) CommitBatch(b *Batch) error {
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if b == nil || b.wb == nil {
+		return nil
+	}
+	defer func() {
+		b.wb.Destroy()
+		b.wb = nil
+	}()
+	if b.wb.Count() == 0 {
+		return nil
+	}
+
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	if db.db == nil {
+		return fmt.Errorf("database is closed")
+	}
+
+	wo := gorocksdb.NewDefaultWriteOptions()
+	defer wo.Destroy()
+
+	return db.db.Write(wo, b.wb)
+}
+
 func (db *BlockchainDB) Put(k []byte, v []byte) error {
 	if db == nil {
 		return fmt.Errorf("database is nil")

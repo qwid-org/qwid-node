@@ -148,11 +148,10 @@ func RemoveBlockFromDB(height int64) error {
 			transactionsPool.UnmarkTxIncluded(th.GetBytes())
 		}
 	}
-	// Undo any public-key registrations this block newly made, so an orphaned
-	// branch's keys do not persist in the registry and shadow the canonical
-	// chain after a rewind (QWID-2026-07 annex). Keyed by height in the journal,
-	// so it does not depend on the block's transactions still being loadable.
-	UnregisterPubKeysAtHeight(height)
+	// NOTE: pubkey-registration rollback (QWID-2026-07 annex) is NOT done here
+	// per block — that created one RocksDB iterator per rewound block. The
+	// rewind driver (ResetAccountsAndBlocksSyncLocked) instead calls
+	// UnregisterPubKeysAboveHeight ONCE for the whole rewound range.
 	hb, err := database.MainDB.Get(append(common.BlockByHeightDBPrefix[:], bh...))
 	if err != nil {
 		return err
