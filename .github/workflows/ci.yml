@@ -27,10 +27,14 @@ jobs:
       - name: Install apt build dependencies
         run: |
           sudo apt-get update
+          # NOTE: deliberately NO libgflags-dev — if gflags is present RocksDB
+          # links it, but the project's CGO_LDFLAGS has no -lgflags, so the Go
+          # link would then fail with undefined gflags symbols. The core static
+          # library does not need gflags.
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config git \
             libssl-dev libzmq3-dev \
-            libsnappy-dev liblz4-dev libzstd-dev libbz2-dev zlib1g-dev libgflags-dev
+            libsnappy-dev liblz4-dev libzstd-dev libbz2-dev zlib1g-dev
 
       - name: Cache native deps (RocksDB + liboqs)
         id: cache-deps
@@ -46,10 +50,16 @@ jobs:
           mkdir -p "$DEPS_PREFIX"
 
           # --- RocksDB v10.2.1, static. PORTABLE=1 keeps the cached binary usable
-          # on any runner CPU (no -march=native). ---
+          # on any runner CPU (no -march=native). We copy the artifacts by hand
+          # into the (user-writable) prefix instead of `make install-static`,
+          # which targets /usr/local (needs sudo) and generates a pkg-config file
+          # with -march=native and -lgflags that we neither use nor want — the Go
+          # build links RocksDB via CGO_LDFLAGS, not pkg-config. ---
           git clone --depth=1 --branch "$ROCKSDB_VERSION" https://github.com/facebook/rocksdb.git
           make -C rocksdb PORTABLE=1 -j"$(nproc)" static_lib
-          make -C rocksdb install-static INSTALL_PATH="$DEPS_PREFIX"
+          mkdir -p "$DEPS_PREFIX/lib" "$DEPS_PREFIX/include"
+          cp rocksdb/librocksdb.a "$DEPS_PREFIX/lib/"
+          cp -r rocksdb/include/rocksdb "$DEPS_PREFIX/include/"
 
           # --- liboqs 0.16.0, shared. Installs liboqs.pc for `#cgo pkg-config: liboqs`. ---
           git clone --depth=1 --branch "$LIBOQS_VERSION" https://github.com/open-quantum-safe/liboqs.git
