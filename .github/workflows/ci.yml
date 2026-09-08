@@ -1,0 +1,107 @@
+name: CI
+
+# Builds the native dependencies (RocksDB v10.4.2 static, liboqs 0.13.0 shared)
+# and runs `go test` over the whole module EXCEPT the Qt-based commands
+# (github.com/therecipe/qt needs a full Qt build toolchain that is impractical in
+# CI). The native libs are cached, so only the first run pays the RocksDB compile.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+env:
+  DEPS_PREFIX: ${{ github.workspace }}/qwid-deps
+  ROCKSDB_VERSION: v10.4.2
+  LIBOQS_VERSION: "0.13.0"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install apt build dependencies
+        run: |
+          sudo apt-get update
+          # NOTE: deliberately NO libgflags-dev — if gflags is present RocksDB
+          # links it, but the project's CGO_LDFLAGS has no -lgflags, so the Go
+          # link would then fail with undefined gflags symbols. The core static
+          # library does not need gflags.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git \
+            libssl-dev libzmq3-dev \
+            libsnappy-dev liblz4-dev libzstd-dev libbz2-dev zlib1g-dev
+
+      - name: Cache native deps (RocksDB + liboqs)
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: qwid-deps-${{ runner.os }}-rocksdb-${{ env.ROCKSDB_VERSION }}-liboqs-${{ env.LIBOQS_VERSION }}
+
+      - name: Build RocksDB (static) + liboqs (shared)
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEPS_PREFIX"
+
+          # --- RocksDB v10.4.2, static. PORTABLE=1 keeps the cached binary usable
+          # on any runner CPU (no -march=native). We copy the artifacts by hand
+          # into the (user-writable) prefix instead of `make install-static`,
+          # which targets /usr/local (needs sudo) and generates a pkg-config file
+          # with -march=native and -lgflags that we neither use nor want — the Go
+          # build links RocksDB via CGO_LDFLAGS, not pkg-config. ---
+          git clone --depth=1 --branch "$ROCKSDB_VERSION" https://github.com/facebook/rocksdb.git
+          make -C rocksdb PORTABLE=1 -j"$(nproc)" static_lib
+          mkdir -p "$DEPS_PREFIX/lib" "$DEPS_PREFIX/include"
+          cp rocksdb/librocksdb.a "$DEPS_PREFIX/lib/"
+          cp -r rocksdb/include/rocksdb "$DEPS_PREFIX/include/"
+
+          # --- liboqs 0.13.0, shared. Installs liboqs.pc for `#cgo pkg-config: liboqs`. ---
+          git clone --depth=1 --branch "$LIBOQS_VERSION" https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -GNinja \
+            -DOQS_BUILD_ONLY_LIB=ON -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          ninja -C liboqs/build
+          ninja -C liboqs/build install
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.13'
+          cache: true
+
+      - name: Provision node config for tests
+        # common.init-style config loader reads ~/.qwid/.env (and node startup
+        # reads the genesis config) and calls logger.Fatal if absent, so the
+        # wallet/voting tests need a real node config present — same files the
+        # README tells an operator to copy.
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.qwid/genesis/config"
+          cp .qwid/.env "$HOME/.qwid/.env"
+          cp genesis/config/genesis_internal_tests.json "$HOME/.qwid/genesis/config/genesis.json"
+
+      - name: Build and test (excluding Qt commands)
+        env:
+          CGO_CFLAGS: "-isystem ${{ env.DEPS_PREFIX }}/include"
+          CGO_LDFLAGS: "-L${{ env.DEPS_PREFIX }}/lib -lrocksdb -lstdc++ -lm -lz -lsnappy -llz4 -lzstd -lbz2 -lpthread -ldl"
+          PKG_CONFIG_PATH: "${{ env.DEPS_PREFIX }}/lib/pkgconfig"
+          LD_LIBRARY_PATH: "${{ env.DEPS_PREFIX }}/lib"
+        run: |
+          set -euo pipefail
+          go version
+          # Exclude every package whose (transitive) deps include therecipe/qt —
+          # those need the Qt toolchain, which CI does not provide.
+          go list -f '{{.ImportPath}}{{range .Deps}} {{.}}{{end}}' ./... \
+            | grep -v 'github.com/therecipe/qt' \
+            | awk '{print $1}' > ci-pkgs.txt
+          echo "Testing $(wc -l < ci-pkgs.txt) packages (Qt packages excluded):"
+          # shellcheck disable=SC2046
+          go build $(cat ci-pkgs.txt)
+          go vet $(cat ci-pkgs.txt)
+          go test -count=1 $(cat ci-pkgs.txt)
