@@ -190,6 +190,25 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 	tp.rwmutex.Unlock()
 	return true
 }
+// Clear drops every pending transaction and the per-sender spend accounting,
+// keeping the ban list. It is used when the active signature scheme changes:
+// every pooled transaction was verified at admission under the PREVIOUS scheme
+// and is invalid under the new one, so including any of them would build blocks
+// that every up-to-date node rejects as a scheme mismatch (incident 2026-09-08).
+// New transactions, signed under the new scheme, re-enter via gossip. Only the
+// main unconfirmed pool is cleared this way — the escrow/multisig pools hold
+// already-included transactions awaiting settlement and must NOT be dropped.
+func (tp *TransactionPool) Clear() int {
+	tp.rwmutex.Lock()
+	defer tp.rwmutex.Unlock()
+	n := len(tp.transactions)
+	tp.transactions = make(map[[common.HashLength]byte]transactionsDefinition.Transaction)
+	tp.items = map[[common.HashLength]byte]*Item{}
+	tp.priorityQueue = make(PriorityQueue, 0)
+	tp.pendingBySender = make(map[[common.AddressLength]byte]int64)
+	return n
+}
+
 func (tp *TransactionPool) HasTransaction(hash []byte) bool {
 	var h [common.HashLength]byte
 	copy(h[:], hash)

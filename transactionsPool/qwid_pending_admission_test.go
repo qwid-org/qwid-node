@@ -66,3 +66,32 @@ func TestCumulativeAdmissionCapsUnderfundedSender(t *testing.T) {
 		t.Fatalf("PendingSpend = %d, want %d", got, cost)
 	}
 }
+
+// TestClearDropsAllPendingAndAccounting verifies the scheme-change pool flush:
+// Clear removes every pending transaction and zeroes the per-sender accounting,
+// so no transaction verified under the previous scheme can still be included
+// (incident 2026-09-08).
+func TestClearDropsAllPendingAndAccounting(t *testing.T) {
+	pool := NewTransactionPool(common.MaxTransactionInPool, 0)
+	sAddr := common.EmptyAddress()
+	sender := sAddr.GetBytes()
+
+	for i := 0; i < 5; i++ {
+		tx := specTx(byte(i+1), 5)
+		pool.AddTransaction(tx, tx.Hash)
+	}
+	if got := pool.PendingSpend(sender); got == 0 {
+		t.Fatal("precondition: expected non-zero pending spend before Clear")
+	}
+
+	n := pool.Clear()
+	if n != 5 {
+		t.Fatalf("Clear returned %d, want 5", n)
+	}
+	if got := pool.PendingSpend(sender); got != 0 {
+		t.Fatalf("after Clear PendingSpend = %d, want 0", got)
+	}
+	if got := len(pool.PeekTransactions(100, 0)); got != 0 {
+		t.Fatalf("after Clear pool still returns %d transactions, want 0", got)
+	}
+}
