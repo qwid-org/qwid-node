@@ -35,7 +35,7 @@ Install OQS library:
 
     git clone https://github.com/open-quantum-safe/liboqs.git
     cd liboqs/
-    git checkout 0.16.0
+    git checkout 0.13.0
     
 Compile OQS with `-DBUILD_SHARED_LIBS=ON` and install
     
@@ -299,6 +299,6 @@ If you don't have Qt5 installed, skip the Qt-based commands (`cmd/gui`,
 
 Continuous integration (`.github/workflows/ci.yml`) runs `go build`, `go vet`
 and `go test` on every push and pull request to `main` and `dev`. It builds
-RocksDB v10.4.2 (static) and liboqs 0.16.0 (shared) from source into a cached
+RocksDB v10.4.2 (static) and liboqs 0.13.0 (shared) from source into a cached
 prefix, sets the matching `CGO_CFLAGS`/`CGO_LDFLAGS`/`PKG_CONFIG_PATH`, and
 excludes the Qt commands.

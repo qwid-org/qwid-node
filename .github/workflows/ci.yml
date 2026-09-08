@@ -1,6 +1,6 @@
 name: CI
 
-# Builds the native dependencies (RocksDB v10.4.2 static, liboqs 0.16.0 shared)
+# Builds the native dependencies (RocksDB v10.4.2 static, liboqs 0.13.0 shared)
 # and runs `go test` over the whole module EXCEPT the Qt-based commands
 # (github.com/therecipe/qt needs a full Qt build toolchain that is impractical in
 # CI). The native libs are cached, so only the first run pays the RocksDB compile.
@@ -15,7 +15,7 @@ on:
 env:
   DEPS_PREFIX: ${{ github.workspace }}/qwid-deps
   ROCKSDB_VERSION: v10.4.2
-  LIBOQS_VERSION: "0.16.0"
+  LIBOQS_VERSION: "0.13.0"
 
 jobs:
   test:
@@ -61,7 +61,7 @@ jobs:
           cp rocksdb/librocksdb.a "$DEPS_PREFIX/lib/"
           cp -r rocksdb/include/rocksdb "$DEPS_PREFIX/include/"
 
-          # --- liboqs 0.16.0, shared. Installs liboqs.pc for `#cgo pkg-config: liboqs`. ---
+          # --- liboqs 0.13.0, shared. Installs liboqs.pc for `#cgo pkg-config: liboqs`. ---
           git clone --depth=1 --branch "$LIBOQS_VERSION" https://github.com/open-quantum-safe/liboqs.git
           cmake -S liboqs -B liboqs/build -GNinja \
             -DOQS_BUILD_ONLY_LIB=ON -DBUILD_SHARED_LIBS=ON \
