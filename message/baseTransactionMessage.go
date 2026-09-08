@@ -36,6 +36,7 @@ func (a TransactionsMessage) GetTransactionsFromBytes(sigName, sigName2 string, 
 	// letting a single unhealthy peer own the log.
 	var tooShort, failedVerify int
 	var firstErr error
+	firstFailFacts := ""
 	for _, topic := range validTopics {
 		if _, ok := a.TransactionsBytes[topic]; ok {
 			for _, tb := range a.TransactionsBytes[topic] {
@@ -58,6 +59,22 @@ func (a TransactionsMessage) GetTransactionsFromBytes(sigName, sigName2 string, 
 					txn[topic] = append(txn[topic], at)
 				} else {
 					failedVerify++
+					if firstFailFacts == "" {
+						// Capture WHAT failed, once per message: wallet.Verify
+						// rejects silently when the signature's slot is paused
+						// and no registration exemption applies, and the
+						// per-sender failure logs are throttled — leaving the
+						// operator with an anonymous "1 unverifiable" while
+						// debugging a registration (incident 2026-09-08).
+						sigSlot := "?"
+						if sb := at.GetSignature().GetBytes(); len(sb) > 0 {
+							sigSlot = map[bool]string{true: "primary", false: "secondary"}[sb[0] == 0]
+						}
+						sender := at.GetSenderAddress()
+						firstFailFacts = fmt.Sprintf("; first unverifiable: hash=%s sender=%s amount=%d pubkeyBytes=%d signedWith=%s slot (paused: primary=%v secondary=%v)",
+							common.HexPrefix(at.GetHash().GetHex(), 8), sender.GetHex(),
+							at.TxData.Amount, len(at.TxData.GetPubKey().GetBytes()), sigSlot, isPaused, isPaused2)
+					}
 				}
 			}
 		}
@@ -74,8 +91,8 @@ func (a TransactionsMessage) GetTransactionsFromBytes(sigName, sigName2 string, 
 			if tooShort > 0 {
 				detail = fmt.Sprintf("; first decode error: %v", firstErr)
 			}
-			logger.GetLogger().Printf("warning: dropped %d undecodable and %d unverifiable transaction(s) from this message%s%s",
-				tooShort, failedVerify, detail, dropSummarySuppressed(skipped))
+			logger.GetLogger().Printf("warning: dropped %d undecodable and %d unverifiable transaction(s) from this message%s%s%s",
+				tooShort, failedVerify, detail, firstFailFacts, dropSummarySuppressed(skipped))
 		}
 	}
 
