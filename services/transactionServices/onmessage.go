@@ -223,8 +223,8 @@ func OnMessage(addr [4]byte, m []byte) {
 		if belowMinStaking > 0 {
 			logger.GetLogger().Printf("rejected %d transfer(s) to a delegated account below the minimum staking amount", belowMinStaking)
 		}
-		if unpayable > 0 {
-			logger.GetLogger().Printf("rejected %d transaction(s) at admission: sender has insufficient funds (fee+amount)", unpayable)
+		if total := noteUnpayableDropped(unpayable); total > 0 {
+			logger.GetLogger().Printf("rejected %d transaction(s) at admission over the last ~%s: sender has insufficient funds (fee+amount)", total, unpayableLogPeriod)
 		}
 	case "bx":
 		// transaction in sync - during sync, skip signature verification because
@@ -503,4 +503,34 @@ func notePoolFullDrop() int {
 	n := poolFullDrops
 	poolFullDrops = 0
 	return n
+}
+
+// unpayableDrops accumulates transactions rejected at admission for insufficient
+// funds; noteUnpayableDropped adds this message's count and returns the running
+// total only when the throttle period has elapsed (else 0). A transactional
+// DDoS floods thousands of unpayable txs per second, one per gossip message, so
+// logging per rejection floods the log — the whole point of dropping them was to
+// stay quiet under the flood.
+var (
+	unpayableMutex     sync.Mutex
+	unpayableDrops     int
+	unpayableLastLog   time.Time
+	unpayableLogPeriod = 10 * time.Second
+)
+
+func noteUnpayableDropped(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	unpayableMutex.Lock()
+	defer unpayableMutex.Unlock()
+	unpayableDrops += n
+	now := time.Now()
+	if !unpayableLastLog.IsZero() && now.Sub(unpayableLastLog) < unpayableLogPeriod {
+		return 0
+	}
+	unpayableLastLog = now
+	total := unpayableDrops
+	unpayableDrops = 0
+	return total
 }
