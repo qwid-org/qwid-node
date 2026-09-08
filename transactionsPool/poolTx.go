@@ -57,7 +57,52 @@ type TransactionPool struct {
 	priorityQueue      PriorityQueue
 	maxTransactions    int
 	typePool           uint8 // 0 - standard Tx, 1 - Escrow/delayed, 2 - MultiSign
-	rwmutex            sync.RWMutex
+	// pendingBySender is the sum of (fee+amount) of every pooled transaction per
+	// sender. Admission uses it for the CUMULATIVE affordability check: a sender
+	// with 11 QWD must not be able to pool thousands of individually-affordable
+	// transactions that together need far more than its balance — that flood
+	// filled the pool with junk that could never all be included and stalled
+	// block production (incident 2026-09-08). Maintained under rwmutex on every
+	// add / evict / remove.
+	pendingBySender map[[common.AddressLength]byte]int64
+	rwmutex         sync.RWMutex
+}
+
+// txSpend is the balance a pooled transaction commits from its sender:
+// fee + amount, matching CheckBlockTransfers' per-transaction debit.
+func txSpend(tx transactionsDefinition.Transaction) int64 {
+	fee, err := tx.CalcFee()
+	if err != nil {
+		return 0
+	}
+	return fee + tx.TxData.Amount
+}
+
+// addPendingLocked / subPendingLocked keep pendingBySender in step with the
+// pool contents. Both assume tp.rwmutex is already held.
+func (tp *TransactionPool) addPendingLocked(tx transactionsDefinition.Transaction) {
+	sk := tx.GetSenderAddress()
+	tp.pendingBySender[sk.ByteValue] += txSpend(tx)
+}
+
+func (tp *TransactionPool) subPendingLocked(tx transactionsDefinition.Transaction) {
+	sk := tx.GetSenderAddress()
+	k := sk.ByteValue
+	tp.pendingBySender[k] -= txSpend(tx)
+	if tp.pendingBySender[k] <= 0 {
+		delete(tp.pendingBySender, k)
+	}
+}
+
+// PendingSpend returns the total (fee+amount) of a sender's pooled transactions.
+// Admission adds the candidate's cost to this and rejects if the sum exceeds the
+// sender's confirmed balance, so no sender can pool more than it can pay for.
+func (tp *TransactionPool) PendingSpend(sender []byte) int64 {
+	var k [common.AddressLength]byte
+	copy(k[:], sender)
+	tp.rwmutex.RLock()
+	defer tp.rwmutex.RUnlock()
+	return tp.pendingBySender[k]
 }
 
 func NewTransactionPool(maxTransactions int, typePool uint8) *TransactionPool {
@@ -66,6 +111,7 @@ func NewTransactionPool(maxTransactions int, typePool uint8) *TransactionPool {
 		bannedTransactions: make(map[[common.HashLength]byte]int),
 		priorityQueue:      make(PriorityQueue, 0),
 		items:              map[[common.HashLength]byte]*Item{},
+		pendingBySender:    make(map[[common.AddressLength]byte]int64),
 		typePool:           typePool,
 		maxTransactions:    maxTransactions,
 	}
@@ -89,6 +135,7 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 	}
 	if _, exists := tp.transactions[hash]; !exists {
 		tp.transactions[hash] = tx
+		tp.addPendingLocked(tx)
 		item := &Item{}
 		if tp.typePool == uint8(0) {
 			item = NewItem(tx, tx.GetGasPrice())
@@ -118,6 +165,7 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 			// for the escrow/multisig pools never evict at all — refuse the new
 			// entry so no pending settlement is ever lost.
 			if tp.typePool != 0 {
+				tp.subPendingLocked(tx) // undo the add above; this entry is refused
 				heap.Remove(&tp.priorityQueue, item.index)
 				delete(tp.transactions, hash)
 				delete(tp.items, hash)
@@ -132,6 +180,9 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 				}
 			}
 			removed := heap.Remove(&tp.priorityQueue, minIdx).(*Item)
+			if evTx, ok := tp.transactions[removed.value]; ok {
+				tp.subPendingLocked(evTx)
+			}
 			delete(tp.transactions, removed.value)
 			delete(tp.items, removed.value)
 		}
@@ -244,6 +295,9 @@ func (tp *TransactionPool) RemoveTransactionByHash(hash []byte) {
 	if item, exists := tp.items[h]; exists {
 		if item.index >= 0 {
 			heap.Remove(&tp.priorityQueue, item.index)
+		}
+		if tx, ok := tp.transactions[h]; ok {
+			tp.subPendingLocked(tx)
 		}
 		delete(tp.transactions, h)
 		delete(tp.items, h)

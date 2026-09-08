@@ -123,6 +123,7 @@ func OnMessage(addr [4]byte, m []byte) {
 			return
 		}
 		belowMinStaking := 0
+		unpayable := 0
 		//logger.GetLogger().Println("get tx from ", addr[:])
 		// need to check transactions
 		for _, v := range txn {
@@ -173,6 +174,33 @@ func OnMessage(addr [4]byte, m []byte) {
 						continue
 					}
 				}
+				// DDoS defense: reject an unpayable transaction at pool ADMISSION
+				// so a flood of insufficient-funds txs from one address can never
+				// fill the pool and starve good transactions. Balance is checked
+				// against confirmed state (fee+amount, matching CheckBlockTransfers'
+				// per-tx debit); cumulative overspend across a sender's own pending
+				// txs is still caught at block build. Counted, not logged per-tx —
+				// a 1000 TPS flood must not turn into 1000 log lines/s in the
+				// receive loop (which is also block production).
+				fee, ferr := t.CalcFee()
+				if ferr != nil {
+					unpayable++
+					continue
+				}
+				senderAddr := t.GetSenderAddress()
+				sacc, sok := account.GetAccountByAddressBytes(senderAddr.GetBytes())
+				// CUMULATIVE affordability: the sender's already-pooled spend plus
+				// this transaction's fee+amount must fit its confirmed balance.
+				// Checking a single tx against the balance is not enough — a
+				// sender with 11 QWD could otherwise pool thousands of
+				// individually-affordable txs that together need ~25k QWD, none of
+				// which the block can include, stalling production (incident
+				// 2026-09-08).
+				cost := fee + t.TxData.Amount
+				if !sok || transactionsPool.PoolsTx.PendingSpend(senderAddr.GetBytes())+cost > sacc.Balance {
+					unpayable++
+					continue
+				}
 				isAdded := transactionsPool.PoolsTx.AddTransaction(t, t.Hash)
 				// }
 				if isAdded {
@@ -202,6 +230,9 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 		if belowMinStaking > 0 {
 			logger.GetLogger().Printf("rejected %d transfer(s) to a delegated account below the minimum staking amount", belowMinStaking)
+		}
+		if total := noteUnpayableDropped(unpayable); total > 0 {
+			logger.GetLogger().Printf("rejected %d transaction(s) at admission over the last ~%s: sender has insufficient funds (fee+amount)", total, unpayableLogPeriod)
 		}
 	case "bx":
 		// transaction in sync - during sync, skip signature verification because
@@ -480,4 +511,34 @@ func notePoolFullDrop() int {
 	n := poolFullDrops
 	poolFullDrops = 0
 	return n
+}
+
+// unpayableDrops accumulates transactions rejected at admission for insufficient
+// funds; noteUnpayableDropped adds this message's count and returns the running
+// total only when the throttle period has elapsed (else 0). A transactional
+// DDoS floods thousands of unpayable txs per second, one per gossip message, so
+// logging per rejection floods the log — the whole point of dropping them was to
+// stay quiet under the flood.
+var (
+	unpayableMutex     sync.Mutex
+	unpayableDrops     int
+	unpayableLastLog   time.Time
+	unpayableLogPeriod = 10 * time.Second
+)
+
+func noteUnpayableDropped(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	unpayableMutex.Lock()
+	defer unpayableMutex.Unlock()
+	unpayableDrops += n
+	now := time.Now()
+	if !unpayableLastLog.IsZero() && now.Sub(unpayableLastLog) < unpayableLogPeriod {
+		return 0
+	}
+	unpayableLastLog = now
+	total := unpayableDrops
+	unpayableDrops = 0
+	return total
 }
