@@ -116,7 +116,7 @@ func SampleTransaction(w *wallet.Wallet) transactionsDefinition.Transaction {
 	defer mutex.Unlock()
 	sender := w.MainAddress
 	recv := common.Address{}
-	br := common.Hex2Bytes("03153ada3ad1bddca0a1f8e8fec28a3fe1635c21")
+	br := common.Hex2Bytes("265b58a9f02dd71108e3a81e9312bb982db84426")
 	//br := rand.RandomBytes(20)
 	err := recv.Init(append([]byte{0}, br...))
 	if err != nil {
