@@ -189,7 +189,15 @@ func OnMessage(addr [4]byte, m []byte) {
 				}
 				senderAddr := t.GetSenderAddress()
 				sacc, sok := account.GetAccountByAddressBytes(senderAddr.GetBytes())
-				if !sok || sacc.Balance < fee+t.TxData.Amount {
+				// CUMULATIVE affordability: the sender's already-pooled spend plus
+				// this transaction's fee+amount must fit its confirmed balance.
+				// Checking a single tx against the balance is not enough — a
+				// sender with 11 QWD could otherwise pool thousands of
+				// individually-affordable txs that together need ~25k QWD, none of
+				// which the block can include, stalling production (incident
+				// 2026-09-08).
+				cost := fee + t.TxData.Amount
+				if !sok || transactionsPool.PoolsTx.PendingSpend(senderAddr.GetBytes())+cost > sacc.Balance {
 					unpayable++
 					continue
 				}
