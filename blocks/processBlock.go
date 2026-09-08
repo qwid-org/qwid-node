@@ -12,6 +12,7 @@ import (
 	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/oracles"
+	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
 	"github.com/qwid-org/qwid-node/voting"
@@ -230,6 +231,22 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 			if shouldCheck && enc1.IsPaused == true && enc1.SigName == common.SigName() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, true, newBlock.BaseBlock.BaseHeader.Encryption1[:]) {
 				return nil, fmt.Errorf("voting pausing check fails, 1: not enough staked votes back pausing %q at height %d", enc1.SigName, blockHeight)
 			}
+			// Pausing the live primary makes the CURRENT SECONDARY the active
+			// scheme. Refuse it unless a key for that secondary is already
+			// registered for this block's operator. Otherwise the node would owe
+			// every following block a signature under a scheme whose key no node
+			// can verify, while the paused primary's signatures are rejected too
+			// (wallet.Verify accepts only the non-paused slot) — a permanent
+			// deadlock in which the new key can never even be registered
+			// (incident 2026-09-08). Register the spare while the primary is live,
+			// then pause. Skipped during sync (shouldCheck false).
+			if shouldCheck && enc1.IsPaused && !common.IsPaused() && enc1.SigName == common.SigName() {
+				op := newBlock.GetHeader().OperatorAccount
+				if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, false, common.PubKeyLength2(false)); kerr != nil {
+					return nil, fmt.Errorf("refusing to pause primary %q: the secondary scheme %q that becomes active has no registered key for operator %s — register it first (while the primary is live), then pause, to avoid the unregistered-active-scheme deadlock",
+						common.SigName(), common.SigName2(), op.GetHex())
+				}
+			}
 			if enc1.SigName == common.SigName2() {
 				return nil, fmt.Errorf("cannot exist 2 the same ecnryptions schemes, 1")
 			}
@@ -262,6 +279,17 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 			}
 			if shouldCheck && enc2.IsPaused == true && enc2.SigName == common.SigName2() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, false, newBlock.BaseBlock.BaseHeader.Encryption2[:]) {
 				return nil, fmt.Errorf("voting pausing check fails, 2")
+			}
+			// Symmetric to the primary case: pausing the live secondary makes the
+			// PRIMARY the active scheme, so refuse it unless the operator has a
+			// registered primary key (avoids the unregistered-active-scheme
+			// deadlock; incident 2026-09-08).
+			if shouldCheck && enc2.IsPaused && !common.IsPaused2() && enc2.SigName == common.SigName2() {
+				op := newBlock.GetHeader().OperatorAccount
+				if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, true, common.PubKeyLength(false)); kerr != nil {
+					return nil, fmt.Errorf("refusing to pause secondary %q: the primary scheme %q that becomes active has no registered key for operator %s — register it first, then pause",
+						common.SigName2(), common.SigName(), op.GetHex())
+				}
 			}
 			if enc2.SigName == common.SigName() {
 				return nil, fmt.Errorf("cannot exist 2 the same ecnryptions schemes, 2")
