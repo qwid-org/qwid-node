@@ -263,11 +263,16 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	pk := common.PubKey{}
 	primary := req.UsePrimaryEncryption
 	if req.IncludePubKey {
-		if primary {
+		registerPrimary := primary
+		if registerPrimary {
 			pk = wl.Account1.PublicKey
 		} else {
 			pk = wl.Account2.PublicKey
 		}
+		// A registration must be signed by a key Verify can check: the enclosed
+		// key itself for a bootstrap, a REGISTERED key otherwise (incident
+		// 2026-09-08; see wallet.RegistrationSigningPrimary).
+		primary = registrationSignPrimaryFor(wl.MainAddress, registerPrimary, primary)
 	}
 
 	txd := transactionsDefinition.TxData{

@@ -229,13 +229,16 @@ func ShowSendPage() *widgets.QTabWidget {
 
 		pk := common.PubKey{}
 		if pubkeyInclude.IsChecked() {
-			if primaryChb.IsChecked() {
+			registerPrimary := primaryChb.IsChecked()
+			if registerPrimary {
 				pk = MainWallet.Account1.PublicKey
-				primary = true
 			} else {
 				pk = MainWallet.Account2.PublicKey
-				primary = false
 			}
+			// A registration must be signed by a key Verify can check: the
+			// enclosed key itself for a bootstrap, a REGISTERED key otherwise
+			// (incident 2026-09-08; wallet.RegistrationSigningPrimary).
+			primary = registrationSignPrimaryGUI(registerPrimary, registerPrimary)
 		} else {
 			if primaryChb.IsChecked() {
 				primary = true

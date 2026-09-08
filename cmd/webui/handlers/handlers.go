@@ -678,6 +678,12 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
 			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
 			len(pk.GetBytes()))
+		// A registration must be signed by a key Verify can check: the enclosed
+		// key itself for a bootstrap, a REGISTERED key otherwise. Signing with
+		// the active scheme's key while it is not yet registered produced the
+		// unverifiable "signed with MAYO-2 but sender has no registered MAYO-2
+		// key" rejection (incident 2026-09-08).
+		signPrimary = registrationSignPrimary(registerPrimary, signPrimary)
 	}
 
 	// Build transaction
@@ -954,6 +960,8 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
 			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
 			len(pk.GetBytes()))
+		// Sign with a key Verify can check (see the Send handler; incident 2026-09-08).
+		signPrimary = registrationSignPrimary(registerPrimary, signPrimary)
 	}
 
 	// Build transaction
@@ -1353,11 +1361,14 @@ func Trade(w http.ResponseWriter, r *http.Request) {
 // A node that cannot be asked is treated as "already registered", so a failed
 // query cannot silently rewrite which key the operator is sending; the
 // transaction is then judged by consensus, as it would have been anyway.
-func identityHasRegisteredKey() bool {
+// registeredSlots asks the node (PUBA) which slots hold a registered key of the
+// CURRENT scheme for this wallet's identity. ok=false means the node could not
+// answer; callers should then fall back to their defaults.
+func registeredSlots() (hasPrimary, hasSecondary, ok bool) {
 	reply := clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...)))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		logger.GetLogger().Println("could not ask the node which keys are registered; assuming the identity is known")
-		return true
+		return false, false, false
 	}
 	var resp struct {
 		HasPrimary   bool `json:"hasPrimary"`
@@ -1365,9 +1376,35 @@ func identityHasRegisteredKey() bool {
 	}
 	if err := json.Unmarshal(reply, &resp); err != nil {
 		logger.GetLogger().Println("could not read the registered-key reply; assuming the identity is known:", err)
-		return true
+		return false, false, false
 	}
-	return resp.HasPrimary || resp.HasSecondary
+	return resp.HasPrimary, resp.HasSecondary, true
+}
+
+// registrationSignPrimary picks the slot that must SIGN a key-carrying
+// registration transaction (wallet.RegistrationSigningPrimary rule): the
+// enclosed key itself when nothing is registered (bootstrap), a registered
+// key otherwise. Falls back to defaultPrimary when the node cannot answer.
+func registrationSignPrimary(registerPrimary, defaultPrimary bool) bool {
+	hasP, hasS, ok := registeredSlots()
+	if !ok {
+		return defaultPrimary
+	}
+	chosen := wallet.RegistrationSigningPrimary(hasP, hasS, registerPrimary, defaultPrimary)
+	if chosen != defaultPrimary {
+		logger.GetLogger().Printf("registration transaction will be signed with the %s key (registered: primary=%v secondary=%v) instead of the default %s",
+			map[bool]string{true: "primary", false: "secondary"}[chosen], hasP, hasS,
+			map[bool]string{true: "primary", false: "secondary"}[defaultPrimary])
+	}
+	return chosen
+}
+
+func identityHasRegisteredKey() bool {
+	hasP, hasS, ok := registeredSlots()
+	if !ok {
+		return true // could not ask; assume known (previous behaviour)
+	}
+	return hasP || hasS
 }
 
 func GetPubKeyInfo(w http.ResponseWriter, r *http.Request) {
