@@ -684,6 +684,14 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		// unverifiable "signed with MAYO-2 but sender has no registered MAYO-2
 		// key" rejection (incident 2026-09-08).
 		signPrimary = registrationSignPrimary(registerPrimary, signPrimary)
+		// When the signing slot's scheme is PAUSED, consensus admits the
+		// registration only as a PURE one (Amount==0) — the pause exemptions
+		// in Transaction.Verify are scoped to that. Reject loudly here instead
+		// of letting the node drop the transaction silently.
+		if am != 0 && ((signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())) {
+			jsonError(w, "Registering a key while its signing scheme is paused must be a pure registration: set the amount to 0 and send again (funds can be moved after the key is registered).", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Build transaction
@@ -962,6 +970,13 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 			len(pk.GetBytes()))
 		// Sign with a key Verify can check (see the Send handler; incident 2026-09-08).
 		signPrimary = registrationSignPrimary(registerPrimary, signPrimary)
+		// A paused signing slot admits only a PURE registration (Amount==0),
+		// and a staking transaction always moves funds — so this combination
+		// can never verify. Point the operator at the working flow.
+		if (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2()) {
+			jsonError(w, "This wallet's key must be registered before staking while its signing scheme is paused: use the Send form with 'include public key' and amount 0 first, then stake.", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Build transaction
