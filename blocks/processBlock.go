@@ -309,6 +309,16 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	// (QWID-2026-11). Checked during BOTH passes — verification rejects the
 	// block before any state is touched.
 	totalGas := int64(0)
+	// badTxErr records the first "bad transaction" (unpayable / no-account /
+	// malformed-multisig) found in the block. Such transactions are dropped and
+	// BANNED from the pool as they are found, but scanning CONTINUES so the whole
+	// pool is purged of them in ONE pass — otherwise a transactional DDoS (a
+	// flood of insufficient-funds txs) drains one-per-block and stalls production
+	// for hours (incident 2026-09-08). The block that contained them is still
+	// rejected (badTxErr returned after the loop): the validity verdict is
+	// unchanged, only pool hygiene improves, so the next production attempt builds
+	// a clean block from the surviving good transactions.
+	var badTxErr error
 	// Name the pass. This function runs twice for every block — once to verify
 	// it and once to apply it — and the two lines were identical, so a healthy
 	// block looked like it was being processed twice.
@@ -431,29 +441,48 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 		}
 		acc, exist := account.GetAccountByAddressBytes(address.GetBytes())
 		if !exist || !bytes.Equal(acc.Address[:], address.GetBytes()) {
-			// remove bad transaction from pool
+			// Sender account does not exist: drop+ban and keep scanning so the
+			// whole flood is purged in one pass (see badTxErr).
 			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
-			return 0, 0, fmt.Errorf("no account found in check block transafer: CheckBlockTransfers")
+			if badTxErr == nil {
+				badTxErr = fmt.Errorf("no account found in check block transafer: CheckBlockTransfers")
+			}
+			continue
 		}
 		if bytes.Equal(poolTx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false && (poolTx.TxData.Amount > 0 || len(poolTx.TxData.OptData) > 0 || poolTx.TxData.LockedAmount > 0 || poolTx.TxData.MultiSignNumber > 0) {
 			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
-			return 0, 0, fmt.Errorf("transaction which confirms in multi signature account should have amount == 0, OptData = nil, LockedAmount = 0, MultiSignNumber = 0")
+			if badTxErr == nil {
+				badTxErr = fmt.Errorf("transaction which confirms in multi signature account should have amount == 0, OptData = nil, LockedAmount = 0, MultiSignNumber = 0")
+			}
+			continue
 		}
 
-		if _, ok := accounts[acc.Address]; ok {
-			acc = accounts[acc.Address]
-			acc.Balance -= total_amount
-			accounts[acc.Address] = acc
-		} else {
-			acc.Balance -= total_amount
-			accounts[acc.Address] = acc
+		// Running in-block balance for this sender.
+		cur := acc
+		if a, ok := accounts[acc.Address]; ok {
+			cur = a
 		}
-		if acc.Balance < 0 {
-			// remove bad transaction from pool
+		if cur.Balance-total_amount < 0 {
+			// Unpayable — a transactional-DDoS transaction whose sender lacks the
+			// funds. Drop+ban it and SKIP WITHOUT debiting, so other transactions
+			// from the same sender are still judged against the true balance.
+			// Keep scanning to purge every unpayable tx this pass (see badTxErr).
 			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
-			return 0, 0, fmt.Errorf("not enough funds on account: CheckBlockTransfers")
+			if badTxErr == nil {
+				badTxErr = fmt.Errorf("not enough funds on account: CheckBlockTransfers")
+			}
+			continue
 		}
+		cur.Balance -= total_amount
+		accounts[acc.Address] = cur
 
+	}
+	// Any bad transaction found above makes THIS block invalid (unchanged
+	// verdict), but the pool has now been purged+banned of ALL of them in this
+	// single pass, so the next production attempt builds a clean block instead of
+	// re-selecting the same flood (stall incident 2026-09-08).
+	if badTxErr != nil {
+		return 0, 0, badTxErr
 	}
 	reward := account.GetReward(lastSupply)
 
