@@ -253,6 +253,7 @@ func OnMessage(addr [4]byte, m []byte) {
 		undecodable := 0
 		droppedCount := 0
 		storeFailures := 0
+		storedUnverified := 0
 		var firstDecodeErr error
 		var firstDropReason string
 		var firstStoreErr error
@@ -319,13 +320,31 @@ func OnMessage(addr [4]byte, m []byte) {
 						}
 					}
 					if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
-						resMutex.Lock()
-						droppedCount++
-						if firstDropReason == "" {
-							firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+						// During an ACTIVE sync, do not drop: this verification
+						// runs under the node's CURRENT height's scheme config
+						// and key registry, while the transaction is historical
+						// — e.g. a key-registration authorized by a key whose
+						// own registration this node has not applied yet, or a
+						// tx signed under a since-changed scheme. Dropping it
+						// stalled sync forever at the block that contains it
+						// ("NOT FOUND in any DB" loop, incident 2026-09-08).
+						// Storing is safe: transactions are hash-addressed (a
+						// forged body changes the hash), and the block's signed
+						// merkle root is the consensus gate at apply time. When
+						// NOT syncing, keep dropping (NP-C6: bounds junk a peer
+						// can push into the pool DB).
+						if !common.IsSyncing.Load() {
+							resMutex.Lock()
+							droppedCount++
+							if firstDropReason == "" {
+								firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+							}
+							resMutex.Unlock()
+							continue
 						}
+						resMutex.Lock()
+						storedUnverified++
 						resMutex.Unlock()
-						continue
 					}
 					if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
 						resMutex.Lock()
@@ -357,6 +376,9 @@ func OnMessage(addr [4]byte, m []byte) {
 			noteBxArrival()
 		}
 		summary := fmt.Sprintf("bx: stored %d transaction(s), %d already present", storedCount, skippedExisting)
+		if storedUnverified > 0 {
+			summary += fmt.Sprintf("; %d stored despite failing verification under the CURRENT state (historical tx during sync)", storedUnverified)
+		}
 		if undecodable > 0 {
 			summary += fmt.Sprintf("; %d undecodable (first: %v)", undecodable, firstDecodeErr)
 		}

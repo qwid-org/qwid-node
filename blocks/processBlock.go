@@ -325,6 +325,22 @@ func IsAllTransactions(block Block) [][]byte {
 	return hashes
 }
 
+// findTxInMemoryPools looks a transaction up in the three in-memory pools —
+// the sources IsAllTransactions counts as "present" that the DB-only recovery
+// in CheckBlockTransfers could not reach (sync stall, incident 2026-09-08).
+func findTxInMemoryPools(hash []byte) (transactionsDefinition.Transaction, bool) {
+	if tx, ok := transactionsPool.PoolsTx.GetTransactionByHash(hash); ok {
+		return tx, true
+	}
+	if tx, ok := transactionsPool.PoolTxEscrow.GetTransactionByHash(hash); ok {
+		return tx, true
+	}
+	if tx, ok := transactionsPool.PoolTxMultiSign.GetTransactionByHash(hash); ok {
+		return tx, true
+	}
+	return transactionsDefinition.Transaction{}, false
+}
+
 func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.MerkleTree, onlyCheck bool) (int64, int64, error) {
 	txs := block.TransactionsHashes
 	lastSupply := lastBlock.GetBlockSupply()
@@ -366,11 +382,29 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 				// Try to recover from bad transaction DB during sync
 				poolTx, err = transactionsDefinition.LoadFromDBPoolTx(common.BadTransactionDBPrefix[:], hash)
 				if err != nil {
-					logger.GetLogger().Printf("  tx[%d] %x NOT FOUND in any DB", i, hash[:8])
-					return 0, 0, err
+					// Last resort: the in-memory pools. A transaction can sit
+					// there without a loadable pool-DB entry (e.g. escrow/
+					// multisig pools persist under their own prefixes), and
+					// IsAllTransactions counts those as PRESENT — so no
+					// missing-tx request ever fired while this loop failed
+					// forever with "NOT FOUND in any DB" (sync stall,
+					// incident 2026-09-08).
+					if memTx, ok := findTxInMemoryPools(hash); ok {
+						poolTx = memTx
+					} else {
+						logger.GetLogger().Printf("  tx[%d] %x NOT FOUND in any DB", i, hash[:8])
+						return 0, 0, err
+					}
 				}
-				// Validate recovered bad transaction
-				if !poolTx.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+				// Validate recovered bad transaction — but only on the LIVE
+				// path. During sync this verification runs under the CURRENT
+				// height's scheme config and key registry while the transaction
+				// is historical (e.g. a registration authorized by a key whose
+				// own registration this node has not applied yet), so it can
+				// reject transactions consensus already sealed; the block's
+				// signed merkle root is the integrity gate there
+				// (incident 2026-09-08).
+				if !common.IsSyncing.Load() && !poolTx.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
 					logger.GetLogger().Printf("  tx[%d] %x from badTx FAILED validation", i, hash[:8])
 					return 0, 0, fmt.Errorf("bad transaction failed validation: %x", hash[:8])
 				}
