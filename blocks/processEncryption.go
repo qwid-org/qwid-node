@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 	"github.com/qwid-org/qwid-node/voting"
 	"sync"
 )
@@ -35,6 +36,21 @@ func ProcessBlockEncryption(block Block, lastBlock Block) error {
 		return nil
 	}
 	var errs []error
+	// A change to EITHER slot means the active signature scheme moved. Every
+	// transaction still pending in the main pool was verified at admission under
+	// the OLD scheme; keeping them would make this node build blocks full of
+	// old-scheme transactions that up-to-date nodes reject as a scheme mismatch,
+	// and they would never re-verify because verification is not repeated on pool
+	// extraction. Flush the pool so only transactions signed under the new scheme
+	// (re-gossiped and re-admitted) can be included (incident 2026-09-08).
+	schemeChanged := !bytes.Equal(block.BaseBlock.BaseHeader.Encryption1[:], lastBlock.BaseBlock.BaseHeader.Encryption1[:]) ||
+		!bytes.Equal(block.BaseBlock.BaseHeader.Encryption2[:], lastBlock.BaseBlock.BaseHeader.Encryption2[:])
+	if schemeChanged {
+		if n := transactionsPool.PoolsTx.Clear(); n > 0 {
+			logger.GetLogger().Printf("signature scheme changed at block %d: flushed %d pending transaction(s) verified under the previous scheme",
+				block.GetHeader().Height, n)
+		}
+	}
 	if !bytes.Equal(block.BaseBlock.BaseHeader.Encryption1[:], lastBlock.BaseBlock.BaseHeader.Encryption1[:]) {
 		enc1, err := FromBytesToEncryptionConfig(block.BaseBlock.BaseHeader.Encryption1[:], true)
 		if err != nil {

@@ -455,6 +455,12 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 
 	pk := tx.TxData.GetPubKey()
 	pkb := pk.GetBytes()
+	// Effective pause flags for the final signature verification. The pubkey-
+	// carrying branch below may clear one of them for a PURE REGISTRATION
+	// transaction (Amount==0) — the narrow escape hatch that lets an identity
+	// stranded by a scheme pause register its keys (see the comments at the
+	// exemption sites). Ordinary transactions always verify under the real flags.
+	effPaused, effPaused2 := isPausedTmp, isPaused2Tmp
 	if len(pkb) == 0 {
 		senderAddr := tx.GetSenderAddress()
 		// Prefer the sender key whose length matches the scheme this signature
@@ -582,6 +588,7 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 				signingScheme = sigName2
 			}
 			authorised := false
+			authorisedByDerivingKey := false
 			if expLen, lerr := oqs.PubKeyLength(signingScheme); lerr == nil {
 				if existing, aerr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen); aerr == nil {
 					// Verify the signature against the REGISTERED key, not the
@@ -589,6 +596,32 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 					pkb = existing.GetBytes()
 					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
 					authorised = true
+					// Does the authorizing key DERIVE the sender identity? Used
+					// by the stranded-identity pause exemption below: only the
+					// identity-deriving key may authorize under a pause.
+					if da, derr := common.PubKeyToAddress(existing.GetBytes(), primary); derr == nil {
+						authorisedByDerivingKey = bytes.Equal(da.GetBytes(), senderAddr.GetBytes())
+					}
+				}
+			}
+			// Stranded-identity escape hatch (incident 2026-09-08): a PURE
+			// REGISTRATION (Amount==0) of a key the sender does not yet hold in
+			// the enclosed key's slot, authorized by the REGISTERED key that
+			// DERIVES the sender identity, verifies even while the signing
+			// scheme is paused. Without this, an identity whose only registered
+			// key belongs to the paused scheme can never register a key of the
+			// active scheme — permanently frozen. Scope: identities that already
+			// hold a key of the enclosed key's scheme are NOT exempt (nothing to
+			// rescue), so operators who registered the new scheme before the
+			// pause (enforced for block producers by the pause gate in
+			// blocks.CheckBaseBlock) gain no new exposure.
+			if authorised && authorisedByDerivingKey && tx.TxData.Amount == 0 {
+				if _, serr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, pkPrimary, len(tx.TxData.GetPubKey().GetBytes())); serr != nil {
+					if primary {
+						effPaused = false
+					} else {
+						effPaused2 = false
+					}
 				}
 			}
 			if !authorised {
@@ -652,6 +685,24 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 			return false
 		}
 
+		// Self-registration pause exemption (incident 2026-09-08): a PURE
+		// REGISTRATION (Amount==0) of the key that DERIVES the sender identity,
+		// signed by that same key (signature slot == key slot), verifies even
+		// while its scheme is paused. This is safe under a broken scheme: the
+		// public key of an unregistered identity has never been published, so
+		// forging this transaction requires a preimage of the address hash, not
+		// a signature forgery. Without it, no identity derived from the paused
+		// scheme can ever be bootstrapped, freezing every participant who did
+		// not register before the pause.
+		if tx.TxData.Amount == 0 && primary == pkPrimary &&
+			bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes()) {
+			if primary {
+				effPaused = false
+			} else {
+				effPaused2 = false
+			}
+		}
+
 		// The enclosed key is DATA — the key being registered. What SIGNED the
 		// transaction is a separate question, answered by the signature's own
 		// scheme flag, and the two differ in the case that matters: a key
@@ -678,7 +729,7 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 		// storePubKeyImmediately(pk, senderAddr)
 	}
 	//logger.GetLogger().Println(sigName, sigName2, isPausedTmp, isPaused2Tmp)
-	return wallet.Verify(b, signature.GetBytes(), pkb, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+	return wallet.Verify(b, signature.GetBytes(), pkb, sigName, sigName2, effPaused, effPaused2)
 }
 
 // bootstrapBindsKey reports whether a key with no on-chain history may open the

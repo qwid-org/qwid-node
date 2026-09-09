@@ -263,10 +263,21 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	pk := common.PubKey{}
 	primary := req.UsePrimaryEncryption
 	if req.IncludePubKey {
-		if primary {
+		registerPrimary := primary
+		if registerPrimary {
 			pk = wl.Account1.PublicKey
 		} else {
 			pk = wl.Account2.PublicKey
+		}
+		// A registration must be signed by a key Verify can check: the enclosed
+		// key itself for a bootstrap, a REGISTERED key otherwise (incident
+		// 2026-09-08; see wallet.RegistrationSigningPrimary).
+		primary = registrationSignPrimaryFor(wl.MainAddress, registerPrimary, primary)
+		// A paused signing slot admits only a PURE registration (Amount==0);
+		// reject loudly instead of letting the node drop the tx silently.
+		if am != 0 && ((primary && common.IsPaused()) || (!primary && common.IsPaused2())) {
+			JsonError(w, "Registering a key while its signing scheme is paused must be a pure registration: set the amount to 0 and send again (funds can be moved after the key is registered).", http.StatusBadRequest)
+			return
 		}
 	}
 

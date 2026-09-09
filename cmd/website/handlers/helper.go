@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 func SignMessage(line []byte) []byte {
@@ -97,4 +99,31 @@ func TestAndSetEncryption() {
 		logger.GetLogger().Println("Encryption test: secondary verified (primary paused)")
 	}
 
+}
+
+// registrationSignPrimaryFor picks which key must SIGN a key-carrying
+// registration transaction for the given identity: the enclosed key itself when
+// nothing is registered (bootstrap), a REGISTERED key otherwise
+// (wallet.RegistrationSigningPrimary; incident 2026-09-08). Falls back to
+// defaultPrimary when the node cannot answer the PUBA query.
+func registrationSignPrimaryFor(mainAddress common.Address, registerPrimary, defaultPrimary bool) bool {
+	reply := clientrpc.Call(SignMessage(append([]byte("PUBA"), mainAddress.GetBytes()...)))
+	if bytes.Equal(reply, []byte("Timeout")) {
+		logger.GetLogger().Println("could not ask the node which keys are registered; signing registration with the default key")
+		return defaultPrimary
+	}
+	var resp struct {
+		HasPrimary   bool `json:"hasPrimary"`
+		HasSecondary bool `json:"hasSecondary"`
+	}
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		logger.GetLogger().Println("could not read the registered-key reply; signing registration with the default key:", err)
+		return defaultPrimary
+	}
+	chosen := wallet.RegistrationSigningPrimary(resp.HasPrimary, resp.HasSecondary, registerPrimary, defaultPrimary)
+	if chosen != defaultPrimary {
+		logger.GetLogger().Printf("registration transaction will be signed with the %s key (registered: primary=%v secondary=%v)",
+			map[bool]string{true: "primary", false: "secondary"}[chosen], resp.HasPrimary, resp.HasSecondary)
+	}
+	return chosen
 }

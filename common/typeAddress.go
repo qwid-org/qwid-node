@@ -11,6 +11,16 @@ func (a *Address) SetBytes(b []byte) {
 	if len(b) > a.GetLength() {
 		b = b[len(b)-AddressLength:]
 	}
+	// Left-pad short input (go-ethereum semantics). Init rejects anything that
+	// is not exactly 20/21 bytes and SetBytes ignored that error, so EVERY
+	// short input silently produced the zero address — which collapsed all
+	// standard precompile addresses (BytesToVMAddress([]byte{1}) for ecrecover,
+	// {2} for sha256, ...) into ONE zero-address map key. A contract calling
+	// 0x…01 builds its callee via SetByteAddress (a real 20-byte address), so
+	// the lookup never matched and no precompile was reachable in this fork.
+	if len(b) < AddressLength {
+		b = LeftPadBytes(b, AddressLength)
+	}
 	a.Init(b)
 }
 

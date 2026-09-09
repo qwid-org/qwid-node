@@ -658,6 +658,10 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 
 	origin := tx.TxParam.Sender
 	code := tx.TxData.OptData
+	// Publish this block's consensus oracle values for the oracle precompiles
+	// (0x100 price, 0x101 rand) before any EVM execution (deterministic:
+	// the values are sealed in the block being evaluated).
+	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 	blockCtx := vm.BlockContext{
 		CanTransfer: evmCanTransfer,
 		Transfer:    evmTransfer,
@@ -675,9 +679,9 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		// silently — the header commits no post-state root, so nothing would
 		// ever flag the divergence (QWID-2026-10). Replaying old blocks would
 		// also be unable to reconstruct the original state.
-		Time:        new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
-		Difficulty:  new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
-		BaseFee:     new(big.Int).SetInt64(int64(0)),
+		Time:       new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
+		Difficulty: new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
+		BaseFee:    new(big.Int).SetInt64(int64(0)),
 		// Consensus-committed and replay-stable: the parent block hash from
 		// the header every validator already agreed on. Deterministic across
 		// nodes and across time, which is the property QWID-2026-10 demands of
@@ -685,7 +689,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		// course miner-known — PREVRANDAO here is an anti-panic determinism
 		// value, not a randomness source; contracts needing randomness must
 		// use the RAND oracle.
-		Random:      randaoFromParent(bl),
+		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
 	jumpTable := vm.GetGenericJumpTable()
@@ -768,6 +772,10 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 
 	gasMult := 10.0
 
+	// Publish this block's consensus oracle values for the oracle precompiles
+	// (0x100 price, 0x101 rand) before any EVM execution (deterministic:
+	// the values are sealed in the block being evaluated).
+	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 	blockCtx := vm.BlockContext{
 		CanTransfer: evmCanTransfer,
 		Transfer:    evmTransfer,
@@ -785,9 +793,9 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 		// silently — the header commits no post-state root, so nothing would
 		// ever flag the divergence (QWID-2026-10). Replaying old blocks would
 		// also be unable to reconstruct the original state.
-		Time:        new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
-		Difficulty:  new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
-		BaseFee:     new(big.Int).SetInt64(int64(0)),
+		Time:       new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
+		Difficulty: new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
+		BaseFee:    new(big.Int).SetInt64(int64(0)),
 		// Consensus-committed and replay-stable: the parent block hash from
 		// the header every validator already agreed on. Deterministic across
 		// nodes and across time, which is the property QWID-2026-10 demands of
@@ -795,7 +803,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 		// course miner-known — PREVRANDAO here is an anti-panic determinism
 		// value, not a randomness source; contracts needing randomness must
 		// use the RAND oracle.
-		Random:      randaoFromParent(bl),
+		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
 	jumpTable := vm.GetGenericJumpTable()
@@ -840,6 +848,10 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 
 	origin := common.EmptyAddress()
 	input := OptData
+	// Publish this block's consensus oracle values for the oracle precompiles
+	// (0x100 price, 0x101 rand) before any EVM execution (deterministic:
+	// the values are sealed in the block being evaluated).
+	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 	blockCtx := vm.BlockContext{
 		CanTransfer: evmCanTransfer,
 		Transfer:    evmTransfer,
@@ -857,9 +869,9 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 		// silently — the header commits no post-state root, so nothing would
 		// ever flag the divergence (QWID-2026-10). Replaying old blocks would
 		// also be unable to reconstruct the original state.
-		Time:        new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
-		Difficulty:  new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
-		BaseFee:     new(big.Int).SetInt64(int64(0)),
+		Time:       new(big.Int).SetInt64(bl.GetBlockTimeStamp()),
+		Difficulty: new(big.Int).SetInt64(int64(bl.GetHeader().Difficulty)),
+		BaseFee:    new(big.Int).SetInt64(int64(0)),
 		// Consensus-committed and replay-stable: the parent block hash from
 		// the header every validator already agreed on. Deterministic across
 		// nodes and across time, which is the property QWID-2026-10 demands of
@@ -867,7 +879,7 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 		// course miner-known — PREVRANDAO here is an anti-panic determinism
 		// value, not a randomness source; contracts needing randomness must
 		// use the RAND oracle.
-		Random:      randaoFromParent(bl),
+		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
 	jumpTable := vm.GetGenericJumpTable()

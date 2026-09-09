@@ -229,12 +229,22 @@ func ShowSendPage() *widgets.QTabWidget {
 
 		pk := common.PubKey{}
 		if pubkeyInclude.IsChecked() {
-			if primaryChb.IsChecked() {
+			registerPrimary := primaryChb.IsChecked()
+			if registerPrimary {
 				pk = MainWallet.Account1.PublicKey
-				primary = true
 			} else {
 				pk = MainWallet.Account2.PublicKey
-				primary = false
+			}
+			// A registration must be signed by a key Verify can check: the
+			// enclosed key itself for a bootstrap, a REGISTERED key otherwise
+			// (incident 2026-09-08; wallet.RegistrationSigningPrimary).
+			primary = registrationSignPrimaryGUI(registerPrimary, registerPrimary)
+			// A paused signing slot admits only a PURE registration (Amount==0);
+			// fail loudly instead of letting the node drop the tx silently.
+			if am != 0 && ((primary && common.IsPaused()) || (!primary && common.IsPaused2())) {
+				v = "Registering a key while its signing scheme is paused must be a pure registration: set the amount to 0 and send again (funds can be moved after the key is registered)."
+				info = &v
+				return
 			}
 		} else {
 			if primaryChb.IsChecked() {
