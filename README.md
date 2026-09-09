@@ -286,6 +286,52 @@ Encryption schemes summary:
     │ MAYO-5                    │ 5554  │ 964     │ 214,33    │ 4 666  │ 467,9   │
     └───────────────────────────┴───────┴─────────┴───────────┴────────┴─────────┘
 
+## Oracles in smart contracts
+
+Every QWID block seals two consensus oracle values, medianed from staked-node
+submissions and verified by oracle proofs. Smart contracts read them through
+two precompiled contracts:
+
+| Precompile | Address | Value                           |
+|---|---|---------------------------------|
+| Price oracle | `0x0000000000000000000000000000000000000100` | QWD/USD (raw consensus `int64`) |
+| RAND oracle  | `0x0000000000000000000000000000000000000101` | consensus randomness (`int64`)  |
+
+On testnet temporary QWD/USD is replaced by BTC/USD just to show that flow is working.
+
+Calling convention: input is ignored; the return value is one 32-byte word
+holding the value sealed in the block that contains YOUR transaction
+(deterministic on every node). A value of 0 means the oracle is not
+established yet (e.g. the first blocks after genesis). Each read costs a
+fixed 100 gas.
+
+Solidity example:
+
+    function priceQWDUSD() internal view returns (uint256 price) {
+        (bool ok, bytes memory out) = address(0x100).staticcall("");
+        require(ok && out.length == 32, "price oracle unavailable");
+        price = abi.decode(out, (uint256));
+    }
+
+    function randomness() internal view returns (uint256 rand) {
+        (bool ok, bytes memory out) = address(0x101).staticcall("");
+        require(ok && out.length == 32, "rand oracle unavailable");
+        rand = abi.decode(out, (uint256));
+    }
+
+**Randomness warning:** the RAND value of a block is public the moment the
+block exists, and the block producer sees it first. Never settle a bet with
+randomness from the same block the bet was placed in — close entries at a
+chosen block height and draw only in a strictly LATER block (the oracle
+updates every 6 blocks, so a delay of 6+ blocks is a natural choice).
+
+A complete worked example — a QWD price-direction game using both oracles with
+the commit-first randomness pattern — is in `smartContracts/oracleDemo.sol`
+(library `QwidOracles` + contract `BtcUpDown`). Compile with the official
+static solc release and the `paris` EVM target, exactly as the web UI does:
+
+    solc --evm-version paris --bin --abi smartContracts/oracleDemo.sol
+
 ## Tests and CI
 
 With the prerequisites above installed, run the test suite:
