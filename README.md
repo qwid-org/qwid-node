@@ -322,8 +322,7 @@ Solidity example:
 **Randomness warning:** the RAND value of a block is public the moment the
 block exists, and the block producer sees it first. Never settle a bet with
 randomness from the same block the bet was placed in — close entries at a
-chosen block height and draw only in a strictly LATER block (the oracle
-updates every 6 blocks, so a delay of 6+ blocks is a natural choice).
+chosen block height and draw only in a strictly LATER block.
 
 A complete worked example — a QWD price-direction game using both oracles with
 the commit-first randomness pattern — is in `smartContracts/oracleDemo.sol`
