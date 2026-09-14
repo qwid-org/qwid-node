@@ -290,3 +290,56 @@ setInterval(fetchStats, 15000);
     }
   },{passive:true});
 })();
+
+// ===================== TIME-ON-PAGE HEARTBEAT =====================
+// While this page is visible, every 15 s the browser sends
+//   GET /hb?t=<seconds visible since the previous heartbeat>&p=<path>
+// and one final heartbeat when the tab is hidden or closed. No identifier
+// is sent and nothing is stored on the device: the request carries only
+// the elapsed time, and it lands in the same Apache access log as every
+// other request. deploy/apache-visit-stats.py sums it per IP+User-Agent
+// session (30-minute gap). privacy.html describes this under "Server logs";
+// keep the two in sync. deploy/security-headers-landing.conf answers /hb
+// with 204; without that rule Apache answers 404, which is logged all the
+// same, so the status of the reply does not matter here.
+(function(){
+  if(typeof fetch !== 'function' || typeof document.visibilityState !== 'string') return;
+  const INTERVAL_MS = 15000;
+  const MAX_DELTA_S = 60;
+  let visibleSince = null;
+  let timer = null;
+
+  function send(seconds){
+    if(seconds <= 0) return;
+    const url = '/hb?t=' + Math.min(seconds, MAX_DELTA_S) +
+      '&p=' + encodeURIComponent(location.pathname);
+    try{
+      fetch(url, {method:'GET', keepalive:true, cache:'no-store', credentials:'omit'})
+        .catch(()=>{});
+    }catch(e){ /* ignore */ }
+  }
+  function flush(){
+    if(visibleSince === null) return;
+    const now = Date.now();
+    send(Math.round((now - visibleSince) / 1000));
+    visibleSince = now;
+  }
+  function start(){
+    if(timer !== null) return;
+    visibleSince = Date.now();
+    timer = setInterval(flush, INTERVAL_MS);
+  }
+  function stop(){
+    if(timer === null) return;
+    clearInterval(timer);
+    timer = null;
+    flush();
+    visibleSince = null;
+  }
+
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible') start(); else stop();
+  });
+  window.addEventListener('pagehide', stop);
+  if(document.visibilityState === 'visible') start();
+})();
