@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Privacy — QWID Chain</title>
-<meta name="description" content="What qwid.org stores about visitors: no cookies, no analytics, no third-party requests. Server access logs only.">
+<meta name="description" content="What qwid.org stores about visitors: no cookies, no analytics products, no third-party requests. Server access logs only, including a time-on-page heartbeat.">
 <link rel="canonical" href="https://qwid.org/privacy.html">
 <link rel="stylesheet" href="fonts/fonts.css">
 <style>
@@ -45,6 +45,7 @@ h2{
   display:flex;align-items:center;gap:.5rem;
 }
 h2::before{content:'';display:inline-block;width:3px;height:1.2em;background:var(--cyan);border-radius:2px}
+h3{font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:1.1rem;color:#fff;letter-spacing:.03em;margin:1.5rem 0 .5rem}
 p{margin-bottom:.9rem}
 ul{padding-left:1.4rem;margin:.5rem 0 1rem;display:flex;flex-direction:column;gap:.35rem}
 li::marker{color:var(--cyan)}
@@ -75,13 +76,15 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
 
 <main>
   <h1>Privacy</h1>
-  <div class="updated">Last updated: 13 August 2026</div>
+  <div class="updated">Last updated: 14 September 2026</div>
 
   <div class="callout">
-    <strong>Short version.</strong> This website sets no cookies, runs no analytics, and makes
-    no requests to any other company. Nothing is stored on your device, and your browsing is
-    not profiled. The only record of a visit is a standard web-server access log, kept for 14
-    days. The one exception is if you write to us — that is covered under
+    <strong>Short version.</strong> This website sets no cookies, uses no analytics product,
+    and makes no requests to any other company. Nothing is stored on your device, and your
+    browsing is not profiled. The only record of a visit is a standard web-server access log,
+    kept for 14 days. While a page is open, the browser also reports to that same log how many
+    seconds the page has been visible — with no identifier attached; see <em>Server logs</em>.
+    The one exception is if you write to us — that is covered under
     <em>If you contact us</em> below.
   </div>
 
@@ -154,6 +157,19 @@ footer{border-top:1px solid var(--card-border);padding:2rem;text-align:center;fo
     (Art. 6(1)(f) GDPR). Logs are not used to build profiles, are not combined with any other
     source, and are not sold or shared. They are disclosed only if a competent authority
     compels it by law.
+  </p>
+
+  <h3>Time-on-page heartbeat</h3>
+  <p>
+    While a page is open and visible, the script on it sends a small request to
+    <strong>qwid.org</strong> every 15 seconds, and one more when the tab is hidden or closed.
+    The request carries two things: the number of seconds the page has been visible since the
+    previous request, and the page path. It carries <strong>no identifier</strong> — no cookie,
+    no random token, nothing read from or written to your device — so it cannot recognise you
+    on a later visit or in a second tab. It is written to the same access log, under the same
+    14-day retention, and its only use is aggregate figures such as average time on page and
+    the share of visits shorter than ten seconds. Block scripts and the requests simply stop;
+    the page works the same.
   </p>
 
   <h2>If you contact us</h2>
