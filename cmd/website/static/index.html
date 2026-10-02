@@ -384,6 +384,10 @@
                         <label>Amount</label>
                         <input type="number" id="dex-amount" placeholder="0.00" step="0.00000001" min="0">
                     </div>
+                    <div class="form-group">
+                        <label>Price limit in QWD (optional): most to pay when buying, least to receive when selling</label>
+                        <input type="number" id="dex-limit" placeholder="no limit" step="0.00000001" min="0">
+                    </div>
                     <button class="btn-primary" onclick="tradeDex()">Execute Trade</button>
                 </div>
                 <div class="card">
@@ -812,6 +816,7 @@ async function tradeDex() {
     const tokenAddress = document.getElementById('dex-trade-addr').value.trim();
     const action = document.getElementById('dex-action').value;
     const amount = parseFloat(document.getElementById('dex-amount').value);
+    const limit = parseFloat(document.getElementById('dex-limit').value) || 0;
     if (!tokenAddress) { setAlert('dex-alert', 'Enter token address', true); return; }
     if (!amount || amount <= 0) { setAlert('dex-alert', 'Enter valid amount', true); return; }
     setAlert('dex-alert', '');
@@ -819,7 +824,7 @@ async function tradeDex() {
         const data = await api('/api/dex/trade', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({tokenAddress, action, amount, usePrimaryEncryption: true})
+            body: JSON.stringify({tokenAddress, action, amount, limit, usePrimaryEncryption: true})
         });
         setAlert('dex-alert', 'Trade executed! Hash: ' + data.txHash, false);
     } catch(e) {

@@ -19,8 +19,10 @@ import (
 // collapses two nodes behind one NAT into a single peer: their accepted
 // connections evict each other on the shared (topic, ip) map slot, their
 // height claims overwrite each other, and the node that cannot be dialed
-// back is effectively mute. A handle is allocated from the non-routable
-// 10.254.0.0/16 range the first time a nodeID completes the handshake and is
+// back is effectively mute. A handle is allocated from the reserved
+// 240.254.0.0/16 range (class E: never a real host, unlike the private
+// 10.0.0.0/8 the handles used to share with LAN peers, S1-11) the first time
+// a nodeID completes the handshake and is
 // stable for the life of the process, so two NAT-shared nodes become two
 // distinct peers everywhere - claims, quorums, connection maps - without
 // changing any handler signature or wire format.
@@ -44,7 +46,7 @@ var (
 	handlesByIP           = map[[4]byte]map[[4]byte]struct{}{}
 	handleUseClock int64
 	nextHandle     uint16 = 1
-	// handleSpace is the number of usable handles: 10.254.0.1 - 10.254.255.254.
+	// handleSpace is the number of usable handles: 240.254.0.1 - 240.254.255.254.
 	handleSpace = 65534
 )
 
@@ -52,10 +54,20 @@ var (
 // for: well above the inbound connections it may keep (4 per topic, S1-04).
 const maxHandlesPerIP = 32
 
+// handlePrefix is the first two bytes of every peer handle.
+var handlePrefix = [2]byte{240, 254}
+
 // IsPeerHandle reports whether a 4-byte address is a virtual peer handle
-// rather than a transport IP.
+// rather than a transport IP: in the handle range AND currently allocated, so
+// no transport address is ever mistaken for one (S1-11).
 func IsPeerHandle(ip [4]byte) bool {
-	return ip[0] == 10 && ip[1] == 254
+	if ip[0] != handlePrefix[0] || ip[1] != handlePrefix[1] {
+		return false
+	}
+	handleMutex.Lock()
+	_, ok := nodeIDByHandle[ip]
+	handleMutex.Unlock()
+	return ok
 }
 
 // HandleForPeer returns the stable handle for an authenticated peer nodeID,
@@ -120,7 +132,7 @@ func freeHandleLocked() ([4]byte, bool) {
 		if n == 0 || int(n) > handleSpace {
 			continue
 		}
-		h := [4]byte{10, 254, byte(n >> 8), byte(n)}
+		h := [4]byte{handlePrefix[0], handlePrefix[1], byte(n >> 8), byte(n)}
 		if _, used := nodeIDByHandle[h]; !used {
 			return h, true
 		}
@@ -174,7 +186,7 @@ func RealIPForHandle(ip [4]byte) ([4]byte, bool) {
 // canonicalIP maps a handle to its transport IP for the subsystems that work
 // per SOURCE rather than per node: dialing, bans, trust and rate limits. A
 // handle with no known transport (should not happen) maps to itself, which is
-// harmless - a 10.254/16 address is neither dialable nor shared.
+// harmless - a 240.254/16 address is neither dialable nor shared.
 func canonicalIP(ip [4]byte) [4]byte {
 	if real, ok := RealIPForHandle(ip); ok {
 		return real

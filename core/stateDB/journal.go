@@ -75,3 +75,53 @@ type balanceChange struct {
 func (c balanceChange) revert(sa *StateAccount) {
 	account.SetBalance(c.addr, c.prev)
 }
+
+// createAccountChange undoes CreateAccount (S6-06): a reverted CREATE must not
+// leave its address behind.
+type createAccountChange struct {
+	addr    [common.AddressLength]byte
+	prev    account.Account
+	existed bool
+}
+
+func (c createAccountChange) revert(sa *StateAccount) {
+	if c.existed {
+		sa.Accounts[c.addr] = c.prev
+		return
+	}
+	delete(sa.Accounts, c.addr)
+}
+
+// nonceChange undoes SetNonce (S6-06): a failed constructor used to leave its
+// address at nonce 1, so the same CREATE could never be repeated.
+type nonceChange struct {
+	addr    [common.AddressLength]byte
+	prev    uint64
+	existed bool
+}
+
+func (c nonceChange) revert(sa *StateAccount) {
+	if c.existed {
+		sa.Nonces[c.addr] = c.prev
+		return
+	}
+	delete(sa.Nonces, c.addr)
+}
+
+// codeChange undoes SetCode (S6-06).
+type codeChange struct {
+	addr     [common.AddressLength]byte
+	prevCode []byte
+	prevHash common.Hash
+	existed  bool
+}
+
+func (c codeChange) revert(sa *StateAccount) {
+	if c.existed {
+		sa.Codes[c.addr] = c.prevCode
+		sa.CodeHashes[c.addr] = c.prevHash
+		return
+	}
+	delete(sa.Codes, c.addr)
+	delete(sa.CodeHashes, c.addr)
+}

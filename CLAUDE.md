@@ -148,10 +148,10 @@ only says "some QWID chain": two networks started from different genesis configs
 share it. `ChainID` cannot itself be widened to the genesis hash — most
 importantly, it is part of the signed bytes of every transaction
 (`transactionsDefinition/baseTransaction.go`), so changing its width invalidates
-every existing signature. Note that the EVM's exposed chain id (via the CHAINID
-opcode) is a separate value, currently hardcoded to 1337 in
-`params.AllEthashProtocolChanges`, regardless of `ChainID`; they are not the same
-number and serve different purposes.
+every existing signature. The EVM's CHAINID opcode answers the same number
+(`blocks.evmChainConfig`, S6-06; it used to be the development id 1337). The EVM
+runs the Merge instruction set and `params.Rules` reports every fork through
+the Merge as active, matching it.
 
 **A peer that sends no `GB` tag is rejected in the `hi` sync message.** The
 genesis check does not run in other sync message types (`gh`, `sh`
@@ -220,7 +220,7 @@ CONTACT_TO=support@qwid.org          # Where the contact form delivers.
 CONTACT_FROM=support@qwid.org        # Envelope + From: sender. MUST be an identity verified in SES, or SES rejects the message. Never SMTP_USER — the visitor's address goes in Reply-To.
 ```
 
-Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change, website-registration and CLI wallet-generator flows. Gas: the EVM runs on exactly the declared gas; `MinGasUsage()` is the validation floor (DEX ops include `DexTokenCallGas`), `GasUsageEstimate()` is what wallets declare (10x the floor for contract calls/deploys, capped at `MaxGasUsage`). The web UI session idles out after 30 min (`POST /api/logout` ends it).
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change, website-registration and CLI wallet-generator flows. Gas: the EVM runs on exactly the declared gas; `MinGasUsage()` is the validation floor (DEX ops include `DexTokenCallGas`), `GasUsageEstimate()` is what wallets declare (10x the floor for contract calls/deploys, capped at `MaxGasUsage`). The web UI session idles out after 30 min (`POST /api/logout` ends it). Signed RPC requests carry a replay guard (time + nonce, `common.NewRPCGuard`) between the request and the signature; the node accepts each guard once, within 60 s of its clock — build requests only through `wallet.SignRPCRequest`. DEX buy/sell orders may carry a signed coin limit (`transactionsDefinition.DexOrderOptData`, OptData 16 bytes); an order whose limit the trade would break is skipped (fee paid), not a block error.
 
 Recovery phrases — exactly which flows produce one:
 - **CLI generator** (`go run cmd/generateNewWallet/main.go`): creates a wallet **from** a fresh 24-word BIP39 phrase (shown once, three words typed back to confirm), and restores a wallet from an existing phrase. The phrase is read without echo and stored encrypted in the wallet file.

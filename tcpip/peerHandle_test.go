@@ -21,7 +21,7 @@ func TestHandlesSeparateNodesBehindOneIP(t *testing.T) {
 		t.Fatal("two different nodeIDs behind one IP must get different handles")
 	}
 	if !IsPeerHandle(hA) || !IsPeerHandle(hB) {
-		t.Fatal("handles must come from the 10.254/16 range")
+		t.Fatal("handles must come from the 240.254/16 range")
 	}
 	if got := HandleForPeer(idA, sharedIP); got != hA {
 		t.Fatal("a handle must be stable across reconnects of the same nodeID")
@@ -85,5 +85,16 @@ func TestFrameAssembler(t *testing.T) {
 	}
 	if msgs, viol = fa.push(mk("epsilon")); !viol || len(msgs) != 0 {
 		t.Fatalf("a broken stream stays broken: msgs=%q viol=%v", msgs, viol)
+	}
+}
+
+// S1-11: a LAN peer on a private address is never taken for a handle, and an
+// address in the handle range is one only while allocated.
+func TestTransportAddressIsNeverAHandle(t *testing.T) {
+	if IsPeerHandle([4]byte{10, 254, 0, 1}) {
+		t.Fatal("a 10.254/16 LAN address was taken for a peer handle")
+	}
+	if IsPeerHandle([4]byte{240, 254, 255, 250}) {
+		t.Fatal("an unallocated address in the handle range was taken for a handle")
 	}
 }

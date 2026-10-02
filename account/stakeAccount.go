@@ -3,6 +3,7 @@ package account
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/qwid-org/qwid-node/common"
@@ -368,8 +369,16 @@ func (sa StakingAccount) Marshal() []byte {
 	// StakingDetails count
 	buffer.Write(common.GetByteInt64(int64(len(sa.StakingDetails))))
 
-	// StakingDetails
-	for key, details := range sa.StakingDetails {
+	// StakingDetails, in ascending key order: ranging over the map wrote a
+	// different byte order every time, so two nodes' snapshots of the same
+	// state never compared equal (S4-10).
+	keys := make([]int64, 0, len(sa.StakingDetails))
+	for key := range sa.StakingDetails {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	for _, key := range keys {
+		details := sa.StakingDetails[key]
 		buffer.Write(common.GetByteInt64(key))
 		buffer.Write(common.GetByteInt64(int64(len(details))))
 

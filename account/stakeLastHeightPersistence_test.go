@@ -149,3 +149,15 @@ func TestRandCommitRoundTripsThroughSnapshot(t *testing.T) {
 	assert.Equal(t, int64(99), legacy.LastStakeHeight)
 	assert.Equal(t, int64(0), legacy.RandCommitHeight)
 }
+
+// S4-10: the same staking entry always encodes to the same bytes.
+func TestStakingAccountMarshalIsDeterministic(t *testing.T) {
+	acc := StakingAccount{StakingDetails: map[int64][]StakingDetail{}}
+	for k := int64(0); k < 64; k++ {
+		acc.StakingDetails[k*7%61] = []StakingDetail{{Amount: k}}
+	}
+	first := acc.Marshal()
+	for i := 0; i < 20; i++ {
+		assert.Equal(t, first, acc.Marshal(), "staking entry encoding depends on map order")
+	}
+}

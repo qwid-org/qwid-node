@@ -12,7 +12,6 @@ import (
 	"github.com/qwid-org/qwid-node/core/stateDB"
 	"github.com/qwid-org/qwid-node/core/types"
 	loggerMain "github.com/qwid-org/qwid-node/logger"
-	"github.com/qwid-org/qwid-node/params"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"math"
 	"math/big"
@@ -206,6 +205,25 @@ func checkedRoundToken(v float64, decimals int) (int64, bool) {
 	return int64(r), true
 }
 
+// ErrDexLimitExceeded marks a DEX order whose signed price limit the trade
+// would break (S7-07). Such an order is skipped, not a block error.
+var ErrDexLimitExceeded = errors.New("dex price limit exceeded")
+
+// checkDexLimit applies an order's coin limit to the coins the trade moves
+// for the sender (amountCoin > 0 received, < 0 paid).
+func checkDexLimit(operation int, amountCoin, coinLimit int64) error {
+	if coinLimit <= 0 {
+		return nil
+	}
+	if operation == 3 && -amountCoin > coinLimit {
+		return fmt.Errorf("%w: buy costs %d, limit %d", ErrDexLimitExceeded, -amountCoin, coinLimit)
+	}
+	if operation == 4 && amountCoin < coinLimit {
+		return fmt.Errorf("%w: sell pays %d, limit %d", ErrDexLimitExceeded, amountCoin, coinLimit)
+	}
+	return nil
+}
+
 func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {
 	// 2 - adding liquidity, 3 - buy trade, 4 -sell trade, 5 - withdraw token, 6 - withdraw KURA (5,6 inactive, just withdraw is selling opposite)
 
@@ -216,11 +234,10 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 	// a DEX delegated account was a deterministic panic inside block
 	// application on every validator (QWID-2026-13). An error, by contrast,
 	// takes the ordinary invalid-transaction branch.
-	if len(tx.TxData.OptData) != 8 {
-		return nil, common.Address{}, 0, 0, 0, fmt.Errorf(
-			"DEX transaction opt data must be exactly 8 bytes (token amount), got %d", len(tx.TxData.OptData))
+	amountToken, coinLimit, err := transactionsDefinition.ParseDexOptData(tx.TxData.OptData, operation)
+	if err != nil {
+		return nil, common.Address{}, 0, 0, 0, err
 	}
-	amountToken := common.GetInt64FromByte(tx.TxData.OptData)
 	sender := tx.TxParam.Sender
 	tokenAddress := tx.ContractAddress
 	if operation == 2 && (tx.TxData.Amount < 0 || amountToken < 0) || (operation == 3 || operation == 4) && (amountToken == 0) || operation == 5 && amountToken == 0 || operation == 6 && tx.TxData.Amount == 0 {
@@ -314,6 +331,15 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 		}
 	default:
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("wrong operation on dex")
+	}
+
+	// S7-07: the sender's price limit, signed with the order. amountCoinInt64
+	// is what the sender receives (negative: pays). A violated limit is not
+	// an invalid block - the order is skipped and its fee stays paid - so a
+	// price move can neither fill it at a worse price (no sandwich) nor
+	// poison every block that carries it.
+	if err := checkDexLimit(operation, amountCoinInt64, coinLimit); err != nil {
+		return nil, common.Address{}, 0, 0, 0, err
 	}
 
 	// Reject here, while we can still refuse the transaction. EvaluateSCForBlock
@@ -433,6 +459,11 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			//DEX checking transaction
 			dexOptData, fromAddress, coinAmount, tokenAmount, price, err := GenerateOptDataDEX(t, operation)
 			loggerMain.GetLogger().Printf("Token Price: %v\n", price)
+			if errors.Is(err, ErrDexLimitExceeded) {
+				// Not executed; the fee was charged in ProcessTransaction.
+				loggerMain.GetLogger().Println("DEX order skipped:", err)
+				continue
+			}
 			if err != nil {
 				loggerMain.GetLogger().Println(err)
 				return false, nil, nil, nil, nil
@@ -707,7 +738,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	// so no concurrent run can replace them before this one reads them.
 	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 
-	VM = vm.NewEVM(blockCtx, txCtx, &State, params.AllEthashProtocolChanges, configCtx)
+	VM = vm.NewEVM(blockCtx, txCtx, &State, evmChainConfig(), configCtx)
 	defer VM.Cancel()
 
 	VM.Origin = origin
@@ -744,6 +775,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err
 		}
 	}
+	State.FinaliseTx()
 
 	return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, nil
 }
@@ -825,7 +857,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 
 	//nonce := new(big.Int).SetInt64(int64(tx.TxParam.Nonce))
 
-	VM = vm.NewEVM(blockCtx, txCtx, &State, params.AllEthashProtocolChanges, configCtx)
+	VM = vm.NewEVM(blockCtx, txCtx, &State, evmChainConfig(), configCtx)
 	defer VM.Cancel()
 
 	VM.Origin = sender
@@ -840,6 +872,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	if err != nil {
 		return logger.ToString(), ret, tokenAddress, leftOverGas, err
 	}
+	State.FinaliseTx()
 
 	return logger.ToString(), ret, tokenAddress, leftOverGas, nil
 }
@@ -901,7 +934,7 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	// every EVM run - block execution and RPC views alike - holds StateMutex,
 	// so no concurrent run can replace them before this one reads them.
 	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
-	VM = vm.NewEVM(blockCtx, txCtx, &State, params.AllEthashProtocolChanges, configCtx)
+	VM = vm.NewEVM(blockCtx, txCtx, &State, evmChainConfig(), configCtx)
 	defer VM.Cancel()
 
 	VM.Origin = origin

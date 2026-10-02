@@ -13,44 +13,7 @@ import (
 )
 
 func SignMessage(line []byte) []byte {
-
-	operation := string(line[0:4])
-	verificationNeeded := true
-	for _, noVerification := range common.ConnectionsWithoutVerification {
-		if bytes.Equal([]byte(operation), noVerification) {
-			verificationNeeded = false
-			break
-		}
-	}
-	if verificationNeeded {
-		if NodeWallet == nil || (!NodeWallet.Check() || !NodeWallet.Check2()) {
-			logger.GetLogger().Println("wallet not loaded yet")
-			return line
-		}
-		if common.IsPaused() == false {
-			// primary encryption used
-			line = common.BytesToLenAndBytes(line)
-			sign, err := NodeWallet.Sign(line, true)
-			if err != nil {
-				logger.GetLogger().Println(err)
-				return line
-			}
-			line = append(line, sign.GetBytes()...)
-
-		} else {
-			// secondary encryption
-			line = common.BytesToLenAndBytes(line)
-			sign, err := NodeWallet.Sign(line, false)
-			if err != nil {
-				logger.GetLogger().Println(err)
-				return line
-			}
-			line = append(line, sign.GetBytes()...)
-		}
-	} else {
-		line = common.BytesToLenAndBytes(line)
-	}
-	return line
+	return wallet.SignRPCRequest(NodeWallet, line)
 }
 
 func SetCurrentEncryptions() (string, string, error) {

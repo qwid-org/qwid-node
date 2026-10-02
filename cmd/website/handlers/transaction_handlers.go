@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
@@ -430,6 +431,11 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetPending(w http.ResponseWriter, r *http.Request) {
+	sess := GetSession(r.Context())
+	if sess == nil || sess.Wallet == nil {
+		JsonError(w, "Wallet not loaded", http.StatusBadRequest)
+		return
+	}
 	reply := clientrpc.Call(SignMessage([]byte("PEND")))
 	if bytes.Equal(reply, []byte("Timeout")) {
 		JsonError(w, "Timeout", http.StatusGatewayTimeout)
@@ -440,7 +446,18 @@ func GetPending(w http.ResponseWriter, r *http.Request) {
 	if len(reply) > 0 {
 		var txList []map[string]interface{}
 		if err := json.Unmarshal(reply, &txList); err == nil {
-			transactions = txList
+			// The session's own traffic only (S7-07): the node returns the
+			// whole pool, escrow and multisig included. Filtered here because
+			// an address-scoped PEND must be signed by that account's key,
+			// and this server signs with its own.
+			me := sess.Wallet.MainAddress.GetHex()
+			for _, tx := range txList {
+				sender, _ := tx["sender"].(string)
+				recipient, _ := tx["recipient"].(string)
+				if strings.EqualFold(sender, me) || strings.EqualFold(recipient, me) {
+					transactions = append(transactions, tx)
+				}
+			}
 		} else {
 			JsonResponse(w, map[string]interface{}{
 				"raw":   hex.EncodeToString(reply),

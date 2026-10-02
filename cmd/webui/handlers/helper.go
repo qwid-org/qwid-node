@@ -8,47 +8,11 @@ import (
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 func SignMessage(line []byte) []byte {
-
-	operation := string(line[0:4])
-	verificationNeeded := true
-	for _, noVerification := range common.ConnectionsWithoutVerification {
-		if bytes.Equal([]byte(operation), noVerification) {
-			verificationNeeded = false
-			break
-		}
-	}
-	if verificationNeeded {
-		if MainWallet == nil || (!MainWallet.Check() || !MainWallet.Check2()) {
-			logger.GetLogger().Println("wallet not loaded yet")
-			return line
-		}
-		if common.IsPaused() == false {
-			// primary encryption used
-			line = common.BytesToLenAndBytes(line)
-			sign, err := MainWallet.Sign(line, true)
-			if err != nil {
-				logger.GetLogger().Println(err)
-				return line
-			}
-			line = append(line, sign.GetBytes()...)
-
-		} else {
-			// secondary encryption
-			line = common.BytesToLenAndBytes(line)
-			sign, err := MainWallet.Sign(line, false)
-			if err != nil {
-				logger.GetLogger().Println(err)
-				return line
-			}
-			line = append(line, sign.GetBytes()...)
-		}
-	} else {
-		line = common.BytesToLenAndBytes(line)
-	}
-	return line
+	return wallet.SignRPCRequest(MainWallet, line)
 }
 
 func SetCurrentEncryptions() (string, string, error) {

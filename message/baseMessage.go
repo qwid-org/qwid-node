@@ -25,7 +25,9 @@ type AnyMessage interface {
 }
 
 func (m BaseMessage) GetBytes() []byte {
-	b := m.Head[:]
+	// A fresh slice (S1-12): appending to m.Head itself wrote into whatever
+	// buffer Head was decoded from.
+	b := append([]byte(nil), m.Head...)
 	b = append(b, common.GetByteInt16(m.ChainID)...)
 	return b
 }
@@ -35,7 +37,9 @@ func (m *BaseMessage) GetFromBytes(b []byte) {
 		logger.GetLogger().Println("bytes length should be 4")
 		return
 	}
-	m.Head = b[:2]
+	// A copy, not b[:2]: the input buffer is shared with zero-copy readers
+	// of the rest of the message (S1-12).
+	m.Head = append([]byte(nil), b[:2]...)
 	if !common.ContainsKey(validHead, string(m.Head)) {
 		logger.GetLogger().Println("Head not in valid heads keys")
 		return

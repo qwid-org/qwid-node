@@ -66,37 +66,6 @@ func SetEncryptionData(ne1 []byte, ne2 []byte) {
 	EncryptionOptData = append(encryption1, encryption2...)
 }
 
-func InitChannelVoting(voteChan chan []byte) {
-	quit := false
-	for !quit {
-		select {
-		case s := <-voteChan:
-			primary := true
-			if s[0] != 0 {
-				primary = false
-			}
-			err := blocks.SetEncryptionFromBytes(s[1:], primary)
-			if err != nil {
-				logger.GetLogger().Println(err)
-				voteChan <- []byte(err.Error())
-			} else {
-
-				if err != nil {
-					voteChan <- []byte(err.Error())
-				} else {
-					voteChan <- []byte("Set new encryption was successful")
-				}
-			}
-
-		case <-tcpip.Quit:
-			quit = true
-		default:
-			// Optional: Add a small sleep to prevent busy-waiting
-			time.Sleep(time.Millisecond)
-		}
-	}
-}
-
 func InitNonceService() {
 	services.SendMutexNonce.Lock()
 	services.SendChanNonce = make(chan []byte, 100)
@@ -106,7 +75,6 @@ func InitNonceService() {
 	startPublishingNonceMsg()
 	time.Sleep(time.Second)
 	go sendNonceMsgInLoop()
-	go InitChannelVoting(blocks.VoteChannel)
 	go sendNonceMsgInLoopSelf()
 }
 

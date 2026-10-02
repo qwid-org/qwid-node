@@ -44,6 +44,9 @@ func OQSVersion() string {
 // OQS_MEM_cleanse() function. Use it to clean "hot" memory areas, such as
 // secret keys etc.
 func MemCleanse(v []byte) {
+	if len(v) == 0 {
+		return // &v[0] would panic, and there is nothing to clear (S5-05)
+	}
 	C.OQS_MEM_cleanse(unsafe.Pointer(&v[0]), C.size_t(len(v)))
 }
 
@@ -456,10 +459,15 @@ func (sig *Signature) Sign(message []byte) ([]byte, error) {
 	randMutex.Lock()
 	defer randMutex.Unlock()
 
+	if len(message) == 0 {
+		return nil, errors.New("empty message") // &message[0] would panic
+	}
 	signature := make([]byte, sig.algDetails.MaxLengthSignature)
-	var lenSig int64
+	// A real size_t (S5-05): an int64 behind a *C.size_t is right only where
+	// size_t is 64 bits.
+	var lenSig C.size_t
 	rv := C.OQS_SIG_sign(sig.sig, (*C.uint8_t)(unsafe.Pointer(&signature[0])),
-		(*C.size_t)(unsafe.Pointer(&lenSig)),
+		&lenSig,
 		(*C.uint8_t)(unsafe.Pointer(&message[0])),
 		C.size_t(len(message)), (*C.uint8_t)(unsafe.Pointer(&sig.secretKey[0])))
 

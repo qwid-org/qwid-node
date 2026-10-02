@@ -85,7 +85,15 @@ type HandshakeIdentity struct {
 // by `addr`'s owner: DomainTag || nonceI || nonceR || kemPubI || kemCt || addr.
 // Identical on both sides. Binding the KEM public key and ciphertext into the
 // signed transcript makes the KEM material authenticated: a MITM that swaps
-// either value causes signature verification to fail on both sides.
+// either value under the peers' own identities causes signature verification
+// to fail on both sides.
+//
+// What it does NOT give is peer pinning (S1-10): the dialer accepts any
+// validly signed identity at an address, so an active attacker on the path
+// can terminate both legs with its own key and relay. The channel therefore
+// protects against passive eavesdropping only. Integrity of what matters -
+// transactions, blocks, nonces - rests on their own signatures, verified
+// against the on-chain key registry whichever peer relayed them.
 func handshakeTranscript(nonceI, nonceR, kemPubI, kemCt []byte, addr common.Address) []byte {
 	b := make([]byte, 0, len(handshakeDomainTag)+2*handshakeNonceLen+len(kemPubI)+len(kemCt)+common.AddressLength)
 	b = append(b, handshakeDomainTag...)

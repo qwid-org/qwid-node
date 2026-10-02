@@ -276,27 +276,28 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 		logger.GetLogger().Fatalf("cannot calculate hash of genesis block header %v", err)
 	}
 
-	myWallet := wallet.GetActiveWallet()
-	sign, err := myWallet.Sign(hashb, true)
-	if err != nil {
-		logger.GetLogger().Fatalf("cannot sign genesis block header %v", err)
-	}
-	bh.Signature = *sign
-	logger.GetLogger().Println("Block Signature:", bh.Signature.GetHex())
-
+	// The header signature comes from genesis.json. A node signs nothing from
+	// the config file (S9-06): only when that signature fails to verify AND
+	// this node runs the operator's wallet does it print the signature the
+	// file needs - the step of preparing a new genesis - and stop.
 	signature, err := common.GetSignatureFromString(genesis.Signature, addressOp1)
-	if err != nil {
-		logger.GetLogger().Fatal(err)
+	if err == nil {
+		bh.Signature = signature
 	}
-	bh.Signature = signature
+	if err != nil || !bh.Verify(common.SigName(), common.SigName2(), false, false) {
+		myWallet := wallet.GetActiveWallet()
+		if myWallet != nil && bytes.Equal(myWallet.MainAddress.GetBytes(), addressOp1.GetBytes()) {
+			if sign, serr := myWallet.Sign(hashb, true); serr == nil {
+				logger.GetLogger().Println("Block Signature:", sign.GetHex())
+			}
+		}
+		logger.GetLogger().Fatal("Block Header signature in genesis block fails to verify " +
+			"(run the node with the operator wallet to print the signature genesis.json needs)")
+	}
 
 	bhHash, err := bh.CalcHash()
 	if err != nil {
 		logger.GetLogger().Fatalf("cannot calculate hash of genesis block header %v", err)
-	}
-
-	if bh.Verify(common.SigName(), common.SigName2(), false, false) == false {
-		logger.GetLogger().Fatal("Block Header signature in genesis block fails to verify")
 	}
 	bb.BaseHeader = bh
 	bb.BlockHeaderHash = bhHash
@@ -388,14 +389,16 @@ func GenesisTransaction(sender common.Address, recipient common.Address, genTx G
 	t.Signature = signature
 
 	if t.VerifyGenesis(common.SigName(), common.SigName2(), false, false) == false {
+		// As for the header: only the operator's own node prints the
+		// signature genesis.json needs (S9-06).
 		myWallet := wallet.GetActiveWallet()
-		logger.GetLogger().Println(myWallet.Account1.PublicKey.GetHex())
-		err = t.Sign(myWallet, true)
-		if err != nil {
-			logger.GetLogger().Fatal("Signing error", err)
+		if myWallet != nil && bytes.Equal(myWallet.MainAddress.GetBytes(), sender.GetBytes()) {
+			if err := t.Sign(myWallet, true); err == nil {
+				logger.GetLogger().Println("Genesis transaction signature:", t.Signature.GetHex())
+			}
 		}
-		println(t.Signature.GetHex())
-		logger.GetLogger().Fatal("genesis transaction cannot be verified")
+		logger.GetLogger().Fatal("genesis transaction cannot be verified " +
+			"(run the node with the operator wallet to print the signature genesis.json needs)")
 	}
 	logger.GetLogger().Println("transaction signature: ", t.Signature.GetHex())
 	return t

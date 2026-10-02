@@ -228,8 +228,10 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	// already confirmed it. Without this, a node with a single peer crawls one
 	// bucket per round toward a height its operator knows to be real, logging
 	// "not confirmed by enough peers" the whole way. This only lifts the rate
-	// limit: every block is still fully verified, so a lying peer gains nothing
-	// but the ability to serve us the chain faster.
+	// limit: every block is still verified before it is applied (header,
+	// state root, every transaction signature), and a rewind happens only to
+	// the ancestor of a verified competing block (S2-01) - a lying peer can
+	// waste our time, not feed us an invalid chain.
 	if claimedHeight <= common.CurrentHeightOfNetwork {
 		return true, claimedHeight
 	}
@@ -241,8 +243,9 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	// (two nodes: exactly one peer) a fixed quorum can never be met, so a
 	// lagging node crawled one bucket per round toward a height its only peer
 	// kept honestly reporting, and any hiccup in 'hi' delivery turned the crawl
-	// into a full stall. Blocks are fully verified regardless; this quorum only
-	// rate-limits how fast we ask.
+	// into a full stall. Blocks are verified before they are applied and
+	// rewinds need a verified competing block regardless (S2-01, S2-11); this
+	// quorum only rate-limits how fast we ask.
 	required := common.MinPeersForLargeSync
 	if peers := syncPeerCount(); peers < required {
 		required = peers
@@ -739,6 +742,12 @@ func OnMessage(addr [4]byte, m []byte) {
 		// at all. It stays at h when nothing new is complete.
 		completeUpTo := h
 		merkleTries := map[int64]*transactionsPool.MerkleTree{}
+		// One deferred sweep instead of a defer per verified block (S2-11).
+		defer func() {
+			for _, mt := range merkleTries {
+				mt.Destroy()
+			}
+		}()
 
 		// First pass, cheap hash lookups only: detect a fork against the part of
 		// the batch we already have, and take a census of the transactions we are
@@ -915,8 +924,8 @@ func OnMessage(addr [4]byte, m []byte) {
 			verifyStart := time.Now()
 			merkleTrie, err := blocks.CheckBaseBlock(block, oldBlock, false)
 			timing.verify += time.Since(verifyStart)
-			defer merkleTrie.Destroy()
 			if err != nil {
+				merkleTrie.Destroy()
 				logger.GetLogger().Printf("ERROR: Base block verification failed for block %d: %v", index, err)
 				// A block verified here may depend on state that an earlier block of
 				// this same batch only writes when it is applied - a validator pubkey

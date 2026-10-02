@@ -537,8 +537,8 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	// because admission rules can drift and the executor must never rely on
 	// them (QWID-2026-13).
 	if n, derr := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient); derr == nil && n > 512 {
-		if len(tx.TxData.OptData) != 8 {
-			logger.GetLogger().Printf("DEX transaction opt data must be exactly 8 bytes, got %d", len(tx.TxData.OptData))
+		if _, _, err := ParseDexOptData(tx.TxData.OptData, n-512); err != nil {
+			logger.GetLogger().Println(err)
 			return false
 		}
 	}
