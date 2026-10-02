@@ -1,11 +1,12 @@
 package tcpip
 
 import (
-	"time"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
@@ -26,13 +27,30 @@ import (
 //
 // The real transport IP is kept per handle for the few places that genuinely
 // need it: dialing, banning, and per-source rate limiting.
+//
+// Handles are never shared (S1-06). The 16-bit counter used to wrap after
+// 65 536 nodeIDs - cheap to mint - and hand a live handle to a new peer,
+// redirecting the honest peer's bans, limits and dials to the attacker. Now a
+// handle is reused only after it has been evicted; one transport address
+// holds at most maxHandlesPerIP of them (its oldest is evicted first), and
+// only if the whole space is in use is the globally least recently used one
+// evicted.
 var (
 	handleMutex    sync.Mutex
 	handleByNodeID        = map[[common.AddressLength]byte][4]byte{}
 	realIPByHandle        = map[[4]byte][4]byte{}
 	nodeIDByHandle        = map[[4]byte]common.Address{}
+	handleLastUse         = map[[4]byte]int64{}
+	handlesByIP           = map[[4]byte]map[[4]byte]struct{}{}
+	handleUseClock int64
 	nextHandle     uint16 = 1
+	// handleSpace is the number of usable handles: 10.254.0.1 - 10.254.255.254.
+	handleSpace = 65534
 )
+
+// maxHandlesPerIP bounds the nodeIDs one transport address can hold handles
+// for: well above the inbound connections it may keep (4 per topic, S1-04).
+const maxHandlesPerIP = 32
 
 // IsPeerHandle reports whether a 4-byte address is a virtual peer handle
 // rather than a transport IP.
@@ -48,17 +66,97 @@ func HandleForPeer(nodeID common.Address, realIP [4]byte) [4]byte {
 	copy(key[:], nodeID.GetBytes())
 	handleMutex.Lock()
 	defer handleMutex.Unlock()
+	handleUseClock++
 	if h, ok := handleByNodeID[key]; ok {
-		realIPByHandle[h] = realIP
+		setHandleIPLocked(h, realIP)
+		handleLastUse[h] = handleUseClock
 		return h
 	}
-	h := [4]byte{10, 254, byte(nextHandle >> 8), byte(nextHandle)}
-	nextHandle++
+	if len(handlesByIP[realIP]) >= maxHandlesPerIP {
+		evictHandleLocked(oldestHandleLocked(handlesByIP[realIP]))
+	}
+	h, ok := freeHandleLocked()
+	if !ok {
+		all := make(map[[4]byte]struct{}, len(nodeIDByHandle))
+		for k := range nodeIDByHandle {
+			all[k] = struct{}{}
+		}
+		evictHandleLocked(oldestHandleLocked(all))
+		h, _ = freeHandleLocked()
+	}
 	handleByNodeID[key] = h
-	realIPByHandle[h] = realIP
 	nodeIDByHandle[h] = nodeID
+	setHandleIPLocked(h, realIP)
+	handleLastUse[h] = handleUseClock
 	logger.GetLogger().Printf("peer handle %v allocated for nodeID %x (transport %v)", h, nodeID.GetBytes()[:6], realIP)
 	return h
+}
+
+func setHandleIPLocked(h, realIP [4]byte) {
+	if old, ok := realIPByHandle[h]; ok && old != realIP {
+		delete(handlesByIP[old], h)
+		if len(handlesByIP[old]) == 0 {
+			delete(handlesByIP, old)
+		}
+	}
+	realIPByHandle[h] = realIP
+	if handlesByIP[realIP] == nil {
+		handlesByIP[realIP] = map[[4]byte]struct{}{}
+	}
+	handlesByIP[realIP][h] = struct{}{}
+}
+
+// freeHandleLocked returns the next handle not currently assigned.
+func freeHandleLocked() ([4]byte, bool) {
+	if len(nodeIDByHandle) >= handleSpace {
+		return [4]byte{}, false
+	}
+	for i := 0; i <= handleSpace; i++ {
+		n := nextHandle
+		nextHandle++
+		if int(nextHandle) > handleSpace {
+			nextHandle = 1
+		}
+		if n == 0 || int(n) > handleSpace {
+			continue
+		}
+		h := [4]byte{10, 254, byte(n >> 8), byte(n)}
+		if _, used := nodeIDByHandle[h]; !used {
+			return h, true
+		}
+	}
+	return [4]byte{}, false
+}
+
+func oldestHandleLocked(set map[[4]byte]struct{}) [4]byte {
+	var oldest [4]byte
+	best := int64(-1)
+	for h := range set {
+		if t := handleLastUse[h]; best < 0 || t < best {
+			oldest, best = h, t
+		}
+	}
+	return oldest
+}
+
+func evictHandleLocked(h [4]byte) {
+	id, ok := nodeIDByHandle[h]
+	if !ok {
+		return
+	}
+	var key [common.AddressLength]byte
+	copy(key[:], id.GetBytes())
+	delete(handleByNodeID, key)
+	delete(nodeIDByHandle, h)
+	delete(handleLastUse, h)
+	if ip, ok := realIPByHandle[h]; ok {
+		delete(handlesByIP[ip], h)
+		if len(handlesByIP[ip]) == 0 {
+			delete(handlesByIP, ip)
+		}
+	}
+	delete(realIPByHandle, h)
+	logger.GetLogger().Printf("peer handle %v evicted (nodeID %x)", h, id.GetBytes()[:6])
 }
 
 // RealIPForHandle translates a handle back to the transport IP last seen
@@ -147,84 +245,84 @@ func topicHandler(topic [2]byte) func([4]byte, []byte) {
 	return topicHandlers[topic]
 }
 
-// frameAssembler reassembles the wire framing for one connection: messages
-// are MessageInitialization || body || "<-END->", back to back on the stream.
+// Wire framing: MessageInitialization || uint32 big-endian body length || body,
+// back to back on the stream.
 //
-// The delimiter is searched INSIDE the accumulated buffer, not just at read
-// boundaries. The old framing only recognised a message when "<-END->"
-// happened to fall exactly at the end of a read chunk - true by luck on a
-// quiet link (gaps between messages align the reads) and almost never true on
-// a busy one, where messages queue back to back: frames got glued, the parser
-// took the first message of the glued blob and the rest was silently lost.
-// Under sync load that surfaced as "the peer sends many bx, we receive two".
-type frameAssembler struct {
-	topic      [2]byte
-	buf        []byte
-	scanned    int // prefix of buf already searched for the delimiter
-	discarding bool
+// Frames are delimited by their length, never by a marker searched in the
+// data (S1-01). Bodies are raw binary carrying sender-chosen bytes - OptData,
+// contract code - so the old "<-END->" delimiter could be planted inside a
+// transaction: every node relaying it had its messages cut in two and was
+// penalised for the "violation", while the author went unpunished.
+const frameHeaderLen = 8
+
+func encodeFrame(body []byte) []byte {
+	f := make([]byte, frameHeaderLen, frameHeaderLen+len(body))
+	copy(f, common.MessageInitialization[:])
+	binary.BigEndian.PutUint32(f[4:], uint32(len(body)))
+	return append(f, body...)
 }
 
-var frameEnd = []byte("<-END->")
+// frameAssembler reassembles frames for one connection. Frames split across
+// reads and several frames in one read are both handled.
+type frameAssembler struct {
+	topic [2]byte
+	buf   []byte
+	// skip counts body bytes of an over-long frame still to be dropped: they
+	// are counted off, never buffered, so a declared length cannot make us
+	// allocate.
+	skip int64
+	// broken is set by a wrong initialization marker. A length-framed stream
+	// cannot be resynchronised after that, so all further input is dropped and
+	// reported until the connection goes away.
+	broken bool
+}
 
-// push consumes one read chunk and returns every complete message payload in
-// the buffer (init marker stripped), plus whether a protocol violation was
-// seen (over-long frame or bad initialization marker).
+// push consumes one read chunk and returns every complete message payload,
+// plus whether a protocol violation was seen (over-long or empty frame, bad
+// initialization marker, or input on a broken stream).
 func (fa *frameAssembler) push(r []byte) (payloads [][]byte, violation bool) {
-	fa.buf = append(fa.buf, r...)
-	for {
-		// Resume the search where it stopped, backed off so a delimiter split
-		// across two pushes is still found.
-		start := fa.scanned - (len(frameEnd) - 1)
-		if start < 0 {
-			start = 0
-		}
-		idx := bytes.Index(fa.buf[start:], frameEnd)
-		if idx < 0 {
-			// A trailing delimiter prefix may finish in the next read. It is
-			// framing, not body data, and must survive entry into discard mode.
-			pending := min(len(fa.buf), len(frameEnd)-1)
-			for pending > 0 && !bytes.Equal(fa.buf[len(fa.buf)-pending:], frameEnd[:pending]) {
-				pending--
-			}
-			if !fa.discarding && len(fa.buf)-pending > int(MaxMessageSizeForTopic(fa.topic)) {
-				logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
-					fa.topic[0], fa.topic[1], len(fa.buf), MaxMessageSizeForTopic(fa.topic))
-				violation = true
-				fa.discarding = true
-			}
-			if fa.discarding {
-				// Retain at most six bytes, in a fresh allocation: reslicing
-				// the old buffer would keep the oversized backing array alive.
-				tail := make([]byte, pending)
-				copy(tail, fa.buf[len(fa.buf)-pending:])
-				fa.buf = tail
-			}
-			fa.scanned = len(fa.buf)
-			return payloads, violation
-		}
-		idx += start
-		frame := fa.buf[:idx]
-		fa.buf = append([]byte(nil), fa.buf[idx+len(frameEnd):]...)
-		fa.scanned = 0
-		if fa.discarding {
-			// Tail of the over-long frame ended; resume normal framing.
-			fa.discarding = false
-			logger.GetLogger().Printf("resynchronised on topic %c%c after discarding an over-long message", fa.topic[0], fa.topic[1])
-			continue
-		}
-		if len(frame) > int(MaxMessageSizeForTopic(fa.topic)) {
-			logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
-				fa.topic[0], fa.topic[1], len(frame), MaxMessageSizeForTopic(fa.topic))
-			violation = true
-			continue
-		}
-		if len(frame) <= 4 || !bytes.Equal(frame[:4], common.MessageInitialization[:]) {
-			logger.GetLogger().Println("wrong MessageInitialization", frame[:min(4, len(frame))], "should be", common.MessageInitialization[:])
-			violation = true
-			continue
-		}
-		payloads = append(payloads, frame[4:])
+	if fa.broken {
+		return nil, true
 	}
+	if fa.skip > 0 {
+		n := min(fa.skip, int64(len(r)))
+		fa.skip -= n
+		r = r[n:]
+	}
+	fa.buf = append(fa.buf, r...)
+	for len(fa.buf) >= frameHeaderLen {
+		if !bytes.Equal(fa.buf[:4], common.MessageInitialization[:]) {
+			logger.GetLogger().Println("wrong MessageInitialization", fa.buf[:4], "should be", common.MessageInitialization[:])
+			fa.broken = true
+			fa.buf = nil
+			return payloads, true
+		}
+		size := int64(binary.BigEndian.Uint32(fa.buf[4:frameHeaderLen]))
+		if size > int64(MaxMessageSizeForTopic(fa.topic)) {
+			logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
+				fa.topic[0], fa.topic[1], size, MaxMessageSizeForTopic(fa.topic))
+			violation = true
+			rest := fa.buf[frameHeaderLen:]
+			n := min(size, int64(len(rest)))
+			fa.skip = size - n
+			fa.buf = append([]byte(nil), rest[n:]...)
+			continue
+		}
+		if size == 0 {
+			violation = true
+			fa.buf = fa.buf[frameHeaderLen:]
+			continue
+		}
+		if int64(len(fa.buf)) < frameHeaderLen+size {
+			break
+		}
+		end := frameHeaderLen + size
+		payloads = append(payloads, fa.buf[frameHeaderLen:end:end])
+		fa.buf = fa.buf[end:]
+	}
+	// Detach the remainder: returned payloads alias the old backing array.
+	fa.buf = append([]byte(nil), fa.buf...)
+	return payloads, violation
 }
 
 // acceptedReceiveLoop reads an ACCEPTED (inbound) connection and dispatches
@@ -277,10 +375,9 @@ func acceptedReceiveLoop(topic [2]byte, key [4]byte, realIP [4]byte, conn net.Co
 		payloads, violation := fa.push(r)
 		if violation {
 			PeersMutex.Lock()
-			ReduceTrustRegisterPeer(realIP)
-			trust, ok := validPeersConnected[realIP]
+			ban := ReduceTrustRegisterPeer(realIP)
 			PeersMutex.Unlock()
-			if ok && trust <= 0 {
+			if ban {
 				BanIP(realIP)
 				conn.Close()
 				return
@@ -297,10 +394,9 @@ func acceptedReceiveLoop(topic [2]byte, key [4]byte, realIP [4]byte, conn net.Co
 			if !AllowMessageFromIPForHead(realIP, head) {
 				logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", realIP, string(head[:]))
 				PeersMutex.Lock()
-				ReduceTrustRegisterPeer(realIP)
-				trust, ok := validPeersConnected[realIP]
+				ban := ReduceTrustRegisterPeer(realIP)
 				PeersMutex.Unlock()
-				if ok && trust <= 0 {
+				if ban {
 					BanIP(realIP)
 					conn.Close()
 					return

@@ -29,6 +29,13 @@ type encryptedConn struct {
 	writeMu   sync.Mutex
 	readMu    sync.Mutex
 	readBuf   []byte
+	// Partial record state (S1-08). A read deadline can expire inside a
+	// record; the bytes consumed so far are kept so the next Read resumes the
+	// record instead of mistaking the middle of a ciphertext for a header.
+	hdr  [4]byte
+	hdrN int
+	ct   []byte
+	ctN  int
 }
 
 func newEncryptedConn(raw net.Conn, keys *SessionKeys) (net.Conn, error) {
@@ -79,18 +86,24 @@ func (e *encryptedConn) Read(p []byte) (int, error) {
 	e.readMu.Lock()
 	defer e.readMu.Unlock()
 	if len(e.readBuf) == 0 {
-		var hdr [4]byte
-		if _, err := io.ReadFull(e.raw, hdr[:]); err != nil {
+		for e.ct == nil {
+			if err := readMore(e.raw, e.hdr[:], &e.hdrN); err != nil {
+				return 0, err
+			}
+			n := int(binary.BigEndian.Uint32(e.hdr[:]))
+			e.hdrN = 0
+			// n == Overhead is an empty record. Write never sends one, and each
+			// cost the reader a full receive cycle for 20 wire bytes (S1-03).
+			if n <= e.readAEAD.Overhead() || n > maxRecordPayload+e.readAEAD.Overhead() {
+				return 0, fmt.Errorf("encryptedConn: bad record length %d", n)
+			}
+			e.ct, e.ctN = make([]byte, n), 0
+		}
+		if err := readMore(e.raw, e.ct, &e.ctN); err != nil {
 			return 0, err
 		}
-		n := int(binary.BigEndian.Uint32(hdr[:]))
-		if n < e.readAEAD.Overhead() || n > maxRecordPayload+e.readAEAD.Overhead() {
-			return 0, fmt.Errorf("encryptedConn: bad record length %d", n)
-		}
-		ct := make([]byte, n)
-		if _, err := io.ReadFull(e.raw, ct); err != nil {
-			return 0, err
-		}
+		ct := e.ct
+		e.ct = nil
 		nonce := recordNonce(e.readCtr)
 		e.readCtr++
 		pt, err := e.readAEAD.Open(nil, nonce, ct, nil)
@@ -102,6 +115,25 @@ func (e *encryptedConn) Read(p []byte) (int, error) {
 	n := copy(p, e.readBuf)
 	e.readBuf = e.readBuf[n:]
 	return n, nil
+}
+
+// readMore fills buf[*done:] from r, advancing *done as bytes arrive, so a
+// timeout or other error leaves the progress in place for the next call.
+func readMore(r io.Reader, buf []byte, done *int) error {
+	for *done < len(buf) {
+		n, err := r.Read(buf[*done:])
+		*done += n
+		if err != nil {
+			if *done == len(buf) && err == io.EOF {
+				return nil
+			}
+			if err == io.EOF && *done > 0 {
+				return io.ErrUnexpectedEOF
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *encryptedConn) Close() error                       { return e.raw.Close() }

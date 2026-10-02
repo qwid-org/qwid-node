@@ -15,7 +15,6 @@ import (
 	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
-	"github.com/qwid-org/qwid-node/voting"
 )
 
 func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) error {
@@ -55,12 +54,13 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 }
 
 // VerifyStakeDependent runs the block checks that depend on the staking snapshot
-// — the top-128 producer eligibility and the oracle 2/3-stake thresholds. It must
+// — the top-128 producer eligibility, the oracle 2/3-stake thresholds and the
+// signature-scheme vote (S4-05). It must
 // be called at block-application time, when the in-memory staking state reflects
 // height-1 (the block's parent). Running these inside CheckBaseBlock was wrong for
 // batched sync, where every batched block was verified against the same start-of-
 // batch snapshot instead of its own parent's.
-func VerifyStakeDependent(newBlock Block) error {
+func VerifyStakeDependent(newBlock, lastBlock Block) error {
 	blockHeight := newBlock.GetHeader().Height
 	if blockHeight > 0 && !account.IsTop128StakingNode(
 		mustDelegatedAccountID(newBlock.GetHeader().DelegatedAccount),
@@ -68,10 +68,11 @@ func VerifyStakeDependent(newBlock Block) error {
 	) {
 		return fmt.Errorf("block producer is not an eligible top-128 staking node")
 	}
-	if blockHeight >= OracleProofsActivationHeight {
-		if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
-			return fmt.Errorf("oracle proof authorization fails: %w", err)
-		}
+	if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
+		return fmt.Errorf("oracle proof authorization fails: %w", err)
+	}
+	if err := VerifyEncryptionVotes(newBlock, lastBlock); err != nil {
+		return fmt.Errorf("scheme vote fails: %w", err)
 	}
 	totalStaked := account.GetStakedInAllDelegatedAccounts()
 	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
@@ -114,6 +115,11 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	if newBlock.GetBlockSupply() > common.MaxTotalSupply {
 		return nil, fmt.Errorf("supply is too high")
 	}
+	// S3-07: reject an out-of-range reward percentage here, before any
+	// transaction of the block is applied.
+	if rp := newBlock.GetRewardPercentage(); rp < 0 || rp > 500 {
+		return nil, fmt.Errorf("reward percentage %d outside 0..500", rp)
+	}
 	// Reject repeated or over-count transaction hashes before any per-tx work
 	// (QWID-2026-35); this runs on the sync path too since CheckBaseBlock does.
 	if err := validateBlockTxHashes(newBlock.TransactionsHashes); err != nil {
@@ -134,6 +140,24 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	}
 	if !bytes.Equal(hash.GetBytes(), newBlock.BlockHash.GetBytes()) {
 		return nil, fmt.Errorf("wrong hash of block")
+	}
+	// S3-03: proof-of-synergy above is judged on BlockHeaderHash, so it must be
+	// the header's real hash - a free field let a producer win every lottery.
+	header := newBlock.GetHeader()
+	headerHash, err := header.CalcHash()
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(headerHash.GetBytes(), newBlock.BaseBlock.BlockHeaderHash.GetBytes()) {
+		return nil, fmt.Errorf("block header hash does not match the header")
+	}
+	// S3-04: the signed header commits to the body; an edited body is invalid.
+	bodyHash, err := newBlock.BaseBlock.CalcBodyHash()
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(bodyHash.GetBytes(), newBlock.GetHeader().BodyHash.GetBytes()) {
+		return nil, fmt.Errorf("block body does not match the signed body hash")
 	}
 	rootMerkleTrie := newBlock.GetHeader().RootMerkleTree
 	txs := newBlock.TransactionsHashes
@@ -161,23 +185,12 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// Bind the embedded oracle values to signed nonce transactions: every price
 	// and rand entry must be backed by a signature-verified, fresh proof so a
 	// producer cannot fabricate values attributed to other validators.
-	if blockHeight >= OracleProofsActivationHeight {
-		if err := AuthenticateOracleProofs(newBlock, lastBlock); err != nil {
-			return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
-		}
+	if err := AuthenticateOracleProofs(newBlock, lastBlock); err != nil {
+		return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
 	}
 	if len(newBlock.BaseBlock.BaseHeader.Encryption1[:]) == 0 || len(newBlock.BaseBlock.BaseHeader.Encryption2[:]) == 0 {
 		return nil, fmt.Errorf("encryption opt data should be always present in block")
 	}
-	blockTime := newBlock.GetBlockTimeStamp()
-	currTime := common.GetCurrentTimeStampInSecond()
-	shouldCheck := !((currTime - blockTime) > int64(common.BlockTimeInterval)*common.VotingHeightDistance)
-	if forceShouldCheck == false {
-		shouldCheck = false
-	}
-	// totalStaked is used by the encryption pause/replace voting checks below,
-	// which only run when shouldCheck is true (the live path, correct snapshot).
-	totalStaked := account.GetStakedInAllDelegatedAccounts()
 	err = validateBlockTimestamp(newBlock, lastBlock, forceShouldCheck)
 	if err != nil {
 		return nil, err
@@ -185,7 +198,9 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// Recompute the expected difficulty from the parent block and the committed
 	// timestamps and reject any block that declares a different value. Without
 	// this a producer could declare an arbitrarily low difficulty (consensus).
-	if blockHeight >= TimestampDifficultyActivationHeight && !ValidDifficulty(
+	// Genesis has no parent to derive a difficulty from (InitGenesis checks it
+	// against itself); every later block must match its parent's.
+	if blockHeight > 0 && !ValidDifficulty(
 		newBlock.GetHeader().Difficulty,
 		lastBlock.GetHeader().Difficulty,
 		lastBlock.GetBlockTimeStamp(),
@@ -193,110 +208,64 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	) {
 		return nil, fmt.Errorf("declared difficulty does not match expected difficulty derived from parent block")
 	}
-	if !common.IsSyncing.Load() && !bytes.Equal(newBlock.BaseBlock.BaseHeader.Encryption1[:], lastBlock.BaseBlock.BaseHeader.Encryption1[:]) {
-		enc1, err := FromBytesToEncryptionConfig(newBlock.BaseBlock.BaseHeader.Encryption1[:], true)
+	// Signature-scheme changes are judged against the PARENT block's config,
+	// on every path (S3-06): neither the node's own config nor IsSyncing - which
+	// a peer can force - decides whether a block may change the scheme. The
+	// stake vote is counted in VerifyStakeDependent (S4-05).
+	for _, primary := range []bool{true, false} {
+		slot := newBlock.BaseBlock.BaseHeader.Encryption1
+		if !primary {
+			slot = newBlock.BaseBlock.BaseHeader.Encryption2
+		}
+		changed, err := checkEncryptionChangeShape(slot, lastBlock, primary)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("encryption %v: %w", map[bool]int{true: 1, false: 2}[primary], err)
 		}
-		// Reported alongside the node's own view: when the two disagree, the
-		// node's global config has drifted from the chain and that, not the
-		// block, is the thing to investigate.
-		lastBlockEnc1Paused := false
-		if pe, perr := FromBytesToEncryptionConfig(lastBlock.BaseBlock.BaseHeader.Encryption1[:], true); perr == nil {
-			lastBlockEnc1Paused = pe.IsPaused
-		}
-		_ = lastBlockEnc1Paused
-
-		if enc1.SigName == common.SigName() && enc1.IsPaused == common.IsPaused() {
-			//newBlock.BaseBlock.BaseHeader.Encryption1 = []byte{}
-			logger.GetLogger().Println("no need to change encryption, so leave encryption 1 empty")
-		} else {
-			if !oqs.VerifyEncConfig(enc1) {
-				return nil, fmt.Errorf("encryption 1 verification fails")
-			}
-			if shouldCheck && common.IsPaused() == false && common.SigName() != enc1.SigName {
-				return nil, fmt.Errorf("you need to pause first to replace encryption, 1: block proposes %q while the node holds %q and reports the primary as live (paused=%v); the parent block records paused=%v",
-					enc1.SigName, common.SigName(), common.IsPaused(), lastBlockEnc1Paused)
-			}
-			if enc1.IsPaused == true && common.IsPaused() == true && enc1.SigName == common.SigName() {
-				return nil, fmt.Errorf("pausing fails, encryption is just paused, 1: block proposes pausing %q which the node already holds paused", enc1.SigName)
-			}
-			if shouldCheck && (enc1.SigName != common.SigName()) && (enc1.IsPaused == false) {
-				return nil, fmt.Errorf("new encryption has to be paused, 1: block proposes %q with paused=false while replacing %q", enc1.SigName, common.SigName())
-			}
-
-			if shouldCheck && (enc1.SigName != common.SigName()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, true, newBlock.BaseBlock.BaseHeader.Encryption1[:]) {
-				return nil, fmt.Errorf("voting replacement encryption check fails, 1: not enough staked votes back replacing %q with %q at height %d", common.SigName(), enc1.SigName, blockHeight)
-			}
-			if shouldCheck && enc1.IsPaused == true && enc1.SigName == common.SigName() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, true, newBlock.BaseBlock.BaseHeader.Encryption1[:]) {
-				return nil, fmt.Errorf("voting pausing check fails, 1: not enough staked votes back pausing %q at height %d", enc1.SigName, blockHeight)
-			}
-			// Pausing the live primary makes the CURRENT SECONDARY the active
-			// scheme. Refuse it unless a key for that secondary is already
-			// registered for this block's operator. Otherwise the node would owe
-			// every following block a signature under a scheme whose key no node
-			// can verify, while the paused primary's signatures are rejected too
-			// (wallet.Verify accepts only the non-paused slot) — a permanent
-			// deadlock in which the new key can never even be registered
-			// (incident 2026-09-08). Register the spare while the primary is live,
-			// then pause. Skipped during sync (shouldCheck false).
-			if shouldCheck && enc1.IsPaused && !common.IsPaused() && enc1.SigName == common.SigName() {
-				op := newBlock.GetHeader().OperatorAccount
-				if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, false, common.PubKeyLength2(false)); kerr != nil {
-					return nil, fmt.Errorf("refusing to pause primary %q: the secondary scheme %q that becomes active has no registered key for operator %s — register it first (while the primary is live), then pause, to avoid the unregistered-active-scheme deadlock",
-						common.SigName(), common.SigName2(), op.GetHex())
-				}
-			}
-			if enc1.SigName == common.SigName2() {
-				return nil, fmt.Errorf("cannot exist 2 the same ecnryptions schemes, 1")
-			}
-		}
-	}
-
-	if !common.IsSyncing.Load() && !bytes.Equal(newBlock.BaseBlock.BaseHeader.Encryption2[:], lastBlock.BaseBlock.BaseHeader.Encryption2[:]) {
-		enc2, err := FromBytesToEncryptionConfig(newBlock.BaseBlock.BaseHeader.Encryption2[:], false)
-		if err != nil {
-			return nil, err
-		}
-		if enc2.SigName == common.SigName2() && enc2.IsPaused == common.IsPaused2() {
-			//newBlock.BaseBlock.BaseHeader.Encryption2 = []byte{}
-			logger.GetLogger().Println("no need to change encryption, so leave encryption 2 empty")
-		} else {
-			if !oqs.VerifyEncConfig(enc2) {
-				return nil, fmt.Errorf("encryption 2 verification fails")
-			}
-			if shouldCheck && common.IsPaused2() == false && common.SigName2() != enc2.SigName {
-				return nil, fmt.Errorf("you need to pause first to replace encryption, 2")
-			}
-			if enc2.IsPaused == true && common.IsPaused2() == true && enc2.SigName == common.SigName2() {
-				return nil, fmt.Errorf("pausing fails, encryption is just puased, 2")
-			}
-			if shouldCheck && (enc2.SigName != common.SigName2()) && (enc2.IsPaused == false) {
-				return nil, fmt.Errorf("new encryption has to be paused, 2")
-			}
-			if shouldCheck && (enc2.SigName != common.SigName2()) && !voting.VerifyEncryptionForReplacing(blockHeight, totalStaked, false, newBlock.BaseBlock.BaseHeader.Encryption2[:]) {
-				return nil, fmt.Errorf("voting replacement encryption check fails, 2")
-			}
-			if shouldCheck && enc2.IsPaused == true && enc2.SigName == common.SigName2() && !voting.VerifyEncryptionForPausing(blockHeight, totalStaked, false, newBlock.BaseBlock.BaseHeader.Encryption2[:]) {
-				return nil, fmt.Errorf("voting pausing check fails, 2")
-			}
-			// Symmetric to the primary case: pausing the live secondary makes the
-			// PRIMARY the active scheme, so refuse it unless the operator has a
-			// registered primary key (avoids the unregistered-active-scheme
-			// deadlock; incident 2026-09-08).
-			if shouldCheck && enc2.IsPaused && !common.IsPaused2() && enc2.SigName == common.SigName2() {
-				op := newBlock.GetHeader().OperatorAccount
-				if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, true, common.PubKeyLength(false)); kerr != nil {
-					return nil, fmt.Errorf("refusing to pause secondary %q: the primary scheme %q that becomes active has no registered key for operator %s — register it first, then pause",
-						common.SigName2(), common.SigName(), op.GetHex())
-				}
-			}
-			if enc2.SigName == common.SigName() {
-				return nil, fmt.Errorf("cannot exist 2 the same ecnryptions schemes, 2")
+		if changed {
+			if err := checkPauseLeavesRegisteredKey(newBlock, lastBlock, slot, primary); err != nil {
+				return nil, err
 			}
 		}
 	}
 	return merkleTrie, nil
+}
+
+// checkPauseLeavesRegisteredKey: pausing one slot's scheme makes the other
+// slot's scheme the active one. Refuse it unless this block's operator already
+// has a registered key for that scheme - otherwise every following block owes
+// a signature no node can verify while the paused scheme's signatures are
+// rejected too, a permanent deadlock in which the new key can never even be
+// registered (incident 2026-09-08). Register the spare while the current
+// scheme is live, then pause.
+func checkPauseLeavesRegisteredKey(newBlock, lastBlock Block, slot []byte, primary bool) error {
+	next, err := oqs.FromBytesToEncryptionConfig(slot)
+	if err != nil {
+		return err
+	}
+	cur, err := parentSlotConfig(lastBlock, primary)
+	if err != nil {
+		return err
+	}
+	if !(next.IsPaused && !cur.IsPaused && next.SigName == cur.SigName) {
+		return nil
+	}
+	becomesActive, err := parentSlotConfig(lastBlock, !primary)
+	if err != nil {
+		return err
+	}
+	op := newBlock.GetHeader().OperatorAccount
+	if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, !primary, becomesActive.PubKeyLength); kerr != nil {
+		return fmt.Errorf("refusing to pause %q: the scheme %q that becomes active has no registered key for operator %s - register it first, then pause",
+			cur.SigName, becomesActive.SigName, op.GetHex())
+	}
+	return nil
+}
+
+// TransactionHeightInWindow reports whether a transaction stamped txHeight may
+// be included in a block at blockHeight (S4-01): not above the block, and at
+// most MaxTransactionAgeBlocks below it.
+func TransactionHeightInWindow(txHeight, blockHeight int64) bool {
+	return txHeight <= blockHeight && blockHeight-txHeight <= common.MaxTransactionAgeBlocks
 }
 
 func mustDelegatedAccountID(address common.Address) int {
@@ -431,6 +400,13 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 		if err != nil {
 			return 0, 0, err
 		}
+		if !TransactionHeightInWindow(poolTx.GetHeight(), block.GetHeader().Height) {
+			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
+			if badTxErr == nil {
+				badTxErr = fmt.Errorf("transaction %x height %d outside the window for block %d", hash[:8], poolTx.GetHeight(), block.GetHeader().Height)
+			}
+			continue
+		}
 
 		fee, feeErr := poolTx.CalcFee()
 		if feeErr != nil {
@@ -496,9 +472,15 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			stakingAccounts[stakingAcc.Address] = stakingAcc
 			ret := CheckStakingTransaction(poolTx, stakingAccounts[stakingAcc.Address].StakedBalance, stakingAccounts[stakingAcc.Address].StakingRewards, block)
 			if ret == false {
-				// remove bad transaction from pool
+				// Drop+ban and keep scanning, like the unpayable case below
+				// (S4-04): returning here purged one invalid staking transaction
+				// per production attempt, so a flood of them stalled production.
+				// The block is still rejected through badTxErr.
 				transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
-				return 0, 0, fmt.Errorf("staking transactions checking fails: CheckBlockTransfers")
+				if badTxErr == nil {
+					badTxErr = fmt.Errorf("staking transactions checking fails: CheckBlockTransfers")
+				}
+				continue
 			}
 		}
 		acc, exist := account.GetAccountByAddressBytes(address.GetBytes())
@@ -741,6 +723,10 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	if err := verifyBlockHeaderSignature(newBlock, lastBlock); err != nil {
 		return fmt.Errorf("%v: CheckBlockAndTransactions", err)
 	}
+	// S3-05: the block must be built on the state we hold.
+	if err := VerifyStateRoot(*newBlock); err != nil {
+		return fmt.Errorf("%v: CheckBlockAndTransactions", err)
+	}
 
 	// NOTE: deliberately NO deferred RemoveAllTransactionsRelatedToBlock here.
 	// That defer ran on FAILURE too, so a block that could not apply because
@@ -754,7 +740,7 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	// RemoveBadTransactionByHash where they are detected.
 	// Stake-snapshot-dependent checks, run against the parent (height-1) state
 	// that is in memory before this block's transactions are applied.
-	if err := VerifyStakeDependent(*newBlock); err != nil {
+	if err := VerifyStakeDependent(*newBlock, lastBlock); err != nil {
 		return err
 	}
 	n, err := account.IntDelegatedAccountFromAddress(newBlock.GetHeader().DelegatedAccount)
@@ -835,12 +821,18 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	if err := verifyBlockHeaderSignature(newBlock, lastBlock); err != nil {
 		return fmt.Errorf("%v: CheckBlockAndTransferFunds", err)
 	}
+	// S3-05: the block must be built on the state we hold - checked before
+	// anything is applied, so a divergence is caught here, one block after it
+	// happened, instead of never.
+	if err := VerifyStateRoot(*newBlock); err != nil {
+		return fmt.Errorf("%v: CheckBlockAndTransferFunds", err)
+	}
 	tHeader = time.Since(phase)
 
 	// Stake-snapshot-dependent checks, run against the parent (height-1) state
 	// that is in memory before this block's transactions are applied.
 	phase = time.Now()
-	if err := VerifyStakeDependent(*newBlock); err != nil {
+	if err := VerifyStakeDependent(*newBlock, lastBlock); err != nil {
 		return err
 	}
 	tStakeDep = time.Since(phase)

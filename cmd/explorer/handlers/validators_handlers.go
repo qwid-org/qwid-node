@@ -50,15 +50,19 @@ type BlockProducerStats struct {
 	LastBlockTime   int64  `json:"lastBlockTime"`
 }
 
-func GetValidatorBlocks(w http.ResponseWriter, r *http.Request) {
-	countStr := r.URL.Query().Get("count")
-	count := 10
-	if countStr != "" {
-		c, err := strconv.Atoi(countStr)
-		if err == nil && c > 0 && c <= 500 {
-			count = c
-		}
+// maxValidatorBlocks bounds the full-block reads one request can order
+// (S8-02); the explorer page asks for 10.
+const maxValidatorBlocks = 50
+
+func validatorBlocksCount(r *http.Request) int {
+	if c, err := strconv.Atoi(r.URL.Query().Get("count")); err == nil && c > 0 && c <= maxValidatorBlocks {
+		return c
 	}
+	return 10
+}
+
+func GetValidatorBlocks(w http.ResponseWriter, r *http.Request) {
+	count := validatorBlocksCount(r)
 
 	// Get current height
 	reply := clientrpc.Call(SignMessage([]byte("STAT")))

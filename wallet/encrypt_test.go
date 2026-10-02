@@ -124,6 +124,7 @@ func TestVerifyPassword(t *testing.T) {
 func TestLegacyCTRDecrypt(t *testing.T) {
 	password := "legacy-pw"
 	w := newTestWallet(password)
+	w.legacyKeys = true // loaded from a file without kdf_salt (S5-04)
 	secret := []byte("legacy secret key material")
 
 	// Reproduce the old on-disk format: AES-CTR with legacy SHAKE key, static

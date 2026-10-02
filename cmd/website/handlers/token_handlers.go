@@ -218,7 +218,10 @@ func CreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), msg.GetBytes()...))); err != nil {
+		JsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	logger.GetLogger().Println("CreateToken: deployed token", req.Name, "("+req.Symbol+") tx:", tx.Hash.GetHex())
 

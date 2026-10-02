@@ -1,7 +1,9 @@
 package blocks
 
 import (
+	"bytes"
 	"fmt"
+	"sort"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
@@ -74,7 +76,71 @@ func authenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData, ran
 		}
 		subs[id] = sub
 	}
-	return matchOracleData(subs, priceData, randData)
+	if err := matchOracleData(subs, priceData, randData); err != nil {
+		return err
+	}
+	// S4-06: and nothing embedded may be left out. Without this a producer
+	// could embed a proof (counting its signer's stake towards the 2/3) while
+	// dropping the value it disliked from the median or the RAND hash.
+	wantPrice, wantRand := encodeOracleData(subs)
+	if !bytes.Equal(priceData, wantPrice) || !bytes.Equal(randData, wantRand) {
+		return fmt.Errorf("oracle data is not exactly the values of the embedded proofs")
+	}
+	return nil
+}
+
+// encodeOracleData is the canonical oracle data for a set of submissions:
+// ascending delegated id, one (id, height, value) triple per non-zero value -
+// the layout ParsePriceData/ParseRandData read and GeneratePriceData writes.
+func encodeOracleData(subs map[uint8]oracleSubmission) (priceData, randData []byte) {
+	ids := make([]int, 0, len(subs))
+	for id := range subs {
+		ids = append(ids, int(id))
+	}
+	sort.Ints(ids)
+	priceData, randData = []byte{}, []byte{}
+	for _, i := range ids {
+		sub := subs[uint8(i)]
+		if sub.price > 0 {
+			priceData = append(priceData, uint8(i))
+			priceData = append(priceData, common.GetByteInt64(sub.height)...)
+			priceData = append(priceData, common.GetByteInt64(sub.price)...)
+		}
+		if sub.rand > 0 {
+			randData = append(randData, uint8(i))
+			randData = append(randData, common.GetByteInt64(sub.height)...)
+			randData = append(randData, common.GetByteInt64(sub.rand)...)
+		}
+	}
+	return priceData, randData
+}
+
+// oracleDataFromProofs derives the canonical oracle data from embedded proofs;
+// the producer uses it so its data and proofs can never disagree.
+func oracleDataFromProofs(proofs [][]byte, decode verifiedDecoder) (priceData, randData []byte, err error) {
+	subs := make(map[uint8]oracleSubmission)
+	for _, pb := range proofs {
+		tx, err := decode(pb)
+		if err != nil {
+			return nil, nil, err
+		}
+		id, sub, err := extractOracleSubmission(tx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, dup := subs[id]; dup {
+			return nil, nil, fmt.Errorf("duplicate oracle proof for delegated id %d", id)
+		}
+		subs[id] = sub
+	}
+	priceData, randData = encodeOracleData(subs)
+	return priceData, randData, nil
+}
+
+// OracleDataFromProofs is oracleDataFromProofs for proofs this node collected
+// and verified on receipt.
+func OracleDataFromProofs(proofs [][]byte) (priceData, randData []byte, err error) {
+	return oracleDataFromProofs(proofs, decodeProof)
 }
 
 // matchOracleData requires every (id, height, value) entry embedded in the
@@ -187,7 +253,7 @@ func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 			cache[decoded.Height] = names
 		}
 		isPaused, isPaused2 := historicalProofPauseFlags()
-		if !decoded.Verify(names.sigName, names.sigName2, isPaused, isPaused2) {
+		if !decoded.VerifyNonce(names.sigName, names.sigName2, isPaused, isPaused2) {
 			return nil, fmt.Errorf("oracle proof signature verification failed")
 		}
 		return &decoded, nil

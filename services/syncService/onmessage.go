@@ -170,6 +170,43 @@ func shouldLogRejection(addr [4]byte) bool {
 	return true
 }
 
+// liveClaimsBySource returns the highest live height claimed by each claim
+// SOURCE - the transport IP behind a peer handle. Callers hold
+// peerHeightClaimsMutex.
+//
+// S2-03: a handle is minted per handshake key, and keys cost nothing to
+// generate, so counting handles let one machine with two keys "corroborate"
+// any height and stop block production. Witnesses are counted per source.
+func liveClaimsBySource(now time.Time) map[[4]byte]int64 {
+	out := map[[4]byte]int64{}
+	for addr, claim := range peerHeightClaims {
+		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
+			continue
+		}
+		src := addr
+		if real, ok := tcpip.RealIPForHandle(addr); ok {
+			src = real
+		}
+		if h, seen := out[src]; !seen || claim.height > h {
+			out[src] = claim.height
+		}
+	}
+	return out
+}
+
+// topTwo returns the highest and second-highest values and how many there are.
+func topTwo(heights map[[4]byte]int64) (best, second int64, n int) {
+	for _, h := range heights {
+		n++
+		if h > best {
+			second, best = best, h
+		} else if h > second {
+			second = h
+		}
+	}
+	return best, second, n
+}
+
 // shouldSyncToHeight determines if we should sync based on peer claims
 // Returns true if sync should proceed, and the validated target height
 func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
@@ -214,21 +251,17 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 		required = 1
 	}
 
-	now := time.Now()
 	peersAtOrAboveHeight := 0
 	maxConfirmedHeight := localHeight
 
-	for addr, claim := range peerHeightClaims {
-		// Skip expired claims, and our own echoed-back height: confirming a large
-		// sync with ourselves is no confirmation at all.
-		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
-			continue
-		}
-		if claim.height >= claimedHeight {
+	// Expired claims and our own echoed-back height are already left out:
+	// confirming a large sync with ourselves is no confirmation at all.
+	for _, height := range liveClaimsBySource(time.Now()) {
+		if height >= claimedHeight {
 			peersAtOrAboveHeight++
 		}
-		if claim.height > maxConfirmedHeight {
-			maxConfirmedHeight = claim.height
+		if height > maxConfirmedHeight {
+			maxConfirmedHeight = height
 		}
 	}
 
@@ -266,21 +299,7 @@ func networkHeight() int64 {
 	peerHeightClaimsMutex.RLock()
 	defer peerHeightClaimsMutex.RUnlock()
 
-	now := time.Now()
-	best, second := int64(0), int64(0)
-	live := 0
-	for addr, claim := range peerHeightClaims {
-		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
-			continue
-		}
-		live++
-		if claim.height > best {
-			second = best
-			best = claim.height
-		} else if claim.height > second {
-			second = claim.height
-		}
-	}
+	best, second, live := topTwo(liveClaimsBySource(time.Now()))
 	switch {
 	case live == 0:
 		return common.CurrentHeightOfNetwork
@@ -307,21 +326,7 @@ func corroboratedNetworkHeight() int64 {
 	peerHeightClaimsMutex.RLock()
 	defer peerHeightClaimsMutex.RUnlock()
 
-	now := time.Now()
-	best, second := int64(0), int64(0)
-	live := 0
-	for addr, claim := range peerHeightClaims {
-		if now.Sub(claim.timestamp) > ClaimExpiryDuration || tcpip.IsSelfIP(addr) {
-			continue
-		}
-		live++
-		if claim.height > best {
-			second = best
-			best = claim.height
-		} else if claim.height > second {
-			second = claim.height
-		}
-	}
+	_, second, live := topTwo(liveClaimsBySource(time.Now()))
 	if live < 2 {
 		return 0
 	}
@@ -513,8 +518,17 @@ func OnMessage(addr [4]byte, m []byte) {
 		var ip4 [4]byte
 		if tcpip.GetPeersCount() < common.MaxPeersConnected {
 			peers := txn[[2]byte{'P', 'P'}]
+			// S2-04: honest peers share at most MaxPeersSharedInHi addresses;
+			// each one here starts three dial lifecycles, so a longer list
+			// would let one message open thousands of sockets.
+			if len(peers) > common.MaxPeersSharedInHi {
+				peers = peers[:common.MaxPeersSharedInHi]
+			}
 
 			for _, ip := range peers {
+				if len(ip) != 4 {
+					continue
+				}
 				copy(ip4[:], ip)
 				copy(topicip[2:], ip)
 				copy(topicip[:2], tcpip.NonceTopic[:])
@@ -671,7 +685,18 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 		}
 		hmax := common.GetHeightMax()
-		if len(indices) == 0 || len(blcks) == 0 {
+		if len(indices) > 0 && len(indices) == len(blcks) {
+			first, last := indices[0], indices[0]
+			for _, i := range indices {
+				first, last = min(first, i), max(last, i)
+			}
+			// S2-01: act only on the answer to a request we sent this peer.
+			if !takeHeaderRequest(addr, first, last) {
+				logger.GetLogger().Printf("ignoring unsolicited sh from %s (heights %d..%d)", tcpip.PeerLabel(addr), first, last)
+				return
+			}
+		}
+		if len(indices) == 0 || len(blcks) == 0 || len(indices) != len(blcks) {
 			logger.GetLogger().Println("empty blocks received from peer - possible fake height claim")
 			tcpip.ReduceAndCheckIfBanIP(addr)
 			// Exit sync if we have no progress
@@ -741,12 +766,45 @@ func OnMessage(addr [4]byte, m []byte) {
 					continue
 				}
 				logger.GetLogger().Printf("Block hash mismatch at index %d - potential fork detected", index)
-				services.AdjustShiftInPastInReset(hmax)
-				common.ShiftToPastMutex.RLock()
-				services.ResetAccountsAndBlocksSync(index - common.ShiftToPastInReset)
-				common.ShiftToPastMutex.RUnlock()
-				logger.GetLogger().Println("fork detected at index", index, "- reset done")
+				// S2-01: rewinding deletes blocks, so the competing block must
+				// prove itself first. Only a correctly hashed, producer-signed
+				// block that links to our own parent moves us back - and only to
+				// that common ancestor.
+				switch verifyCompetingBlock(block, index) {
+				case forkVerified:
+					services.ResetAccountsAndBlocksSync(index - 1)
+					logger.GetLogger().Println("verified fork at index", index, "- rewound to the common ancestor", index-1)
+				case forkDeeper:
+					from := max(index-1-common.NumberOfHashesInBucket, 0)
+					logger.GetLogger().Printf("competing block %d from %s does not link to our block %d - asking for headers from %d",
+						index, tcpip.PeerLabel(addr), index-1, from)
+					sendGetHeadersRange(addr, from, h)
+				default:
+					logger.GetLogger().Printf("competing block %d from %s fails verification - not rewinding", index, tcpip.PeerLabel(addr))
+					tcpip.ReduceAndCheckIfBanIP(addr)
+				}
 				return
+			}
+			// S2-05: act on a new block's transaction list only if its header is
+			// authentic. Otherwise any batch could fill the missing-tx
+			// bookkeeping with arbitrary hashes and fan bt requests out to every
+			// peer. Stopping here also stops completeUpTo: an unverifiable
+			// block is not applied this round.
+			var parent blocks.Block
+			if i > 0 && indices[i-1] == index-1 {
+				parent = blcks[i-1]
+			} else if index-1 == h {
+				parent, err = blocks.LoadBlock(h)
+				if err != nil {
+					logger.GetLogger().Printf("cannot load our tip %d: %v", h, err)
+					break
+				}
+			} else {
+				break
+			}
+			if !authenticBatchHeader(block, index, parent) {
+				logger.GetLogger().Printf("header %d from %s is not authentic - not acting on its transaction list", index, tcpip.PeerLabel(addr))
+				break
 			}
 			hashesMissing := blocks.IsAllTransactions(block)
 			if len(hashesMissing) > 0 {
@@ -848,11 +906,9 @@ func OnMessage(addr [4]byte, m []byte) {
 
 			if header.Height != index {
 				logger.GetLogger().Printf("ERROR: Height mismatch - Block header height: %d, Expected index: %d", header.Height, index)
-				services.AdjustShiftInPastInReset(hmax)
-				common.ShiftToPastMutex.RLock()
-				services.ResetAccountsAndBlocksSync(index - common.ShiftToPastInReset)
-				common.ShiftToPastMutex.RUnlock()
-				logger.GetLogger().Println("height mismatch - reset done")
+				// S2-01: a mislabelled header is the sender's error, not evidence
+				// about our chain - never a reason to rewind.
+				tcpip.ReduceAndCheckIfBanIP(addr)
 				return
 			}
 
@@ -873,20 +929,18 @@ func OnMessage(addr [4]byte, m []byte) {
 					logger.GetLogger().Printf("stopping batch at block %d - applying verified blocks up to %d first", index, verifiedUpTo)
 					break
 				}
-				// Only blame the peer when the parent came from its own batch, i.e.
-				// the blocks it sent are internally inconsistent. When the parent
-				// came from our storage the mismatch is our own fork, and banning
-				// here would ban the honest peer we need to recover from it.
-				if parentFromPeer {
-					tcpip.ReduceAndCheckIfBanIP(addr)
+				// S2-01: nothing here rewinds on its own any more. A block that does
+				// not link to our tip means the fork point lies at or below our
+				// height: ask for earlier headers, so the first pass above finds
+				// it and verifies the competing block before anything is deleted.
+				// Any other failure is the sender's: its block is invalid.
+				if !parentFromPeer && !bytes.Equal(block.GetHeader().PreviousHash.GetBytes(), oldBlock.BlockHash.GetBytes()) {
+					from := max(h-common.NumberOfHashesInBucket, 0)
+					logger.GetLogger().Printf("block %d does not link to our tip %d - asking %s for headers from %d", index, index-1, tcpip.PeerLabel(addr), from)
+					sendGetHeadersRange(addr, from, index)
 				} else {
-					logger.GetLogger().Printf("parent block %d came from local storage - treating as own fork, not banning %v", index-1, addr)
+					tcpip.ReduceAndCheckIfBanIP(addr)
 				}
-				services.AdjustShiftInPastInReset(hmax)
-				common.ShiftToPastMutex.RLock()
-				services.ResetAccountsAndBlocksSync(index - common.ShiftToPastInReset)
-				common.ShiftToPastMutex.RUnlock()
-				logger.GetLogger().Println("block verification failed at index", index, ":", err, "- reset done")
 				return
 
 			}
@@ -973,6 +1027,10 @@ func OnMessage(addr [4]byte, m []byte) {
 			// one of them (QWID-2026-12).
 			if err := account.StoreDexAccounts(hNow); err != nil {
 				logger.GetLogger().Println(err)
+			}
+			// S9-03: written last - commits this batch end for startup.
+			if err := blocks.StoreStateCommit(hNow); err != nil {
+				logger.GetLogger().Println("cannot store state commit marker", err)
 			}
 
 			logger.GetLogger().Println("sync batch timing:", timing.summary())
@@ -1081,6 +1139,10 @@ func OnMessage(addr [4]byte, m []byte) {
 		bHeight := common.GetInt64FromByte(bhb)
 		eHeight := common.GetInt64FromByte(ehb)
 		bHeight, eHeight = clampHeaderSpan(bHeight, eHeight) // NP-M13: bound the requested span
+		if eHeight >= bHeight && !allowHeaderServe(addr, eHeight-bHeight+1, time.Now()) {
+			logger.GetLogger().Printf("gh from %v over its header-serving budget; dropping", addr)
+			return
+		}
 		logger.GetLogger().Printf("gh request: bHeight=%d, eHeight=%d, sending headers to %v", bHeight, eHeight, addr)
 		SendHeaders(addr, bHeight, eHeight)
 	default:

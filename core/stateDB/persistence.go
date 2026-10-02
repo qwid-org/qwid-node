@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
@@ -409,4 +410,58 @@ func (sa *StateAccount) RemoveStoredAbove(height int64) error {
 		}
 	}
 	return nil
+}
+
+// evmSnapshotsToPrune applies the account-snapshot retention policy
+// (account/snapshotRetention.go) to the EVM keyspace (S6-04). EVM snapshots
+// are store-on-change: the state at height h is the closest snapshot at or
+// below h. So instead of "the snapshot at each checkpoint" it keeps, for every
+// checkpoint and for the window floor, the closest snapshot at or below it,
+// plus the earliest one and everything inside the dense window.
+func evmSnapshotsToPrune(heights []int64, tip int64) []int64 {
+	sorted := append([]int64(nil), heights...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	windowFloor := tip - common.SnapshotRetentionBlocks
+	if len(sorted) == 0 || windowFloor <= 0 {
+		return nil
+	}
+	keep := map[int64]bool{sorted[0]: true}
+	anchor := func(p int64) {
+		i := sort.Search(len(sorted), func(i int) bool { return sorted[i] > p })
+		if i > 0 {
+			keep[sorted[i-1]] = true
+		}
+	}
+	if c := common.SnapshotCheckpointInterval; c > 0 {
+		for p := c; p < windowFloor; p += c {
+			anchor(p)
+		}
+	}
+	anchor(windowFloor)
+	drop := []int64{}
+	for _, h := range sorted {
+		if h < windowFloor && !keep[h] {
+			drop = append(drop, h)
+		}
+	}
+	return drop
+}
+
+// PruneStored deletes the EVM snapshots retention allows to go and returns
+// how many were removed. Only stored keys are touched, never the in-memory
+// state.
+func (sa *StateAccount) PruneStored(tip int64) (int, error) {
+	heights, err := sa.storedHeights()
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, h := range evmSnapshotsToPrune(heights, tip) {
+		key := append(common.EVMStateDBPrefix[:], common.GetByteInt64(h)...)
+		if err := database.MainDB.Delete(key); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
 }

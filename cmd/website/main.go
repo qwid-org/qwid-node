@@ -129,8 +129,8 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Public routes (no auth required)
-	mux.HandleFunc("/api/stats", handlers.CorsMiddleware(handlers.GetStats))
-	mux.HandleFunc("/api/details", handlers.CorsMiddleware(handlers.GetDetails))
+	mux.HandleFunc("/api/stats", handlers.CorsMiddleware(handlers.PublicReadRateLimit(handlers.GetStats)))
+	mux.HandleFunc("/api/details", handlers.CorsMiddleware(handlers.PublicReadRateLimit(handlers.GetDetails)))
 	mux.HandleFunc("/api/register", handlers.CorsMiddleware(handlers.Register))
 	mux.HandleFunc("/api/login", handlers.CorsMiddleware(handlers.Login))
 

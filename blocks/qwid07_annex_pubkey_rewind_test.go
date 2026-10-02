@@ -132,7 +132,7 @@ func TestQWID07Annex_SweepUndoesRegistrationsAboveTarget(t *testing.T) {
 	_, dHigh := registerTestKey(t, 0x55, 0x66, 12) // above target    -> remove
 
 	// Rewind to target 7: only the height-12 registration is undone.
-	UnregisterPubKeysAboveHeight(7)
+	UnregisterPubKeysAboveHeight(7, 12)
 
 	if _, err := pubkeys.LoadPubKey(dHigh.GetBytes()); err == nil {
 		t.Fatal("registration above the target must be undone by the sweep")
@@ -147,5 +147,32 @@ func TestQWID07Annex_SweepUndoesRegistrationsAboveTarget(t *testing.T) {
 	remaining, _ := database.MainDB.LoadAllKeys(common.PubKeyRegistrationJournalDBPrefix[:])
 	if len(remaining) != 2 {
 		t.Fatalf("journal should keep 2 entries (heights 5,7), got %d", len(remaining))
+	}
+}
+
+// S9-04: the bounded per-height path and the full sweep (deep rewind) undo
+// exactly the same registrations.
+func TestJournalRewindPathsAgree(t *testing.T) {
+	for _, top := range []int64{12, 12 + 2*journalPerHeightScanLimit} {
+		db := &database.BlockchainDB{}
+		pdb, err := db.InitPermanent(filepath.Join(t.TempDir(), "blockchain"))
+		if err != nil {
+			t.Skipf("RocksDB unavailable: %v", err)
+		}
+		savedDB, savedTrie := database.MainDB, pubkeys.GlobalMerkleTree
+		database.MainDB = pdb
+		pubkeys.InitPermanentTrie()
+
+		_, dLow := registerTestKey(t, 0x11, 0x22, 5)
+		_, dHigh := registerTestKey(t, 0x55, 0x66, 12)
+		UnregisterPubKeysAboveHeight(7, top)
+		if _, err := pubkeys.LoadPubKey(dHigh.GetBytes()); err == nil {
+			t.Fatalf("top %d: registration above the target survived", top)
+		}
+		if _, err := pubkeys.LoadPubKey(dLow.GetBytes()); err != nil {
+			t.Fatalf("top %d: registration below the target lost: %v", top, err)
+		}
+		pdb.Close()
+		database.MainDB, pubkeys.GlobalMerkleTree = savedDB, savedTrie
 	}
 }

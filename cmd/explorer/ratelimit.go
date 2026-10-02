@@ -165,8 +165,13 @@ func clientIP(r *http.Request) string {
 	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
 		return real
 	}
+	// S8-02: the client controls everything it sent in X-Forwarded-For; our
+	// proxy APPENDS the address it saw. Take the last entry, never the first.
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return strings.TrimSpace(strings.Split(fwd, ",")[0])
+		parts := strings.Split(fwd, ",")
+		if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+			return last
+		}
 	}
 	return host
 }

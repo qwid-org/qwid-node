@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -50,4 +51,32 @@ func loadWalletThrottleReset() {
 	loadWalletMu.Lock()
 	loadWalletAttempts = nil
 	loadWalletMu.Unlock()
+}
+
+// S8-03: the counter is global - every local process shares 127.0.0.1 - so a
+// hard refusal let any of them lock the operator out. Past the cap, attempts
+// are instead serialised behind a penalty delay: guessing stays bounded at
+// one attempt per loadWalletPenalty, and the operator always gets through.
+var (
+	loadWalletPenalty   = 6 * time.Second
+	loadWalletPenaltyMu sync.Mutex
+)
+
+func loadWalletGate(ctx context.Context, now time.Time) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if loadWalletThrottleAllow(now) {
+		return true
+	}
+	loadWalletPenaltyMu.Lock()
+	defer loadWalletPenaltyMu.Unlock()
+	t := time.NewTimer(loadWalletPenalty)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

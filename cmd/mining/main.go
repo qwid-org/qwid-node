@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -70,15 +71,20 @@ func main() {
 	}
 	logger.InitLogger()
 	defer logger.CloseLogger()
-	// The net/http/pprof import registers its handlers on the default mux, but
-	// nothing ever served it - the import was dead. Loopback-only, so nothing
-	// is exposed to the network; `go tool pprof http://127.0.0.1:6060/debug/pprof/profile`
-	// answers "what is this node doing right now" definitively.
-	go func() {
-		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
-			logger.GetLogger().Println("pprof server:", err)
-		}
-	}()
+	// The net/http/pprof import registers its handlers on the default mux.
+	// Loopback-only, and opt-in with -pprof (S10-01): left always on, any
+	// local user - or a DNS-rebinding page in the operator's browser - could
+	// read /debug/pprof/cmdline and goroutine dumps and load the node with CPU
+	// profiles. The Host check closes the rebinding route.
+	// `go tool pprof http://127.0.0.1:6060/debug/pprof/profile` answers "what
+	// is this node doing right now" definitively.
+	if pprofRequested(os.Args[1:]) {
+		go func() {
+			if err := http.ListenAndServe("127.0.0.1:6060", loopbackHostOnly(http.DefaultServeMux)); err != nil {
+				logger.GetLogger().Println("pprof server:", err)
+			}
+		}()
+	}
 	database.InitDB()
 	defer database.CloseDB()
 	pubkeys.InitTrie()
@@ -103,21 +109,13 @@ func main() {
 	logger.GetLogger().Println("Loading accounts...")
 	err = account.LoadAccounts(-1)
 	if err != nil {
-		addrbytes := [common.AddressLength]byte{}
-		copy(addrbytes[:], wallet.GetActiveWallet().Account1.Address.GetBytes())
-		// Initialize accounts
-		a := account.Account{
-			Balance:               0,
-			Address:               addrbytes,
-			TransactionDelay:      0,
-			MultiSignNumber:       0,
-			MultiSignAddresses:    make([][20]byte, 0),
-			TransactionsSender:    make([]common.Hash, 0),
-			TransactionsRecipient: make([]common.Hash, 0),
-		}
-		allAccounts := map[[20]byte]account.Account{}
-		allAccounts[addrbytes] = a
-		account.Accounts = account.AccountsType{AllAccounts: allAccounts}
+		// A brand-new database starts from EMPTY state. It used to be seeded
+		// with this node's wallet address - a zero-balance account plus a
+		// zero staking entry in every delegated account - but that is
+		// consensus state: ComputeStateRoot hashes every entry, zero or not,
+		// so each node's state after genesis depended on its own wallet and
+		// a second node rejected block 1 ("state root does not match").
+		account.Accounts = account.AccountsType{AllAccounts: map[[20]byte]account.Account{}}
 		err = account.StoreAccounts(0)
 		if err != nil {
 			logger.GetLogger().Fatal("Failed to store accounts:", err)
@@ -135,18 +133,7 @@ func main() {
 		// Initialize staking accounts
 		logger.GetLogger().Println("Setting up staking accounts...")
 		for i := 1; i < 256; i++ {
-			del := common.GetDelegatedAccountAddress(int16(i))
-			delbytes := [common.AddressLength]byte{}
-			copy(delbytes[:], del.GetBytes())
-			sa := account.StakingAccount{
-				StakedBalance:    0,
-				StakingRewards:   0,
-				DelegatedAccount: delbytes,
-				StakingDetails:   nil,
-			}
-			allStakingAccounts := map[[20]byte]account.StakingAccount{}
-			allStakingAccounts[addrbytes] = sa
-			account.StakingAccounts[i] = account.StakingAccountsType{AllStakingAccounts: allStakingAccounts}
+			account.StakingAccounts[i] = account.StakingAccountsType{AllStakingAccounts: map[[20]byte]account.StakingAccount{}}
 		}
 		err = account.StoreStakingAccounts(0)
 		if err != nil {
@@ -496,4 +483,30 @@ func keepBootstrapPeersConnected(peers [][4]byte, d *dialer) {
 			d.connectToPeer(ip)
 		}
 	}
+}
+
+// pprofRequested reports whether the operator asked for the profiling server.
+func pprofRequested(args []string) bool {
+	for _, a := range args {
+		if a == "-pprof" || a == "--pprof" {
+			return true
+		}
+	}
+	return false
+}
+
+// loopbackHostOnly refuses requests whose Host header is not a loopback name,
+// so a page that rebinds its own domain to 127.0.0.1 cannot read responses.
+func loopbackHostOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

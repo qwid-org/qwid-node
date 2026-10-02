@@ -625,10 +625,9 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 			payloads, viol := fa.push(r)
 			if viol {
 				PeersMutex.Lock()
-				ReduceTrustRegisterPeer(ip)
-				trust, okTrust := validPeersConnected[ip]
+				ban := ReduceTrustRegisterPeer(ip)
 				PeersMutex.Unlock()
-				if okTrust && trust <= 0 {
+				if ban {
 					BanIP(ip)
 					receiveChan <- []byte("EXIT")
 					return
@@ -644,10 +643,9 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 				if !AllowMessageFromIPForHead(ip, head) {
 					logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
 					PeersMutex.Lock()
-					ReduceTrustRegisterPeer(ip)
-					trust, okTrust := validPeersConnected[ip]
+					ban := ReduceTrustRegisterPeer(ip)
 					PeersMutex.Unlock()
-					if okTrust && trust <= 0 {
+					if ban {
 						BanIP(ip)
 						receiveChan <- []byte("EXIT")
 						return
@@ -680,15 +678,25 @@ func CloseAndRemoveConnection(tcpConn net.Conn) [][]byte {
 				}
 				delete(peersConnected, topicipBytes)
 				delete(oldPeers, topicipBytes)
-				// If no more topic connections remain for this IP, remove from peer maps
+				// Trust is kept per transport source while connections are keyed
+				// by handle (S1-09): drop the source's entries only when no
+				// connection from that source - under any handle - remains.
+				src := canonicalIP(peerIP)
 				hasConnection := false
 				for _, conns := range tcpConnections {
-					if _, ok := conns[peerIP]; ok {
-						hasConnection = true
+					for k := range conns {
+						if canonicalIP(k) == src {
+							hasConnection = true
+							break
+						}
+					}
+					if hasConnection {
 						break
 					}
 				}
 				if !hasConnection {
+					delete(validPeersConnected, src)
+					delete(nodePeersConnected, src)
 					delete(validPeersConnected, peerIP)
 					delete(nodePeersConnected, peerIP)
 				}

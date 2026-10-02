@@ -292,18 +292,44 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		tcpConn.Close()
 		return nil, fmt.Errorf("inbound connection cap reached for topic")
 	}
+	// S1-04: and per source. Each handshake key gets its own handle, and keys
+	// are free, so without this one machine could take every slot.
+	if !isWhitelisted(ip) && inboundPerSourceCapReached(topic, ip) {
+		tcpConn.Close()
+		return nil, fmt.Errorf("inbound connection cap reached for source %v", ip)
+	}
 
+	// S1-02: the handshake runs off the accept loop. Done inline, one peer
+	// that connects and stays silent held the listener for the whole
+	// handshake timeout, so a handful of such connections a minute kept every
+	// honest peer out. In-flight handshakes are bounded globally and per
+	// source instead.
+	if !tryReserveHandshake(ip) {
+		tcpConn.Close()
+		return nil, fmt.Errorf("too many handshakes in progress")
+	}
+	go func() {
+		defer releaseHandshake(ip)
+		if err := completeInboundHandshake(topic, tcpConn, ip); err != nil {
+			logger.GetLogger().Println(err)
+		}
+	}()
+	return tcpConn, nil
+}
+
+// completeInboundHandshake authenticates an accepted connection, wraps it in
+// the encrypted record layer and publishes it. It closes tcpConn on failure.
+func completeInboundHandshake(topic [2]byte, tcpConn *net.TCPConn, ip [4]byte) error {
 	// NP-C3: run the peer-auth handshake on the freshly accepted connection
-	// BEFORE it is published into tcpConnections. Accept() runs synchronously
-	// in StartNewListener's loop and tcpConn is not reachable by any other
-	// goroutine (LoopSend, the receive loop in StartNewConnection, etc.) until
-	// publishAcceptedConn below runs — so there is no reader/writer racing the
-	// handshake frames on this stream.
+	// BEFORE it is published into tcpConnections. tcpConn is owned by this
+	// goroutine alone and is not reachable by any other (LoopSend, the receive
+	// loop in StartNewConnection, etc.) until publishAcceptedConn below runs —
+	// so there is no reader/writer racing the handshake frames on this stream.
 	self, idErr := activeWalletIdentity()
 	if idErr != nil {
 		logger.GetLogger().Println("handshake: cannot build identity:", idErr)
 		tcpConn.Close()
-		return nil, fmt.Errorf("handshake identity unavailable")
+		return fmt.Errorf("handshake identity unavailable")
 	}
 	peerID, sKeys, hsErr := HandshakeResponder(tcpConn, self)
 	if hsErr != nil {
@@ -314,7 +340,7 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 		if isHandshakeProtocolViolation(hsErr) {
 			BanIP(ip)
 		}
-		return nil, fmt.Errorf("inbound handshake failed: %w", hsErr)
+		return fmt.Errorf("inbound handshake failed: %w", hsErr)
 	}
 	storeVerifiedNodeID(topic, ip, peerID)
 
@@ -339,13 +365,13 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 	if sKeys == nil {
 		logger.GetLogger().Println("inbound handshake: no session keys derived for", ip)
 		tcpConn.Close()
-		return nil, fmt.Errorf("inbound handshake: session keys unavailable")
+		return fmt.Errorf("inbound handshake: session keys unavailable")
 	}
 	ec, err := newEncryptedConn(tcpConn, sKeys)
 	if err != nil {
 		logger.GetLogger().Println("inbound handshake: failed to wrap connection:", err)
 		tcpConn.Close()
-		return nil, fmt.Errorf("inbound handshake: encryptedConn wrap failed: %w", err)
+		return fmt.Errorf("inbound handshake: encryptedConn wrap failed: %w", err)
 	}
 
 	// Key the connection by the authenticated peer's HANDLE, not the transport
@@ -362,13 +388,46 @@ func Accept(topic [2]byte, conn *net.TCPListener) (*net.TCPConn, error) {
 	if IsPeerHandle(key) {
 		go acceptedReceiveLoop(topic, key, ip, ec)
 	}
-	return tcpConn, nil
+	return nil
+}
+
+// Bounds on inbound handshakes in flight (S1-02). A handshake costs a KEM
+// encapsulation and a signature and may wait the full handshakeTimeout, so
+// both the total and the share one source can hold are capped.
+const (
+	maxPendingHandshakes      = 32
+	maxPendingHandshakesPerIP = 4
+)
+
+var (
+	pendingHandshakesMutex sync.Mutex
+	pendingHandshakes      int
+	pendingHandshakesPerIP = map[[4]byte]int{}
+)
+
+func tryReserveHandshake(ip [4]byte) bool {
+	pendingHandshakesMutex.Lock()
+	defer pendingHandshakesMutex.Unlock()
+	if pendingHandshakes >= maxPendingHandshakes || pendingHandshakesPerIP[ip] >= maxPendingHandshakesPerIP {
+		return false
+	}
+	pendingHandshakes++
+	pendingHandshakesPerIP[ip]++
+	return true
+}
+
+func releaseHandshake(ip [4]byte) {
+	pendingHandshakesMutex.Lock()
+	defer pendingHandshakesMutex.Unlock()
+	pendingHandshakes--
+	if pendingHandshakesPerIP[ip]--; pendingHandshakesPerIP[ip] <= 0 {
+		delete(pendingHandshakesPerIP, ip)
+	}
 }
 
 func Send(conn net.Conn, message []byte) error {
 
-	message = append(common.MessageInitialization[:], message...)
-	message = append(message, []byte("<-END->")...)
+	message = encodeFrame(message)
 
 	// The write deadline scales with the message. A flat deadline broke the
 	// connection in a way no retry could fix: the encrypted transport writes
@@ -403,16 +462,17 @@ func Send(conn net.Conn, message []byte) error {
 // read error, and the caller (StartNewConnection's receive loop) drops/
 // reconnects the connection — it never continues past a decrypt failure.
 func Receive(topic [2]byte, conn net.Conn) []byte {
-	// 64KB reads: a full-block sync answer runs to megabytes, and 1KB reads
-	// meant thousands of syscall+decrypt round trips per message.
-	const bufSize = 65536
-
 	if conn == nil {
 		return []byte("<-CLS->")
 	}
 
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	buf := make([]byte, bufSize)
+	// S1-03: read into a pooled buffer and return only the bytes received. A
+	// fresh 64KB buffer per read let a peer sending tiny records force ~3000x
+	// more allocation than it sent.
+	bufp := receiveBufferPool.Get().(*[]byte)
+	defer receiveBufferPool.Put(bufp)
+	buf := *bufp
 	n, err := conn.Read(buf)
 
 	if err != nil {
@@ -426,8 +486,18 @@ func Receive(topic [2]byte, conn net.Conn) []byte {
 		return []byte("<-ERR->")
 	}
 
-	return buf[:n]
+	return append([]byte(nil), buf[:n]...)
 }
+
+// receiveBufSize: 64KB reads, because a full-block sync answer runs to
+// megabytes and 1KB reads meant thousands of syscall+decrypt round trips per
+// message.
+const receiveBufSize = 65536
+
+var receiveBufferPool = sync.Pool{New: func() any {
+	b := make([]byte, receiveBufSize)
+	return &b
+}}
 
 // ValidRegisterPeer Confirm that ip is valid node
 func ValidRegisterPeer(ip [4]byte) {
@@ -457,20 +527,23 @@ func NodeRegisterPeer(ip [4]byte) {
 }
 
 // ReduceTrustRegisterPeer limit connections attempts needs to be peer lock
-func ReduceTrustRegisterPeer(ip [4]byte) {
+// ReduceTrustRegisterPeer records a protocol violation by ip and reports
+// whether the source is now to be banned (S1-07: decided by the violation
+// ledger, which survives reconnects). The caller holds PeersMutex and must
+// release it before calling BanIP.
+func ReduceTrustRegisterPeer(ip [4]byte) bool {
 	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	// || bytes.Equal(ip[:2], InternalIP[:2])
 	if bytes.Equal(ip[:], MyIP[:]) || bytes.Equal(ip[:], []byte{0, 0, 0, 0}) {
-		return
+		return false
 	}
-	if _, ok := validPeersConnected[ip]; !ok {
-		return
+	if _, ok := validPeersConnected[ip]; ok {
+		validPeersConnected[ip]--
+		if validPeersConnected[ip] <= 0 {
+			delete(validPeersConnected, ip)
+		}
 	}
-
-	validPeersConnected[ip]--
-	if validPeersConnected[ip] <= 0 {
-		delete(validPeersConnected, ip)
-	}
+	return recordViolation(ip, time.Now())
 }
 
 func FullyDeleteConnection(tcpConn net.Conn) {
@@ -663,6 +736,27 @@ func GetIPsConnected() [][]byte {
 		}
 	}
 	return [][]byte{}
+}
+
+// maxInboundPerSource bounds the connections one transport IP may hold on a
+// topic. It leaves room for a few nodes sharing one NAT address.
+const maxInboundPerSource = 4
+
+// inboundPerSourceCapReached reports whether ip already holds
+// maxInboundPerSource connections on topic, counting handshakes in flight.
+func inboundPerSourceCapReached(topic [2]byte, ip [4]byte) bool {
+	PeersMutex.RLock()
+	n := 0
+	for key := range tcpConnections[topic] {
+		if canonicalIP(key) == ip {
+			n++
+		}
+	}
+	PeersMutex.RUnlock()
+	pendingHandshakesMutex.Lock()
+	n += pendingHandshakesPerIP[ip]
+	pendingHandshakesMutex.Unlock()
+	return n >= maxInboundPerSource
 }
 
 // inboundCapReached reports whether the number of concurrent inbound connections

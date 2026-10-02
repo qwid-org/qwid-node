@@ -196,6 +196,10 @@ func ParsePriceData(priceData []byte) (map[uint8]PriceOracle, []int64, int64, er
 		prevID = int(id)
 		height := common.GetInt64FromByte(priceData[i+1 : i+9])
 		price := common.GetInt64FromByte(priceData[i+9 : i+17])
+		// S4-09: generation only ever proposes positive prices; so must data.
+		if price <= 0 {
+			return nil, nil, 0, fmt.Errorf("priceData entry for delegated id %d has non-positive price %d", id, price)
+		}
 		prices = append(prices, price)
 		_, staked, _ := account.GetStakedInDelegatedAccount(int(id))
 		allStaked += int64(staked)
@@ -231,6 +235,9 @@ func ParseRandData(randData []byte) (map[uint8]RandOracle, []byte, int64, error)
 		prevID = int(id)
 		height := common.GetInt64FromByte(randData[i+1 : i+9])
 		rand := common.GetInt64FromByte(randData[i+9 : i+17])
+		if rand <= 0 { // as GenerateRandData proposes only positive values
+			return nil, nil, 0, fmt.Errorf("randData entry for delegated id %d has non-positive value %d", id, rand)
+		}
 		rands = append(rands, randData[i+9:i+17]...)
 		_, staked, _ := account.GetStakedInDelegatedAccount(int(id))
 		allStaked += int64(staked)
@@ -371,7 +378,51 @@ func CalculatePriceOracle(height int64, totalStaked int64) (int64, []byte, error
 func Median(prices []int64) int64 {
 	mid := len(prices) / 2
 	if len(prices)%2 == 0 {
-		return (prices[mid-1] + prices[mid]) / 2
+		// a + (b-a)/2: (a+b)/2 overflowed for large prices (S4-09). Prices are
+		// positive (ParsePriceData), so b-a cannot overflow.
+		a, b := prices[mid-1], prices[mid]
+		return a + (b-a)/2
 	}
 	return prices[mid]
+}
+
+// PriceFromData computes a block's price from its oracle data exactly as
+// VerifyPriceOracle checks it: stake from the current (parent) snapshot,
+// min and max dropped, median of the rest. An error means the price cannot
+// be established and the block carries 0.
+func PriceFromData(priceData []byte, totalStaked int64) (int64, error) {
+	_, prices, staked, err := ParsePriceData(priceData)
+	if err != nil {
+		return 0, err
+	}
+	if staked <= 2*totalStaked/3 {
+		return 0, errors.New("in price, there is not enough staked value for 2/3")
+	}
+	if len(prices) > 2 {
+		sort.Slice(prices, func(i, j int) bool { return prices[i] < prices[j] })
+		prices = prices[1 : len(prices)-1]
+	}
+	if len(prices) == 0 {
+		return 0, errors.New("not enough prices propositions after removing min and max")
+	}
+	return Median(prices), nil
+}
+
+// RandFromData is PriceFromData for RAND: the hash of all proposals.
+func RandFromData(randData []byte, totalStaked int64) (int64, error) {
+	_, rands, staked, err := ParseRandData(randData)
+	if err != nil {
+		return 0, err
+	}
+	if staked <= 2*totalStaked/3 {
+		return 0, errors.New("in rand, there is not enough staked value for 2/3")
+	}
+	if len(rands) == 0 {
+		return 0, errors.New("not enough rands propositions")
+	}
+	h, err := common.CalcHashFromBytes(rands)
+	if err != nil {
+		return 0, err
+	}
+	return common.GetInt64FromByte(h[24:]), nil
 }

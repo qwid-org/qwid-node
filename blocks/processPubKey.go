@@ -30,24 +30,12 @@ func StoreAddress(mainAddress common.Address, pk common.PubKey) error {
 func AddNewPubKeyToActiveWallet(sigName string, primary bool, height int64) error {
 	w := wallet.GetActiveWallet()
 	if w.GetSigName(primary) != sigName {
-		previousSigName := w.GetSigName(primary)
-		if primary {
-			w.SigName = sigName
-		} else {
-			w.SigName2 = sigName
-		}
+		// The scheme name is switched by AddNewEncryptionToActiveWallet itself,
+		// under the wallet lock and only on success (S5-03): setting it here,
+		// outside the lock, raced with a concurrent Sign or StoreJSON, and a
+		// refusal (no recovery phrase) leaves it untouched.
 		err := w.AddNewEncryptionToActiveWallet(sigName, primary)
 		if err != nil {
-			// Put the scheme name back. AddNewEncryptionToActiveWallet refuses
-			// for a wallet with no recovery phrase, and leaving SigName pointing
-			// at a scheme this wallet holds no key for would make any later
-			// StoreJSON archive the OLD key under the NEW scheme name — the very
-			// stale-archive confusion the refusal is meant to avoid.
-			if primary {
-				w.SigName = previousSigName
-			} else {
-				w.SigName2 = previousSigName
-			}
 			logger.GetLogger().Printf("CANNOT ADOPT THE NEW SIGNATURE SCHEME %q: %v — "+
 				"this node keeps following the chain, but it now has NO key for %q and cannot produce "+
 				"blocks or sign transactions under it until the operator restores this wallet from its "+
@@ -364,7 +352,18 @@ func UnregisterPubKeysAtHeight(height int64) {
 // (common on a slow node that keeps falling behind) that was thousands of
 // iterator allocations, almost all finding nothing, adding directly to the lag.
 // Registrations are rare, so one scan of the small journal prefix is far cheaper.
-func UnregisterPubKeysAboveHeight(target int64) {
+//
+// top is the highest height that may hold registrations (the pre-rewind tip).
+// A rewind of up to journalPerHeightScanLimit blocks reads only those heights'
+// journal prefixes; only a deeper one falls back to sweeping the whole
+// journal, which grows with the chain's history (S9-04).
+func UnregisterPubKeysAboveHeight(target, top int64) {
+	if top > target && top-target <= journalPerHeightScanLimit {
+		for h := target + 1; h <= top; h++ {
+			UnregisterPubKeysAtHeight(h)
+		}
+		return
+	}
 	keys, err := database.MainDB.LoadAllKeys(common.PubKeyRegistrationJournalDBPrefix[:])
 	if err != nil {
 		logger.GetLogger().Println("pubkey journal sweep failed:", err)
@@ -389,6 +388,8 @@ func UnregisterPubKeysAboveHeight(target int64) {
 		_ = database.MainDB.Delete(k)
 	}
 }
+
+const journalPerHeightScanLimit = 2048
 
 // unregisterPubKey removes one key record and drops its derived address from the
 // identity's patricia trie (rebuilding the trie, or removing it entirely when the

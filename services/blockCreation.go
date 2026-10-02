@@ -8,7 +8,6 @@ import (
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
-	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/oracles"
@@ -63,18 +62,6 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 		if err != nil {
 			return blocks.Block{}, err
 		}
-		if len(encryption1) == 0 {
-			encryption1, err = oqs.GenerateBytesFromParams(common.SigName(), common.PubKeyLength(false), common.PrivateKeyLength(), common.SignatureLength(false), common.IsPaused())
-			if err != nil {
-				return blocks.Block{}, err
-			}
-		}
-		if len(encryption2) == 0 {
-			encryption2, err = oqs.GenerateBytesFromParams(common.SigName2(), common.PubKeyLength2(false), common.PrivateKeyLength2(), common.SignatureLength2(false), common.IsPaused2())
-			if err != nil {
-				return blocks.Block{}, err
-			}
-		}
 	}
 
 	reward := account.GetReward(lastBlock.GetBlockSupply())
@@ -89,6 +76,60 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	sendingTimeMessage := common.GetByteInt64(nonceTx[0].GetParam().SendingTime)
 	rootMerkleTrie := common.Hash{}
 	rootMerkleTrie.Set(merkleTrie.GetRootHash())
+	// The body is fixed BEFORE the header is signed: the signature now covers
+	// it through BodyHash (S3-04), so the oracle values have to be known first.
+	// S4-06: the oracle data is derived from exactly the proofs embedded, so
+	// the two always agree, and the values are computed the way validators
+	// recompute them.
+	oracleProofs := oracles.GenerateOracleProofs(heightTransaction)
+	priceOracleData, randOracleData, err := blocks.OracleDataFromProofs(oracleProofs)
+	if err != nil {
+		return blocks.Block{}, err
+	}
+	totalStaked := account.GetStakedInAllDelegatedAccounts()
+	priceOracle, err := oracles.PriceFromData(priceOracleData, totalStaked)
+	if err != nil {
+		logger.GetLogger().Println("could not establish price oracle", err)
+	}
+	randOracle, err := oracles.RandFromData(randOracleData, totalStaked)
+	if err != nil {
+		logger.GetLogger().Println("could not establish rand oracle", err)
+	}
+	bb := blocks.BaseBlock{
+		BlockTimeStamp:   blockTimeStamp,
+		RewardPercentage: common.GetMyRewardPercentage(),
+		Supply:           supply,
+		PriceOracle:      priceOracle,
+		RandOracle:       randOracle,
+		PriceOracleData:  priceOracleData,
+		RandOracleData:   randOracleData,
+		OracleProofs:     oracleProofs,
+	}
+	bodyHash, err := bb.CalcBodyHash()
+	if err != nil {
+		return blocks.Block{}, err
+	}
+	// S3-05: commit to the state this block is built on - ours after
+	// lastBlock. Under BlockMutex, so no block is half-applied while hashing.
+	common.BlockMutex.Lock()
+	if common.GetHeight() != lastBlock.GetHeader().Height {
+		common.BlockMutex.Unlock()
+		return blocks.Block{}, fmt.Errorf("height moved to %d while building on %d", common.GetHeight(), lastBlock.GetHeader().Height)
+	}
+	stateRoot, err := blocks.ComputeStateRoot()
+	// S4-05: our vote goes into the header only if the proofs in this very
+	// block carry enough stake for it; otherwise repeat the parent's config.
+	// Validators run the same tally, so a block is never built to be rejected.
+	if len(encryption1) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption1, true, heightTransaction) {
+		encryption1 = lastBlock.GetHeader().Encryption1
+	}
+	if len(encryption2) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption2, false, heightTransaction) {
+		encryption2 = lastBlock.GetHeader().Encryption2
+	}
+	common.BlockMutex.Unlock()
+	if err != nil {
+		return blocks.Block{}, err
+	}
 	bh := blocks.BaseHeader{
 		PreviousHash:     lastBlock.GetBlockHash(),
 		Difficulty:       diff,
@@ -96,6 +137,8 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 		DelegatedAccount: common.GetDelegatedAccount(),
 		OperatorAccount:  myWallet.MainAddress,
 		RootMerkleTree:   rootMerkleTrie,
+		BodyHash:         bodyHash,
+		StateRoot:        stateRoot,
 		Encryption1:      encryption1,
 		Encryption2:      encryption2,
 		Signature:        common.Signature{},
@@ -124,27 +167,8 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	if err != nil {
 		return blocks.Block{}, err
 	}
-	totalStaked := account.GetStakedInAllDelegatedAccounts()
-	priceOracle, priceOracleData, err := oracles.CalculatePriceOracle(heightTransaction, totalStaked)
-	if err != nil {
-		logger.GetLogger().Println("could not establish price oracle", err)
-	}
-	randOracle, randOracleData, err := oracles.CalculateRandOracle(heightTransaction, totalStaked)
-	if err != nil {
-		logger.GetLogger().Println("could not establish rand oracle", err)
-	}
-	bb := blocks.BaseBlock{
-		BaseHeader:       bh,
-		BlockHeaderHash:  bhHash,
-		BlockTimeStamp:   blockTimeStamp,
-		RewardPercentage: common.GetMyRewardPercentage(),
-		Supply:           supply,
-		PriceOracle:      priceOracle,
-		RandOracle:       randOracle,
-		PriceOracleData:  priceOracleData,
-		RandOracleData:   randOracleData,
-		OracleProofs:     oracles.GenerateOracleProofs(heightTransaction),
-	}
+	bb.BaseHeader = bh
+	bb.BlockHeaderHash = bhHash
 
 	bl := blocks.Block{
 		BaseBlock:          bb,

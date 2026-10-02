@@ -87,6 +87,12 @@ type Wallet struct {
 	Account1          Account            `json:"account_1"`
 	Account2          Account            `json:"account_2"`
 	Accounts          map[string]Account `json:"accounts"`
+
+	// legacyKeys: loaded from a file without kdf_salt, so legacy AES-CTR
+	// ciphertexts may still be present until the load path re-stores it
+	// (S5-04).
+	legacyKeys bool
+
 	// mu guards the live key material (Account{1,2}.signer / .secretKey and the
 	// scheme names) against concurrent Sign / Wipe / scheme-change rewrites
 	// (QWID-2026-18). It is a POINTER, not an embedded value, so copying a Wallet
@@ -438,6 +444,11 @@ func GenerateNewAccount(w Wallet, sigName string) (Account, error) {
 	return acc, nil
 }
 
+// releaseSigner frees a replaced signer's C context and cleanses the secret
+// key it holds (S5-03). The per-scheme archive keeps only the encrypted key;
+// any signer built from it later is initialised afresh from that.
+var releaseSigner = func(s *oqs.Signature) { s.Clean() }
+
 func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) error {
 	// Exclusive lock: this rewrites Account{1,2}.{PublicKey,Address,secretKey,
 	// signer} and the scheme name in place; a concurrent Sign must not observe a
@@ -501,7 +512,9 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 		if err != nil {
 			return err
 		}
+		previous := w.Account1.signer
 		(*w).Account1.signer = signer
+		releaseSigner(&previous) // S5-03
 		(*w).HomePath = ew.HomePath
 		// Record WHICH scheme this key belongs to, and archive it. Without this
 		// the wallet file ends up internally inconsistent — sig_name naming the
@@ -522,7 +535,9 @@ func (w *Wallet) AddNewEncryptionToActiveWallet(sigName string, primary bool) er
 		if err != nil {
 			return err
 		}
+		previous := w.Account2.signer
 		(*w).Account2.signer = signer
+		releaseSigner(&previous) // S5-03
 		// See the primary branch: name and archive the spare's scheme too.
 		(*w).SigName2 = sigName
 		w.setArchivedAccount(sigName, w.Account2)
@@ -591,7 +606,14 @@ func (w *Wallet) decrypt(v []byte) ([]byte, error) {
 			return plaintext, nil
 		}
 	}
-	// Legacy fallback: wallets encrypted with the old AES-CTR scheme.
+	// Legacy fallback: wallets encrypted with the old AES-CTR scheme - only
+	// for a file loaded without a kdf_salt, i.e. one that predates the
+	// Argon2id migration (S5-04). The load path re-stores it in GCM at once,
+	// so for every migrated wallet this unauthenticated, KDF-less format would
+	// offer nothing but a fast offline password check.
+	if !w.legacyKeys {
+		return nil, fmt.Errorf("wrong password")
+	}
 	return w.decryptLegacyCTR(v)
 }
 
@@ -1008,6 +1030,9 @@ func LoadJSON(walletNumber uint8, password string, sigName, sigName2 string) (*W
 }
 
 func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 string) (*Wallet, error) {
+	// A file without a kdf_salt predates the Argon2id migration and may hold
+	// legacy AES-CTR ciphertexts (S5-04); check before SetPassword creates one.
+	w.legacyKeys = len(w.KdfSalt) == 0
 	w.SetPassword(password)
 
 	// Recover the seed before anything can need it: the scheme-change branches
@@ -1224,6 +1249,7 @@ func loadWalletFromStruct(w *Wallet, homePath, password, sigName, sigName2 strin
 		logger.GetLogger().Println("failed to persist wallet after load:", err)
 		return nil, err
 	}
+	w.legacyKeys = false // re-stored in GCM under the Argon2id key
 	logger.GetLogger().Println("MainAddress:", w.MainAddress.GetHex())
 	return w, nil
 }

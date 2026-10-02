@@ -82,7 +82,9 @@ func generateSyncMsgHeight() []byte {
 	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{lastBlockHash}
 
 	// GB names the chain we are on. ChainID (int16) only says "some QWID chain";
-	// two networks started from different genesis configs share it.
+	// two networks started from different genesis configs share it. The genesis
+	// hash covers the whole genesis.json - parameters and staking allocation -
+	// through the config digest in the genesis StateRoot (S9-01).
 	n.TransactionsBytes[[2]byte{'G', 'B'}] = [][]byte{localGenesisHash}
 
 	// NP-M14: share only a bounded random subset of connected peers, so no single
@@ -94,10 +96,9 @@ func generateSyncMsgHeight() []byte {
 	return nb
 }
 
-func generateSyncMsgGetHeaders(height int64) []byte {
-	if height <= 0 {
-		return nil
-	}
+// headerRequestRange is the [bHeight, eHeight] span a get-headers request for
+// height asks for, given our current height.
+func headerRequestRange(height int64) (int64, int64) {
 	eHeight := height
 	h := common.GetHeight()
 	s2p := height - h + 1
@@ -115,6 +116,18 @@ func generateSyncMsgGetHeaders(height int64) []byte {
 			eHeight = height
 		}
 	}
+	return bHeight, eHeight
+}
+
+func generateSyncMsgGetHeaders(height int64) []byte {
+	if height <= 0 {
+		return nil
+	}
+	bHeight, eHeight := headerRequestRange(height)
+	return generateSyncMsgGetHeadersRange(bHeight, eHeight)
+}
+
+func generateSyncMsgGetHeadersRange(bHeight, eHeight int64) []byte {
 	bm := message.BaseMessage{
 		Head:    []byte("gh"),
 		ChainID: common.GetChainID(),
@@ -220,16 +233,78 @@ func allowHeaderRequest(addr [4]byte) bool {
 }
 
 func SendGetHeaders(addr [4]byte, height int64) {
+	if height <= 0 {
+		return
+	}
+	bHeight, eHeight := headerRequestRange(height)
+	sendGetHeadersRange(addr, bHeight, eHeight)
+}
+
+func sendGetHeadersRange(addr [4]byte, bHeight, eHeight int64) {
 	if !allowHeaderRequest(addr) {
 		return
 	}
-	n := generateSyncMsgGetHeaders(height)
-	if len(n) == 0 {
+	if !Send(addr, generateSyncMsgGetHeadersRange(bHeight, eHeight)) {
+		logger.GetLogger().Println("could not send get headers")
 		return
 	}
-	if !Send(addr, n) {
-		logger.GetLogger().Println("could not send get headers")
+	recordHeaderRequest(addr, bHeight, eHeight)
+}
+
+// Outstanding header requests, per peer. An "sh" batch is acted on only as the
+// answer to one of these (S2-01): an unsolicited batch could otherwise make the
+// node rewind and delete blocks on the say-so of any connected peer.
+type headerRequest struct {
+	from, to int64
+	at       time.Time
+}
+
+const (
+	// headerRequestTTL must cover a multi-MB answer over a slow link.
+	headerRequestTTL = 2 * time.Minute
+	// maxOutstandingHeaderRequests bounds the per-peer list; the oldest goes.
+	maxOutstandingHeaderRequests = 4
+)
+
+var (
+	pendingHeaderRequestsMutex sync.Mutex
+	pendingHeaderRequests      = map[[4]byte][]headerRequest{}
+)
+
+func recordHeaderRequest(addr [4]byte, from, to int64) {
+	pendingHeaderRequestsMutex.Lock()
+	defer pendingHeaderRequestsMutex.Unlock()
+	reqs := append(pendingHeaderRequests[addr], headerRequest{from: from, to: to, at: time.Now()})
+	if len(reqs) > maxOutstandingHeaderRequests {
+		reqs = reqs[len(reqs)-maxOutstandingHeaderRequests:]
 	}
+	pendingHeaderRequests[addr] = reqs
+}
+
+// takeHeaderRequest reports whether a batch spanning [first, last] from addr
+// answers a live request, and consumes that request if so.
+func takeHeaderRequest(addr [4]byte, first, last int64) bool {
+	pendingHeaderRequestsMutex.Lock()
+	defer pendingHeaderRequestsMutex.Unlock()
+	now := time.Now()
+	kept := pendingHeaderRequests[addr][:0]
+	matched := false
+	for _, r := range pendingHeaderRequests[addr] {
+		if now.Sub(r.at) > headerRequestTTL {
+			continue
+		}
+		if !matched && first >= r.from && last <= r.to {
+			matched = true
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if len(kept) == 0 {
+		delete(pendingHeaderRequests, addr)
+	} else {
+		pendingHeaderRequests[addr] = kept
+	}
+	return matched
 }
 
 func Send(addr [4]byte, nb []byte) bool {

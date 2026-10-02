@@ -102,6 +102,19 @@ func lastStakeBlock(accb StakingAccount) (hmax int64) {
 }
 
 func Stake(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int, operational bool, lockedAmount int64, releasePerBlock int64) error {
+	return stake(accb, amount, height, stakingTime, delegatedAccount, operational, lockedAmount, releasePerBlock, false)
+}
+
+// StakeLockedFor applies a locked stake paid by someone else into accb. It
+// neither checks nor restarts the owner's MinNumberOfBlocksInStake delay
+// (S4-07): that delay paces the owner's own staking, and letting a third
+// party restart it allowed a deposit every 36 blocks to stop the owner from
+// ever unstaking. A third party can never make the owner operational.
+func StakeLockedFor(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int, lockedAmount int64, releasePerBlock int64) error {
+	return stake(accb, amount, height, stakingTime, delegatedAccount, false, lockedAmount, releasePerBlock, true)
+}
+
+func stake(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int, operational bool, lockedAmount int64, releasePerBlock int64, thirdParty bool) error {
 	if len(accb) != common.AddressLength {
 		return fmt.Errorf("wrong address length, must be %v", common.AddressLength)
 	}
@@ -126,9 +139,11 @@ func Stake(accb []byte, amount int64, height int64, stakingTime int64, delegated
 	if lockedAmount > amount {
 		return fmt.Errorf("locked amount cannot be larger than amount")
 	}
-	hmax := lastStakeBlock(acc)
-	if height < hmax+common.MinNumberOfBlocksInStake {
-		return fmt.Errorf("staking must be delayed %v blocks", common.MinNumberOfBlocksInStake)
+	if !thirdParty {
+		hmax := lastStakeBlock(acc)
+		if height < hmax+common.MinNumberOfBlocksInStake {
+			return fmt.Errorf("staking must be delayed %v blocks", common.MinNumberOfBlocksInStake)
+		}
 	}
 	// in order for someone else not to spoil to be operator
 	if lockedAmount == 0 && acc.OperationalAccount == false {
@@ -138,7 +153,9 @@ func Stake(accb []byte, amount int64, height int64, stakingTime int64, delegated
 		}
 	}
 	acc.StakedBalance += amount
-	acc.LastStakeHeight = height
+	if !thirdParty {
+		acc.LastStakeHeight = height
+	}
 	if lockedAmount > 0 {
 		acc.LockedInitBlock = append(acc.LockedInitBlock, height)
 		acc.LockedAmount = append(acc.LockedAmount, lockedAmount)

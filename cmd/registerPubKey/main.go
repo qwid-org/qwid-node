@@ -25,10 +25,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
@@ -85,6 +87,11 @@ func main() {
 		Address:     address,
 		MainAddress: mainAddress,
 		Primary:     primary,
+	}
+
+	if !confirmLocalRegistration(bufio.NewReader(os.Stdin), mainAddrHex) {
+		fmt.Println("not confirmed - nothing was written")
+		os.Exit(1)
 	}
 
 	database.InitDB()
@@ -226,4 +233,25 @@ func listKeys(mainAddrHex string) {
 		}
 		fmt.Printf("%d: %s address %s - key length %d bytes\n", i, slot, a.GetHex(), len(pk.GetBytes()))
 	}
+}
+
+// confirmLocalRegistration explains what a local registration does and
+// requires the operator to type "register locally <first 8 hex of the main
+// address>" (S10-04). The key goes into THIS node's registry only, outside
+// consensus and outside the registration journal: the node starts accepting
+// signatures the rest of the network does not, no rewind removes the entry,
+// and nothing in later logs points back to it as the cause of a divergence.
+func confirmLocalRegistration(r *bufio.Reader, mainAddrHex string) bool {
+	prefix := strings.ToLower(mainAddrHex)
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	want := "register locally " + prefix
+	fmt.Println("WARNING: this writes the key into THIS node's registry only, outside consensus.")
+	fmt.Println("  - this node will accept signatures by this key that other nodes reject;")
+	fmt.Println("  - no rewind removes the entry (it is not in the registration journal);")
+	fmt.Println("  - the network-wide way is a transaction carrying the pubkey (TxData.Pubkey).")
+	fmt.Printf("Type %q to continue: ", want)
+	line, _ := r.ReadString('\n')
+	return strings.TrimSpace(line) == want
 }

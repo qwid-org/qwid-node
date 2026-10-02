@@ -174,6 +174,18 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// S7-03: the current-password check is a guessing oracle; limit it per user
+	// and run the KDFs in a bounded number of slots.
+	if !changePasswordLimiter.allow(sess.Username, maxPasswordChangeAttempts, passwordChangeWindow) {
+		JsonError(w, "Too many password change attempts. Try again later.", http.StatusTooManyRequests)
+		return
+	}
+	if !acquireKDF(r.Context()) {
+		JsonError(w, "Server busy. Try again shortly.", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseKDF()
+
 	// Compute the new login hash BEFORE mutating the wallet, so a hashing
 	// failure aborts with both stores still on the old password (QWID-2026-30).
 	newHash, err := bcryptHash(req.NewPassword)

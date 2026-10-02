@@ -36,9 +36,11 @@ func main() {
 	if (err != nil) || (0 > walletNumber) || (walletNumber > 255) {
 		logger.GetLogger().Fatalf("wallet number should be integer from 0 to 255. Not %d", walletNumber)
 	}
-	fmt.Print("Enter password: ")
-
-	password, err := terminal.ReadPassword(0)
+	password, err := readNewPassword(func() ([]byte, error) {
+		b, err := terminal.ReadPassword(0)
+		fmt.Println()
+		return b, err
+	})
 	if err != nil {
 		logger.GetLogger().Fatal(err)
 	}
@@ -316,4 +318,38 @@ func checkConfirmation(mnemonic string, positions []int, answers []string) error
 		}
 	}
 	return nil
+}
+
+// readNewPassword asks for the wallet password and its confirmation, up to
+// three times. The generator creates validator wallets, so it enforces the
+// minimum every other wallet-creating flow enforces (S10-02); with a weak
+// password a leaked wallet file falls to offline guessing despite Argon2id.
+func readNewPassword(read func() ([]byte, error)) ([]byte, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Print("Enter password: ")
+		pw, err := read()
+		if err != nil {
+			return nil, err
+		}
+		if err := wallet.ValidatePasswordStrength(string(pw)); err != nil {
+			fmt.Println(err)
+			wallet.ZeroBytes(pw)
+			continue
+		}
+		fmt.Print("Repeat password: ")
+		again, err := read()
+		if err != nil {
+			wallet.ZeroBytes(pw)
+			return nil, err
+		}
+		same := string(again) == string(pw)
+		wallet.ZeroBytes(again)
+		if !same {
+			fmt.Println("passwords do not match")
+			wallet.ZeroBytes(pw)
+			continue
+		}
+		return pw, nil
+	}
+	return nil, fmt.Errorf("no acceptable password after 3 attempts (minimum %d characters, typed twice)", wallet.MinPasswordLength)
 }

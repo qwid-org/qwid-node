@@ -75,8 +75,13 @@ func OnMessage(addr [4]byte, m []byte) {
 			//logger.GetLogger().Print("nonce height invalid")
 			return
 		}
+		var nonceHash [32]byte
+		copy(nonceHash[:], transaction.GetHash().GetBytes())
+		if nonceAlreadyProcessed(nonceHash) { // S2-08: replay
+			return
+		}
 		//KU TEMP TODO
-		isValid = transaction.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
+		isValid = transaction.VerifyNonce(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
 		if isValid == false {
 			// Distinguish an unregistered/unknown sender (we may simply be behind,
 			// or the sender has not registered its pubkey on-chain yet) from a
@@ -107,6 +112,9 @@ func OnMessage(addr [4]byte, m []byte) {
 		if !account.IsTop128StakingNode(n, mainAddress) {
 			logger.GetLogger().Println("sender is not an eligible top-128 staking node", n, mainAddress.GetBytes()[:5])
 			tcpip.ReduceAndCheckIfBanIP(addr)
+			return
+		}
+		if !claimNonce(nonceHash, nonceHeight, h) { // S2-08: concurrent duplicate
 			return
 		}
 		//delMy := common.GetDelegatedAccount()
@@ -345,6 +353,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				if err := account.StoreDexAccounts(newBlock.GetHeader().Height); err != nil {
 					logger.GetLogger().Println(err)
 				}
+				// S9-03: written last - commits this height for startup.
+				if err := blocks.StoreStateCommit(newBlock.GetHeader().Height); err != nil {
+					logger.GetLogger().Println("cannot store state commit marker", err)
+				}
 				// Each of the two stores above writes a full copy of its state
 				// under this height, every block, and nothing used to remove the
 				// old ones — database size was state-size x block-count with no
@@ -356,6 +368,12 @@ func OnMessage(addr [4]byte, m []byte) {
 				// worth doing every 10 seconds to delete a handful of keys.
 				if bh := newBlock.GetHeader().Height; bh%common.SnapshotPruneInterval == 0 {
 					account.PruneStateSnapshots(bh)
+					// S6-04: the EVM keyspace follows the same retention.
+					if n, err := blocks.State.PruneStored(bh); err != nil {
+						logger.GetLogger().Println("EVM snapshot pruning failed:", err)
+					} else if n > 0 {
+						logger.GetLogger().Printf("pruned %d EVM snapshots", n)
+					}
 				}
 				common.SetHeight(h + 1)
 				sm := statistics.GetStatsManager()

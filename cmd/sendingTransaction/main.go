@@ -2,15 +2,17 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
+	"flag"
 	"fmt"
+	"io"
 	rand2 "math/rand"
 	"os/signal"
-	"strconv"
 	"sync"
 	"syscall"
 
-	"github.com/therecipe/qt/widgets"
 	"github.com/qwid-org/qwid-node/cmd/gui/qtwidgets"
+	"github.com/therecipe/qt/widgets"
 	"golang.org/x/crypto/ssh/terminal"
 
 	"os"
@@ -28,23 +30,17 @@ import (
 var mutex sync.Mutex
 var MainWallet *wallet.Wallet
 
+var cfg loadConfig
+
 func main() {
-	var num int
 	var err error
-	var ip string
-	if len(os.Args) > 1 {
-		num, err = strconv.Atoi(os.Args[1])
-		if err != nil {
-			logger.GetLogger().Fatalln("Argument need to be int")
-		}
-	} else {
-		num = 1
+	cfg, err = parseLoadArgs(os.Args[1:])
+	if err != nil {
+		fmt.Println(err)
+		fmt.Println("usage: sendingTransaction -testnet -to <recipient hex> [-count N] [-workers N] [-node IP]")
+		os.Exit(2)
 	}
-	if len(os.Args) > 2 {
-		ip = os.Args[2]
-	} else {
-		ip = "127.0.0.1"
-	}
+	ip := cfg.node
 	go clientrpc.ConnectRPC(ip)
 	fmt.Print("Enter password: ")
 	password, err := terminal.ReadPassword(0)
@@ -58,16 +54,23 @@ func main() {
 	wallet.InitActiveWallet(0, string(password), sigName, sigName2)
 	MainWallet = wallet.GetActiveWallet()
 
-	for range num {
-		go sendTransactions(MainWallet)
-		//time.Sleep(time.Millisecond * 1)
+	var wg sync.WaitGroup
+	for range cfg.workers {
+		wg.Add(1)
+		go func() { defer wg.Done(); sendTransactions(MainWallet, cfg.count) }()
 	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
 
 	// Handle Ctrl+C gracefully
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-	fmt.Println("\nShutting down...")
+	select {
+	case <-sigChan:
+		fmt.Println("\nShutting down...")
+	case <-done:
+		fmt.Println("all transactions sent")
+	}
 }
 
 func SignMessage(line []byte) []byte {
@@ -115,13 +118,8 @@ func SampleTransaction(w *wallet.Wallet) transactionsDefinition.Transaction {
 	mutex.Lock()
 	defer mutex.Unlock()
 	sender := w.MainAddress
-	recv := common.Address{}
-	br := common.Hex2Bytes("265b58a9f02dd71108e3a81e9312bb982db84426")
-	//br := rand.RandomBytes(20)
-	err := recv.Init(append([]byte{0}, br...))
-	if err != nil {
-		return transactionsDefinition.Transaction{}
-	}
+	recv := cfg.recipient
+	var err error
 	amount := int64(rand2.Intn(1000000000))
 	txdata := transactionsDefinition.TxData{
 		Recipient: recv,
@@ -178,12 +176,15 @@ func SampleTransaction(w *wallet.Wallet) transactionsDefinition.Transaction {
 	return t
 }
 
-func sendTransactions(w *wallet.Wallet) {
+func sendTransactions(w *wallet.Wallet, total int64) {
 
 	batchSize := 1
 	count := int64(0)
 	start := common.GetCurrentTimeStampInSecond()
 	for range time.Tick(time.Millisecond * 100) {
+		if count >= total {
+			return
+		}
 		// Re-read the chain's schemes each cycle: this tool runs for a long time
 		// and the chain can pause or replace a scheme underneath it, after which
 		// everything it signs would be rejected.
@@ -211,4 +212,42 @@ func sendTransactions(w *wallet.Wallet) {
 		<-clientrpc.OutRPC
 		//logger.GetLogger().Println("transactions sent")
 	}
+}
+
+// loadConfig is the load tool's run: it spends the node wallet's funds, so
+// the recipient, a finite count and a typed testnet acknowledgement are all
+// required (S10-03) - it used to send to a hardcoded address forever.
+type loadConfig struct {
+	recipient common.Address
+	count     int64
+	workers   int
+	node      string
+}
+
+func parseLoadArgs(args []string) (loadConfig, error) {
+	fs := flag.NewFlagSet("sendingTransaction", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	to := fs.String("to", "", "recipient address (hex, 20 bytes)")
+	count := fs.Int64("count", 100, "transactions per worker")
+	workers := fs.Int("workers", 1, "parallel workers")
+	node := fs.String("node", "127.0.0.1", "node RPC address")
+	testnet := fs.Bool("testnet", false, "acknowledge this spends wallet 0 funds on a test network")
+	if err := fs.Parse(args); err != nil {
+		return loadConfig{}, err
+	}
+	if !*testnet {
+		return loadConfig{}, fmt.Errorf("refusing to run without -testnet: this tool spends wallet 0's funds")
+	}
+	b, err := hex.DecodeString(*to)
+	if err != nil || len(b) != common.AddressLength {
+		return loadConfig{}, fmt.Errorf("-to must be a %d-byte hex address", common.AddressLength)
+	}
+	if *count <= 0 || *workers <= 0 {
+		return loadConfig{}, fmt.Errorf("-count and -workers must be positive")
+	}
+	recv, err := common.BytesToAddress(b)
+	if err != nil {
+		return loadConfig{}, err
+	}
+	return loadConfig{recipient: recv, count: *count, workers: *workers, node: *node}, nil
 }

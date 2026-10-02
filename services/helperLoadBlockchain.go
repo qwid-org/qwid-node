@@ -64,7 +64,18 @@ func checkBlockConsistency(height int64) error {
 	if delta != 0 {
 		return fmt.Errorf("stored state at height %d breaks the block-supply invariant by %d", height, delta)
 	}
-	return nil
+	// S9-03: DEX and EVM state are consensus state too, and the commit marker
+	// is written only after every snapshot of the height landed.
+	if err := account.LoadDexAccounts(height); err != nil {
+		return fmt.Errorf("no DEX snapshot for height %d: %w", height, err)
+	}
+	blocks.StateMutex.Lock()
+	_, err = blocks.State.LoadAtOrBelow(height)
+	blocks.StateMutex.Unlock()
+	if err != nil {
+		return fmt.Errorf("no EVM state for height %d: %w", height, err)
+	}
+	return blocks.VerifyStateCommit(height)
 }
 
 // activateWalletFromBlock selects the wallet matching the signature schemes the

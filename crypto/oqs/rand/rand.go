@@ -35,14 +35,16 @@ func algorithmPtr(randomArray *C.uint8_t, bytesToRead C.size_t) {
 	if algorithmPtrCallback == nil {
 		panic("oqs/rand: custom RNG callback invoked after it was cleared; liboqs was not switched back to a built-in RNG")
 	}
-	// TODO optimize the copying if possible!
-	result := make([]byte, int(bytesToRead))
-	algorithmPtrCallback(result, int(bytesToRead))
-	p := unsafe.Pointer(randomArray)
-	for _, v := range result {
-		*(*C.uint8_t)(p) = C.uint8_t(v)
-		p = unsafe.Pointer(uintptr(p) + 1)
+	n := int(bytesToRead)
+	if n == 0 {
+		return
 	}
+	result := make([]byte, n)
+	algorithmPtrCallback(result, n)
+	// One bounded copy (S5-02). Walking the buffer with uintptr arithmetic left
+	// the pointer one past the allocation after the last byte, which checkptr
+	// (-race) rejects and the GC rules leave undefined.
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(randomArray)), n), result)
 }
 
 /**************** END Callbacks ****************/

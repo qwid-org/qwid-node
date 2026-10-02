@@ -12,18 +12,25 @@ func TestSolImportDetection(t *testing.T) {
 		`import "/etc/passwd";`,
 		"pragma solidity ^0.8.0;\nimport \"./other.sol\";",
 		`  import {Foo} from "bar";`,
+		// S8-04: not only at the start of a line.
+		`pragma solidity ^0.8.0; import "/etc/passwd";`,
+		`/* header */ import "x.sol";`,
+		"contract C {} import \"y.sol\";",
 	}
 	for _, c := range rejects {
-		if !solImportRE.MatchString(c) {
+		if !containsSolImport(c) {
 			t.Fatalf("expected import to be detected in: %q", c)
 		}
 	}
 	allows := []string{
 		"pragma solidity ^0.8.0;\ncontract C { uint x; }",
 		"// this mentions the word import in a comment\ncontract C {}",
+		"/* import \"a\"; */ contract C {}",
+		`contract C { string s = "import x"; }`,
+		"contract C { uint importantValue; }",
 	}
 	for _, c := range allows {
-		if solImportRE.MatchString(c) {
+		if containsSolImport(c) {
 			t.Fatalf("did not expect import match in: %q", c)
 		}
 	}

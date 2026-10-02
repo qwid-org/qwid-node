@@ -336,7 +336,10 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), tmm...))); err != nil {
+		JsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	JsonResponse(w, map[string]string{
 		"success": "true",
