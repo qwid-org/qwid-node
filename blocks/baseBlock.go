@@ -18,6 +18,16 @@ type BaseHeader struct {
 	DelegatedAccount common.Address   `json:"delegated_account"`
 	OperatorAccount  common.Address   `json:"operator_account"`
 	RootMerkleTree   common.Hash      `json:"root_merkle_tree"`
+	// BodyHash commits the signed header to the rest of the block (S3-04):
+	// timestamp, reward percentage, supply and the oracle values, data and
+	// proofs. Without it a relay could edit any of them and present another
+	// valid block under the producer's signature.
+	BodyHash common.Hash `json:"body_hash"`
+	// StateRoot is the root of the state after the PARENT block (S3-05) - the
+	// state the producer holds when it builds this block. Every validator
+	// compares it with its own state before applying, so a divergence is
+	// caught one block later instead of never.
+	StateRoot        common.Hash      `json:"state_root"`
 	Encryption1      []byte           `json:"encryption_1"`
 	Encryption2      []byte           `json:"encryption_2"`
 	Signature        common.Signature `json:"signature"`
@@ -159,6 +169,8 @@ func (b *BaseHeader) GetBytesWithoutSignature() []byte {
 	rb = append(rb, b.DelegatedAccount.GetBytes()...)
 	rb = append(rb, b.OperatorAccount.GetBytesWithPrimary()...)
 	rb = append(rb, b.RootMerkleTree.GetBytes()...)
+	rb = append(rb, b.BodyHash.GetBytes()...)
+	rb = append(rb, b.StateRoot.GetBytes()...)
 	rb = append(rb, common.BytesToLenAndBytes(b.Encryption1)...)
 	rb = append(rb, common.BytesToLenAndBytes(b.Encryption2)...)
 	return rb
@@ -171,6 +183,8 @@ func (b *BaseHeader) GetBytes() []byte {
 	rb = append(rb, b.DelegatedAccount.GetBytes()...)
 	rb = append(rb, b.OperatorAccount.GetBytesWithPrimary()...)
 	rb = append(rb, b.RootMerkleTree.GetBytes()...)
+	rb = append(rb, b.BodyHash.GetBytes()...)
+	rb = append(rb, b.StateRoot.GetBytes()...)
 
 	rb = append(rb, common.BytesToLenAndBytes(b.Encryption1)...)
 	rb = append(rb, common.BytesToLenAndBytes(b.Encryption2)...)
@@ -244,9 +258,14 @@ func (bh *BaseHeader) Sign(primary bool) (common.Signature, []byte, error) {
 	return *sign, signatureBlockHeaderMessage, nil
 }
 
+// baseHeaderFixedBytes is the fixed-offset part of a serialized header:
+// previous hash 32, difficulty 4, height 8, delegated account 20, operator
+// account 21, merkle root 32, body hash 32, state root 32.
+const baseHeaderFixedBytes = 181
+
 func (bh *BaseHeader) GetFromBytes(b []byte) ([]byte, error) {
 	//logger.GetLogger().Println("block decompile len bytes ", len(b))
-	if len(b) < 117 {
+	if len(b) < baseHeaderFixedBytes {
 		return nil, fmt.Errorf("not enough bytes to decode BaseHeader")
 	}
 
@@ -264,8 +283,10 @@ func (bh *BaseHeader) GetFromBytes(b []byte) ([]byte, error) {
 	}
 	bh.OperatorAccount = opAddress
 	bh.RootMerkleTree = common.GetHashFromBytes(b[85:117])
+	bh.BodyHash = common.GetHashFromBytes(b[117:149])
+	bh.StateRoot = common.GetHashFromBytes(b[149:baseHeaderFixedBytes])
 
-	msgb, b, err := common.BytesWithLenToBytes(b[117:])
+	msgb, b, err := common.BytesWithLenToBytes(b[baseHeaderFixedBytes:])
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +332,7 @@ func (bb *BaseBlock) GetBytes() []byte {
 
 func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
 	//logger.GetLogger().Println("bytes to decode BaseBlock", len(b))
-	if len(b) < 116+44+16 {
+	if len(b) < baseHeaderFixedBytes+44+16 {
 		return nil, fmt.Errorf("not enough bytes to decode BaseBlock")
 	}
 	b, err := bb.BaseHeader.GetFromBytes(b)
@@ -348,6 +369,25 @@ func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
 		bb.OracleProofs = nil
 	}
 	return b[:], nil
+}
+
+// bodyBytes is everything of the block body that BodyHash commits to: the
+// BaseBlock fields after the header and its hash.
+func (bb *BaseBlock) bodyBytes() []byte {
+	b := common.GetByteInt64(bb.BlockTimeStamp)
+	b = append(b, common.GetByteInt16(bb.RewardPercentage)...)
+	b = append(b, common.GetByteInt64(bb.Supply)...)
+	b = append(b, common.GetByteInt64(bb.PriceOracle)...)
+	b = append(b, common.GetByteInt64(bb.RandOracle)...)
+	b = append(b, common.BytesToLenAndBytes(bb.PriceOracleData)...)
+	b = append(b, common.BytesToLenAndBytes(bb.RandOracleData)...)
+	b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
+	return b
+}
+
+// CalcBodyHash returns the hash the header's BodyHash must hold (S3-04).
+func (bb *BaseBlock) CalcBodyHash() (common.Hash, error) {
+	return common.CalcHashFromBytes(bb.bodyBytes())
 }
 
 func (b *BaseHeader) CalcHash() (common.Hash, error) {
