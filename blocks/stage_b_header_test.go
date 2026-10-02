@@ -227,3 +227,15 @@ func TestBodyHashSurvivesWireRoundTripWithProofsAtLowHeight(t *testing.T) {
 		t.Fatal("a received block no longer matches its signed body hash")
 	}
 }
+
+// Regression: genesis has no parent, so its difficulty cannot be derived
+// from one. InitGenesis checks the genesis block against itself; that must
+// not trip the parent-difficulty rule.
+func TestGenesisPassesCheckBaseBlockAgainstItself(t *testing.T) {
+	k, parent := headerTestSetup(t)
+	g := signedTestBlock(t, k, 0, parent, common.Hash{})
+	// Difficulty 1 against itself with interval 0 would "expect" 1+change.
+	if _, err := CheckBaseBlock(g, g, false); err != nil {
+		t.Fatalf("genesis rejected: %v", err)
+	}
+}

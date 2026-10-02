@@ -198,7 +198,9 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// Recompute the expected difficulty from the parent block and the committed
 	// timestamps and reject any block that declares a different value. Without
 	// this a producer could declare an arbitrarily low difficulty (consensus).
-	if !ValidDifficulty(
+	// Genesis has no parent to derive a difficulty from (InitGenesis checks it
+	// against itself); every later block must match its parent's.
+	if blockHeight > 0 && !ValidDifficulty(
 		newBlock.GetHeader().Difficulty,
 		lastBlock.GetHeader().Difficulty,
 		lastBlock.GetBlockTimeStamp(),
