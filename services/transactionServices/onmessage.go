@@ -133,6 +133,10 @@ func OnMessage(addr [4]byte, m []byte) {
 				//if len(pk.GetBytes()) > 0 {
 				//	logger.GetLogger().Println("  Transaction has pubkey, length:", len(pk.GetBytes()))
 				//}
+				if !admissibleTxHeight(t.GetHeight()) {
+					unpayable++ // counted with the other admission refusals
+					continue
+				}
 				if transactionsPool.PoolsTx.TransactionExists(t.Hash.GetBytes()) {
 					//logger.GetLogger().Println("  Transaction already exists in Pool, skipping")
 					// Even if already in pool, store the pubkey if present
@@ -277,87 +281,107 @@ func OnMessage(addr [4]byte, m []byte) {
 			go func() {
 				defer wg.Done()
 				for tb := range jobs {
-					tx := transactionsDefinition.Transaction{}
-					t, rest, err := tx.GetFromBytes(tb)
-					if err != nil || len(rest) > 0 {
-						resMutex.Lock()
-						undecodable++
-						if firstDecodeErr == nil {
-							if err == nil {
-								err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
+					// One transaction must not take the node down: these goroutines
+					// are outside OnMessage's recover (S2-10).
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								resMutex.Lock()
+								droppedCount++
+								if firstDropReason == "" {
+									firstDropReason = fmt.Sprintf("panic while processing a transaction: %v", r)
+								}
+								resMutex.Unlock()
 							}
-							firstDecodeErr = err
+						}()
+						tx := transactionsDefinition.Transaction{}
+						t, rest, err := tx.GetFromBytes(tb)
+						if err == nil && len(rest) == 0 && !t.HashMatchesBody() {
+							// S2-02: the hash came from the wire; filing a body under a
+							// hash it does not produce would let block application
+							// execute it as the transaction that hash commits to.
+							err = fmt.Errorf("tx %x: body does not match its hash", t.Hash.GetBytes()[:8])
 						}
-						resMutex.Unlock()
-						continue
-					}
-					if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) ||
-						transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
-						resMutex.Lock()
-						skippedExisting++
-						resMutex.Unlock()
-						continue
-					}
-					// NP-C6: verify the signature whenever the sender's public key is
-					// available (embedded in the tx, or already registered). Only skip
-					// verification when the pubkey is genuinely not yet known during
-					// sync — the signed block merkle root still enforces integrity when
-					// the referencing block is later validated.
-					sigBytes := t.GetSignature().GetBytes()
-					if len(sigBytes) == 0 {
-						resMutex.Lock()
-						droppedCount++
-						if firstDropReason == "" {
-							firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
+						if err != nil || len(rest) > 0 {
+							resMutex.Lock()
+							undecodable++
+							if firstDecodeErr == nil {
+								if err == nil {
+									err = fmt.Errorf("%v trailing bytes after transaction", len(rest))
+								}
+								firstDecodeErr = err
+							}
+							resMutex.Unlock()
+							return
 						}
-						resMutex.Unlock()
-						continue
-					}
-					canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
-					if !canVerify {
-						if _, perr := pubkeys.LoadPubKeyWithPrimary(t.GetSenderAddress(), sigBytes[0] == 0); perr == nil {
-							canVerify = true
+						if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) ||
+							transactionsDefinition.CheckFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()) {
+							resMutex.Lock()
+							skippedExisting++
+							resMutex.Unlock()
+							return
 						}
-					}
-					if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
-						// During an ACTIVE sync, do not drop: this verification
-						// runs under the node's CURRENT height's scheme config
-						// and key registry, while the transaction is historical
-						// — e.g. a key-registration authorized by a key whose
-						// own registration this node has not applied yet, or a
-						// tx signed under a since-changed scheme. Dropping it
-						// stalled sync forever at the block that contains it
-						// ("NOT FOUND in any DB" loop, incident 2026-09-08).
-						// Storing is safe: transactions are hash-addressed (a
-						// forged body changes the hash), and the block's signed
-						// merkle root is the consensus gate at apply time. When
-						// NOT syncing, keep dropping (NP-C6: bounds junk a peer
-						// can push into the pool DB).
-						if !common.IsSyncing.Load() {
+						// NP-C6: verify the signature whenever the sender's public key is
+						// available (embedded in the tx, or already registered). Only skip
+						// verification when the pubkey is genuinely not yet known during
+						// sync — the signed block merkle root still enforces integrity when
+						// the referencing block is later validated.
+						sigBytes := t.GetSignature().GetBytes()
+						if len(sigBytes) == 0 {
 							resMutex.Lock()
 							droppedCount++
 							if firstDropReason == "" {
-								firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+								firstDropReason = fmt.Sprintf("tx %x has an empty signature", t.Hash.GetBytes()[:8])
 							}
 							resMutex.Unlock()
-							continue
+							return
+						}
+						canVerify := len(t.TxData.GetPubKey().GetBytes()) > 0
+						if !canVerify {
+							if _, perr := pubkeys.LoadPubKeyWithPrimary(t.GetSenderAddress(), sigBytes[0] == 0); perr == nil {
+								canVerify = true
+							}
+						}
+						if canVerify && !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+							// During an ACTIVE sync, do not drop: this verification
+							// runs under the node's CURRENT height's scheme config
+							// and key registry, while the transaction is historical
+							// — e.g. a key-registration authorized by a key whose
+							// own registration this node has not applied yet, or a
+							// tx signed under a since-changed scheme. Dropping it
+							// stalled sync forever at the block that contains it
+							// ("NOT FOUND in any DB" loop, incident 2026-09-08).
+							// Storing is safe: transactions are hash-addressed (a
+							// forged body changes the hash), and the block's signed
+							// merkle root is the consensus gate at apply time. When
+							// NOT syncing, keep dropping (NP-C6: bounds junk a peer
+							// can push into the pool DB).
+							if !common.IsSyncing.Load() {
+								resMutex.Lock()
+								droppedCount++
+								if firstDropReason == "" {
+									firstDropReason = fmt.Sprintf("tx %x failed signature verification", t.Hash.GetBytes()[:8])
+								}
+								resMutex.Unlock()
+								return
+							}
+							resMutex.Lock()
+							storedUnverified++
+							resMutex.Unlock()
+						}
+						if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
+							resMutex.Lock()
+							storeFailures++
+							if firstStoreErr == nil {
+								firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
+							}
+							resMutex.Unlock()
+							return
 						}
 						resMutex.Lock()
-						storedUnverified++
+						storedCount++
 						resMutex.Unlock()
-					}
-					if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
-						resMutex.Lock()
-						storeFailures++
-						if firstStoreErr == nil {
-							firstStoreErr = fmt.Errorf("tx %x: %w", t.Hash.GetBytes()[:8], err)
-						}
-						resMutex.Unlock()
-						continue
-					}
-					resMutex.Lock()
-					storedCount++
-					resMutex.Unlock()
+					}()
 				}
 			}()
 		}
@@ -507,6 +531,14 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 	default:
 	}
+}
+
+// admissibleTxHeight reports whether a transaction stamped txHeight could go
+// into the next block (S4-01): blocks reject transactions above their height
+// or older than MaxTransactionAgeBlocks, so the pool need not hold them.
+func admissibleTxHeight(txHeight int64) bool {
+	next := common.GetHeight() + 1
+	return txHeight <= next && next-txHeight <= common.MaxTransactionAgeBlocks
 }
 
 // poolFullDrops counts gossip messages refused because the pool is full, and

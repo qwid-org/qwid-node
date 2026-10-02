@@ -96,6 +96,14 @@ func FromBytesToEncryptionConfig(bb []byte) (ConfigEnc, error) {
 	// that PASSED the (expensive) validation are cached, and the set of valid
 	// ones is bounded by the enabled schemes, so the map cannot be grown by a
 	// hostile peer.
+	//
+	// That bound holds only for the exact encoded length (S5-01): the parser
+	// ignored trailing bytes while they still keyed the cache, so each distinct
+	// tail - reachable from an unauthenticated block header - added a
+	// permanent entry and cost a key generation.
+	if len(bb) != totalLength {
+		return ConfigEnc{}, fmt.Errorf("encryption config must be %d bytes, got %d", totalLength, len(bb))
+	}
 	key := string(bb)
 	encConfigCacheMu.RLock()
 	cached, ok := encConfigCache[key]

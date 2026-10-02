@@ -1927,7 +1927,11 @@ func GetDexInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	holdings := map[string]interface{}{}
-	if walletReady() {
+	// S8-01: this endpoint needs no session, so any web page can reach it with
+	// a referrer-less GET. The balance lookup runs a view on a contract the
+	// caller names; only an authenticated session (whose SameSite=Strict
+	// cookie a cross-site request never carries) may trigger it.
+	if walletReady() && isAuthed(r) {
 		// Get token balance
 		m = []byte("GTBL")
 		m = append(m, MainWallet.MainAddress.GetBytes()...)

@@ -193,6 +193,14 @@ func ValidateContractDeployment(tx transactionsDefinition.Transaction) error {
 func FilterUnbuildableTransactions(txs []transactionsDefinition.Transaction, height int64) []transactionsDefinition.Transaction {
 	kept := txs[:0]
 	for _, tx := range txs {
+		// Outside the height window (S4-01) the block would be rejected; a
+		// transaction that has aged out can never become valid again.
+		if !TransactionHeightInWindow(tx.GetHeight(), height) {
+			if tx.GetHeight() < height {
+				transactionsPool.PoolsTx.RemoveTransactionByHash(tx.Hash.GetBytes())
+			}
+			continue
+		}
 		// A deployment from an escrow or multisig account can never execute and
 		// the account cannot be converted back, so this is permanent: drop it
 		// rather than let it fail validation on every block attempt.
@@ -520,7 +528,11 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 		if !exist {
 			return fmt.Errorf("no account found")
 		}
-		if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
+		// S4-02: an escrow account's outgoing transfer is ALWAYS held at
+		// inclusion; the delay counts from this block (tx.Height is reset
+		// to it below). Testing the signer-chosen tx.Height let a key thief
+		// back-date the transfer and skip the cancellation window.
+		if senderAcc.TransactionDelay > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 			tx.Height = height
 			transactionsPool.AddEscrowTransaction(tx)
 

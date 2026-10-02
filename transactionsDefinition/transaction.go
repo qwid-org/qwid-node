@@ -212,8 +212,41 @@ func (tx *Transaction) GetBytesWithoutSignature(withHash bool) []byte {
 	return b
 }
 
-func (mt *Transaction) CalcHashAndSet() error {
+// HashMatchesBody reports whether tx.Hash is the hash of tx's own signed body.
+// The decoder takes Hash from the wire, so every trust boundary that stores or
+// executes a transaction by its hash must check this (S2-02/S3-01): otherwise
+// any body can be filed under the hash of a transaction a block commits to.
+func (mt *Transaction) HashMatchesBody() bool {
+	recomputed, err := common.CalcHashFromBytes(mt.hashPreimage())
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(recomputed.GetBytes(), mt.Hash.GetBytes())
+}
+
+// hashPreimage is what the transaction hash - and so the signature - covers.
+//
+// ContractAddress is included only for DEX operations (recipient a delegated
+// account above 512), where it is an INPUT: the token whose pool the order
+// trades. Left out of the hash, any relay could swap the token of a signed
+// order (S3-02). For contract calls and deployments it is an OUTPUT that block
+// execution writes after the fact, so including it there would change the
+// hash of a stored transaction.
+func (mt *Transaction) hashPreimage() []byte {
 	b := mt.GetBytesWithoutSignature(false)
+	if isDexOperation(mt.TxData.Recipient) {
+		b = append(b, mt.ContractAddress.GetBytes()...)
+	}
+	return b
+}
+
+func isDexOperation(recipient common.Address) bool {
+	n, err := account.IntDelegatedAccountFromAddress(recipient)
+	return err == nil && n > 512
+}
+
+func (mt *Transaction) CalcHashAndSet() error {
+	b := mt.hashPreimage()
 	hash, err := common.CalcHashFromBytes(b)
 	if err != nil {
 		return err
@@ -289,6 +322,15 @@ func LoadFromDBPoolTx(prefix []byte, hashTransaction []byte) (Transaction, error
 	if len(restb) > 0 {
 		logger.GetLogger().Println("len(restb)", len(restb))
 	}
+	// Block application executes whatever body sits under a hash, so the body
+	// must be the one that hash commits to (S3-01). A mismatching pool entry is
+	// removed, so an honest copy can be fetched in its place.
+	if !bytes.Equal(at.Hash.GetBytes(), hashTransaction) || !at.HashMatchesBody() {
+		if bytes.Equal(prefix, common.TransactionPoolHashesDBPrefix[:]) {
+			_ = database.MainDB.Delete(prefix2)
+		}
+		return Transaction{}, fmt.Errorf("stored transaction body does not match its hash %x", hashTransaction)
+	}
 	return at, nil
 }
 
@@ -302,20 +344,57 @@ func CheckFromDBPoolTx(prefix []byte, hashTransaction []byte) bool {
 }
 
 // Verify - checking if hash is correct and signature
+// txKind says in which role a transaction is verified. The gas exemption used
+// to follow from fields the sender chooses - Height==0 meant "genesis", a
+// zero transfer to a delegated account meant "nonce" - so anyone could sign
+// free, foreign-chain transactions (S4-01, S4-04). The role now comes from
+// the caller, which knows the context.
+type txKind int
+
+const (
+	txKindRegular txKind = iota // pool, gossip, blocks: full fee and gas rules
+	txKindNonce                 // a validator nonce message / oracle proof
+	txKindGenesis               // a transaction of the genesis block
+)
+
+// Verify checks an ordinary transaction (pool admission, gossip, blocks).
 func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
+	return tx.verify(txKindRegular, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+}
+
+// VerifyNonce checks a validator nonce message (also embedded in blocks as an
+// oracle proof): a zero-amount transaction to a delegated account 1..255,
+// exempt from gas.
+func (tx *Transaction) VerifyNonce(sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
+	return tx.verify(txKindNonce, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+}
+
+// VerifyGenesis checks a transaction of the genesis block, exempt from gas.
+func (tx *Transaction) VerifyGenesis(sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
+	return tx.verify(txKindGenesis, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+}
+
+func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
 	recipientAddress := tx.TxData.Recipient
 	n, err := account.IntDelegatedAccountFromAddress(recipientAddress)
-	// Nonce transactions (delegated account recipient with zero amount) and genesis transactions are exempt from gas fees
-	isNonceTx := err == nil && n > 0 && n < 256 && tx.GetData().Amount == 0
-	isGenesisTx := tx.Height == 0
+	switch kind {
+	case txKindNonce:
+		if err != nil || n <= 0 || n >= 256 || tx.GetData().Amount != 0 {
+			return false
+		}
+	case txKindGenesis:
+		if tx.Height != 0 {
+			return false
+		}
+	}
 	// AC-H3: reject transactions carrying a foreign chain ID to prevent
-	// cross-chain replay (e.g. testnet txs replayed on mainnet). Genesis txs are
-	// exempt, matching the fee-exemption handling below.
-	if !isGenesisTx && tx.TxParam.ChainID != common.GetChainID() {
+	// cross-chain replay (e.g. testnet txs replayed on mainnet). No exemption:
+	// genesis transactions carry the chain id too.
+	if tx.TxParam.ChainID != common.GetChainID() {
 		logger.GetLogger().Println("transaction chain ID mismatch: expected", common.GetChainID(), "got", tx.TxParam.ChainID)
 		return false
 	}
-	if !isNonceTx && !isGenesisTx {
+	if kind == txKindRegular {
 		if tx.GasPrice <= 0 {
 			logger.GetLogger().Println("transaction gas price must be greater than 0")
 			return false
@@ -615,7 +694,7 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 			// rescue), so operators who registered the new scheme before the
 			// pause (enforced for block producers by the pause gate in
 			// blocks.CheckBaseBlock) gain no new exposure.
-			if authorised && authorisedByDerivingKey && tx.TxData.Amount == 0 {
+			if authorised && authorisedByDerivingKey && tx.isPureRegistration() {
 				if _, serr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, pkPrimary, len(tx.TxData.GetPubKey().GetBytes())); serr != nil {
 					if primary {
 						effPaused = false
@@ -694,7 +773,7 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 		// a signature forgery. Without it, no identity derived from the paused
 		// scheme can ever be bootstrapped, freezing every participant who did
 		// not register before the pause.
-		if tx.TxData.Amount == 0 && primary == pkPrimary &&
+		if tx.isPureRegistration() && primary == pkPrimary &&
 			bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes()) {
 			if primary {
 				effPaused = false
@@ -740,6 +819,19 @@ func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tm
 // In particular a spare key cannot open an account. Its address differs from
 // the identity by construction, so accepting it would mean believing the
 // transaction's own assertion about whose key it is.
+// isPureRegistration reports whether the transaction's only effect is to
+// register the key it carries: no amount, no data, addressed to the sender,
+// no escrow, multisig or locking settings. Only such a transaction may still
+// be signed with a paused scheme (S4-03) - "Amount == 0" alone also covered
+// DEX orders, contract calls and account conversions, which move value.
+func (tx *Transaction) isPureRegistration() bool {
+	d := tx.TxData
+	return d.Amount == 0 && len(d.OptData) == 0 && d.LockedAmount == 0 &&
+		d.EscrowTransactionsDelay == 0 && d.MultiSignNumber == 0 && len(d.MultiSignAddresses) == 0 &&
+		bytes.Equal(d.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes()) &&
+		bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength))
+}
+
 func bootstrapBindsKey(pkAddr, senderAddr common.Address) bool {
 	return bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes())
 }

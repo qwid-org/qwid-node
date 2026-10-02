@@ -299,6 +299,13 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	return merkleTrie, nil
 }
 
+// TransactionHeightInWindow reports whether a transaction stamped txHeight may
+// be included in a block at blockHeight (S4-01): not above the block, and at
+// most MaxTransactionAgeBlocks below it.
+func TransactionHeightInWindow(txHeight, blockHeight int64) bool {
+	return txHeight <= blockHeight && blockHeight-txHeight <= common.MaxTransactionAgeBlocks
+}
+
 func mustDelegatedAccountID(address common.Address) int {
 	id, err := account.IntDelegatedAccountFromAddress(address)
 	if err != nil {
@@ -431,6 +438,13 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 		if err != nil {
 			return 0, 0, err
 		}
+		if !TransactionHeightInWindow(poolTx.GetHeight(), block.GetHeader().Height) {
+			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
+			if badTxErr == nil {
+				badTxErr = fmt.Errorf("transaction %x height %d outside the window for block %d", hash[:8], poolTx.GetHeight(), block.GetHeader().Height)
+			}
+			continue
+		}
 
 		fee, feeErr := poolTx.CalcFee()
 		if feeErr != nil {
@@ -496,9 +510,15 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			stakingAccounts[stakingAcc.Address] = stakingAcc
 			ret := CheckStakingTransaction(poolTx, stakingAccounts[stakingAcc.Address].StakedBalance, stakingAccounts[stakingAcc.Address].StakingRewards, block)
 			if ret == false {
-				// remove bad transaction from pool
+				// Drop+ban and keep scanning, like the unpayable case below
+				// (S4-04): returning here purged one invalid staking transaction
+				// per production attempt, so a flood of them stalled production.
+				// The block is still rejected through badTxErr.
 				transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
-				return 0, 0, fmt.Errorf("staking transactions checking fails: CheckBlockTransfers")
+				if badTxErr == nil {
+					badTxErr = fmt.Errorf("staking transactions checking fails: CheckBlockTransfers")
+				}
+				continue
 			}
 		}
 		acc, exist := account.GetAccountByAddressBytes(address.GetBytes())

@@ -187,7 +187,7 @@ func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 			cache[decoded.Height] = names
 		}
 		isPaused, isPaused2 := historicalProofPauseFlags()
-		if !decoded.Verify(names.sigName, names.sigName2, isPaused, isPaused2) {
+		if !decoded.VerifyNonce(names.sigName, names.sigName2, isPaused, isPaused2) {
 			return nil, fmt.Errorf("oracle proof signature verification failed")
 		}
 		return &decoded, nil

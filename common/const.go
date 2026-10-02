@@ -48,6 +48,11 @@ var (
 	OraclesHeightDistance          int64   = 6            // one minute on average
 	VotingHeightDistance           int64   = 60           // 60 => ten minute on average
 	MaxTransactionDelay            int64   = 60480        // one week
+	// MaxTransactionAgeBlocks bounds how far below the including block a
+	// transaction's Height may lie (S4-01): wallets stamp the current tip, so a
+	// transaction older than this (or one claiming a height above its block) is
+	// a replay or a forged exemption. 8640 blocks is one day.
+	MaxTransactionAgeBlocks int64 = 8640
 	MaxTransactionInMultiSigPool   int64   = 60480        //one week
 	// MaxNumberTransactionInChunk sizes one bt request / bx answer during
 	// missing-transaction recovery. 500 txs ≈ up to ~3MB with embedded pubkeys,

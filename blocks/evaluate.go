@@ -59,7 +59,7 @@ func isContractCallTx(tx transactionsDefinition.Transaction, senderAcc account.A
 	if senderAcc.MultiSignNumber > 0 {
 		return false // multisign accounts skip SC execution
 	}
-	if senderAcc.TransactionDelay > 0 && tx.GetHeight()+senderAcc.TransactionDelay > height {
+	if senderAcc.TransactionDelay > 0 { // held in escrow at inclusion (S4-02)
 		return false // escrow-delayed — SC not executed
 	}
 	return true
@@ -399,7 +399,6 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 	addresses := map[[common.HashLength]byte]common.Address{}
 	logs := map[[common.HashLength]byte]string{}
 	rets := map[[common.HashLength]byte][]byte{}
-	height := bl.GetHeader().Height
 	optDatas := map[[common.AddressLength]byte][]byte{}
 	for _, th := range bl.GetBlockTransactionsHashes() {
 		poolprefix := common.TransactionPoolHashesDBPrefix[:]
@@ -418,7 +417,7 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			loggerMain.GetLogger().Println("no account exist with this address")
 			continue
 		}
-		if senderAcc.TransactionDelay > 0 && t.GetHeight()+senderAcc.TransactionDelay > height {
+		if senderAcc.TransactionDelay > 0 { // held in escrow at inclusion (S4-02)
 			//TODO escrow does not execute SC
 			continue
 
@@ -661,7 +660,6 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	// Publish this block's consensus oracle values for the oracle precompiles
 	// (0x100 price, 0x101 rand) before any EVM execution (deterministic:
 	// the values are sealed in the block being evaluated).
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 	blockCtx := vm.BlockContext{
 		CanTransfer: evmCanTransfer,
 		Transfer:    evmTransfer,
@@ -695,7 +693,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	jumpTable := vm.GetGenericJumpTable()
 
 	configCtx := vm.Config{
-		Debug:                   true,
+		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
 		Tracer:                  &logger,
 		NoBaseFee:               true,
 		EnablePreimageRecording: true,
@@ -708,6 +706,10 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	}
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
+	// Inside the lock (S6-02): the precompiles read package-level values, and
+	// every EVM run - block execution and RPC views alike - holds StateMutex,
+	// so no concurrent run can replace them before this one reads them.
+	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 
 	VM = vm.NewEVM(blockCtx, txCtx, &State, params.AllEthashProtocolChanges, configCtx)
 	defer VM.Cancel()
@@ -775,7 +777,6 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	// Publish this block's consensus oracle values for the oracle precompiles
 	// (0x100 price, 0x101 rand) before any EVM execution (deterministic:
 	// the values are sealed in the block being evaluated).
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 	blockCtx := vm.BlockContext{
 		CanTransfer: evmCanTransfer,
 		Transfer:    evmTransfer,
@@ -809,7 +810,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	jumpTable := vm.GetGenericJumpTable()
 
 	configCtx := vm.Config{
-		Debug:                   true,
+		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
 		Tracer:                  &logger,
 		NoBaseFee:               true,
 		EnablePreimageRecording: true,
@@ -822,6 +823,10 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	}
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
+	// Inside the lock (S6-02): the precompiles read package-level values, and
+	// every EVM run - block execution and RPC views alike - holds StateMutex,
+	// so no concurrent run can replace them before this one reads them.
+	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 
 	//nonce := new(big.Int).SetInt64(int64(tx.TxParam.Nonce))
 
@@ -851,7 +856,6 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	// Publish this block's consensus oracle values for the oracle precompiles
 	// (0x100 price, 0x101 rand) before any EVM execution (deterministic:
 	// the values are sealed in the block being evaluated).
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 	blockCtx := vm.BlockContext{
 		CanTransfer: evmCanTransfer,
 		Transfer:    evmTransfer,
@@ -885,7 +889,7 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	jumpTable := vm.GetGenericJumpTable()
 
 	configCtx := vm.Config{
-		Debug:                   true,
+		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
 		Tracer:                  &logger,
 		NoBaseFee:               true,
 		EnablePreimageRecording: true,
@@ -898,6 +902,10 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	}
 	StateMutex.Lock()
 	defer StateMutex.Unlock()
+	// Inside the lock (S6-02): the precompiles read package-level values, and
+	// every EVM run - block execution and RPC views alike - holds StateMutex,
+	// so no concurrent run can replace them before this one reads them.
+	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
 	VM = vm.NewEVM(blockCtx, txCtx, &State, params.AllEthashProtocolChanges, configCtx)
 	defer VM.Cancel()
 
@@ -910,23 +918,13 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	State.ResetTransient()
 
 	ret, leftOverGas, err = VM.StaticCall(vm.AccountRef(origin), contractAddr, input, uint64(common.MaxGasUsage))
-	// Convert hex to bytes. The tracer output is normally well-formed hex, but
-	// this function sits on the block-application path (token metadata probes),
-	// so a decode failure must be an error the caller skips over — killing the
-	// process here would let one contract deployment stop the node.
-	dataBytes, err := hex.DecodeString(logger.Output)
-	if err != nil {
-		loggerMain.GetLogger().Println("view call: tracer output is not valid hex:", err)
-		return "", "", ret, address, leftOverGas, err
-	}
-
-	// Convert bytes to UTF-8
-	decodedString := string(dataBytes)
-	if err != nil {
-		return logger.Output, decodedString, ret, address, leftOverGas, err
-	}
-
-	return logger.Output, decodedString, ret, address, leftOverGas, nil
+	// The output is the call's return data, hex-encoded - what the tracer's
+	// CaptureExit used to record for the top frame before tracing was turned
+	// off (S6-01). The StaticCall error is still not returned: GetBalance on
+	// the block-application path (DEX) depends on that behaviour, so changing
+	// it is a consensus change (S6-05), not a local fix.
+	output := hex.EncodeToString(ret)
+	return output, string(ret), ret, address, leftOverGas, nil
 }
 
 func IsTokenToRegister(code []byte) bool {

@@ -76,7 +76,7 @@ func OnMessage(addr [4]byte, m []byte) {
 			return
 		}
 		//KU TEMP TODO
-		isValid = transaction.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
+		isValid = transaction.VerifyNonce(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
 		if isValid == false {
 			// Distinguish an unregistered/unknown sender (we may simply be behind,
 			// or the sender has not registered its pubkey on-chain yet) from a

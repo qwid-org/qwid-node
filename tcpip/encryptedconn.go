@@ -84,7 +84,9 @@ func (e *encryptedConn) Read(p []byte) (int, error) {
 			return 0, err
 		}
 		n := int(binary.BigEndian.Uint32(hdr[:]))
-		if n < e.readAEAD.Overhead() || n > maxRecordPayload+e.readAEAD.Overhead() {
+		// n == Overhead is an empty record. Write never sends one, and each
+		// cost the reader a full receive cycle for 20 wire bytes (S1-03).
+		if n <= e.readAEAD.Overhead() || n > maxRecordPayload+e.readAEAD.Overhead() {
 			return 0, fmt.Errorf("encryptedConn: bad record length %d", n)
 		}
 		ct := make([]byte, n)

@@ -2,10 +2,8 @@ package tcpip
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
@@ -84,22 +82,23 @@ func BanIP(ip [4]byte) {
 	bannedIP[ip] = common.GetCurrentTimeStampInSecond() + common.BannedTimeSeconds
 	bannedIPMutex.Unlock()
 	pruneRateLimits(ip)
-	if PeersMutex.TryLock() {
-		defer PeersMutex.Unlock()
-		if _, ok := validPeersConnected[ip]; ok {
-			delete(validPeersConnected, ip)
-		}
-		if _, ok := nodePeersConnected[ip]; ok {
-			delete(nodePeersConnected, ip)
-		}
-		// Connection maps are keyed by peer handle where one exists, so match
-		// every key whose transport address is the banned IP - a ban is per
-		// source and must sever ALL nodes arriving from it.
-		for _, topic := range [][2]byte{NonceTopic, TransactionTopic, SyncTopic} {
-			for key, tcpConn := range tcpConnections[topic] {
-				if canonicalIP(key) == ip {
-					CloseAndRemoveConnection(tcpConn)
-				}
+	// Lock, not TryLock: every caller releases PeersMutex before banning, and
+	// a TryLock that lost a race silently left the banned peer connected.
+	PeersMutex.Lock()
+	defer PeersMutex.Unlock()
+	if _, ok := validPeersConnected[ip]; ok {
+		delete(validPeersConnected, ip)
+	}
+	if _, ok := nodePeersConnected[ip]; ok {
+		delete(nodePeersConnected, ip)
+	}
+	// Connection maps are keyed by peer handle where one exists, so match
+	// every key whose transport address is the banned IP - a ban is per
+	// source and must sever ALL nodes arriving from it.
+	for _, topic := range [][2]byte{NonceTopic, TransactionTopic, SyncTopic} {
+		for key, tcpConn := range tcpConnections[topic] {
+			if canonicalIP(key) == ip {
+				CloseAndRemoveConnection(tcpConn)
 			}
 		}
 	}
@@ -107,23 +106,18 @@ func BanIP(ip [4]byte) {
 
 func ReduceAndCheckIfBanIP(ip [4]byte) {
 	ip = canonicalIP(ip) // trust/bans are per transport source, tags may be handles
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
 	PeersMutex.Lock()
-	defer PeersMutex.Unlock()
-	select {
-	case <-ctx.Done():
-		// Handle timeout
-		logger.GetLogger().Println("ReduceAndCheckIfBanIP: timeout in sending")
-
-	default:
-		if _, ok := validPeersConnected[ip]; ok {
-			ReduceTrustRegisterPeer(ip)
-		}
-		if _, ok := validPeersConnected[ip]; !ok {
-			logger.GetLogger().Println("not trusted ip", ip)
-			BanIP(ip)
-		}
+	if _, ok := validPeersConnected[ip]; ok {
+		ReduceTrustRegisterPeer(ip)
+	}
+	_, trusted := validPeersConnected[ip]
+	PeersMutex.Unlock()
+	if !trusted {
+		logger.GetLogger().Println("not trusted ip", ip)
+		// Outside PeersMutex (S1-05): BanIP severs the peer's connections under
+		// PeersMutex itself, and called with the lock held its TryLock always
+		// failed - the ban was recorded but the peer stayed connected.
+		BanIP(ip)
 	}
 }
 

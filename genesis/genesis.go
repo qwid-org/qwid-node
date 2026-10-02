@@ -350,7 +350,7 @@ func GenesisTransaction(sender common.Address, recipient common.Address, genTx G
 	}
 	t.Signature = signature
 
-	if t.Verify(common.SigName(), common.SigName2(), false, false) == false {
+	if t.VerifyGenesis(common.SigName(), common.SigName2(), false, false) == false {
 		myWallet := wallet.GetActiveWallet()
 		logger.GetLogger().Println(myWallet.Account1.PublicKey.GetHex())
 		err = t.Sign(myWallet, true)
