@@ -48,6 +48,13 @@ type BaseBlock struct {
 	// PriceOracleData/RandOracleData entries, so validators can re-verify their
 	// provenance instead of trusting the producer's reconstructed triples.
 	OracleProofs [][]byte `json:"oracle_proofs"`
+	// RANDAO (S4-06, randao.go). RandReveal is the seed behind the producer's
+	// previous commitment (empty when it has none), RandCommit its commitment
+	// for its next block, RandMix the accumulator after this block. RandOracle
+	// is derived from RandMix.
+	RandReveal []byte      `json:"rand_reveal"`
+	RandCommit common.Hash `json:"rand_commit"`
+	RandMix    common.Hash `json:"rand_mix"`
 }
 
 const (
@@ -323,7 +330,16 @@ func (bb *BaseBlock) GetBytes() []byte {
 	// body hash at the receiver; the chain starts from a new genesis, so no
 	// historical encoding has to be kept.
 	b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
+	b = append(b, bb.randaoBytes()...)
 	return b
+}
+
+// randaoBytes encodes the RANDAO fields: reveal (length-prefixed), commitment,
+// mix.
+func (bb *BaseBlock) randaoBytes() []byte {
+	b := common.BytesToLenAndBytes(bb.RandReveal)
+	b = append(b, bb.RandCommit.GetBytes()...)
+	return append(b, bb.RandMix.GetBytes()...)
 }
 
 func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
@@ -360,7 +376,19 @@ func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return b[:], nil
+	bb.RandReveal, b, err = common.BytesWithLenToBytes(b[:])
+	if err != nil {
+		return nil, err
+	}
+	if len(bb.RandReveal) == 0 {
+		bb.RandReveal = nil // one representation of "no reveal" for re-encoding
+	}
+	if len(b) < 2*common.HashLength {
+		return nil, fmt.Errorf("not enough bytes for the RANDAO commitment and mix: have %d", len(b))
+	}
+	bb.RandCommit = common.GetHashFromBytes(b[:common.HashLength])
+	bb.RandMix = common.GetHashFromBytes(b[common.HashLength : 2*common.HashLength])
+	return b[2*common.HashLength:], nil
 }
 
 // bodyBytes is everything of the block body that BodyHash commits to: the
@@ -374,6 +402,7 @@ func (bb *BaseBlock) bodyBytes() []byte {
 	b = append(b, common.BytesToLenAndBytes(bb.PriceOracleData)...)
 	b = append(b, common.BytesToLenAndBytes(bb.RandOracleData)...)
 	b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
+	b = append(b, bb.randaoBytes()...)
 	return b
 }
 

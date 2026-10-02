@@ -82,7 +82,7 @@ go test -v ./wallet       # verbose output
 
 ### Database Prefix System
 
-RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height), `EV` (EVM state snapshots, store-on-change), `HS`/`HR` (per-account sent/received tx-history index), `SC` (state commit marker: state root after a height, written last after all its snapshots; startup accepts a height only if it exists and matches the loaded state).
+RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height), `EV` (EVM state snapshots, store-on-change), `HS`/`HR` (per-account sent/received tx-history index), `SC` (state commit marker: state root after a height, written last after all its snapshots; startup accepts a height only if it exists and matches the loaded state), `PJ` (pubkey registration journal, undone on rewind), `PR` (pubkey registration height - the historical key registry: block application reads keys as of the parent block via `pubkeys.*AsOf`, never the live registry; no record = height 0).
 
 State-size invariants: account snapshots must stay O(number of accounts) — per-account transaction history lives in the `HS`/`HR` index (`account/txHistory.go`) with only `SentCount`/`ReceivedCount` counters in state (a rewind restores the counters; re-applied txs overwrite the index tail). Staking detail entries older than `common.StakingDetailsRetentionBlocks` fold into one aggregate at key 0. Accounts/staking snapshots are written once per sync batch (per block on the live path), so snapshot heights have gaps — the highest stored height comes from a `prefix+"LAST"` meta key (`account/heightMeta.go`), never from contiguity-assuming search.
 
@@ -95,7 +95,18 @@ covered by the producer's signature. Validators recompute `BlockHeaderHash`,
 `BodyHash` and `StateRoot` before applying a block. Signature-scheme votes are
 counted from the signed nonces embedded in the block (`OracleProofs`) against
 the parent's stake (`blocks/encryptionVote.go`); oracle data must be exactly
-the values of the embedded proofs.
+the values of the embedded proofs. A price that cannot be established (proofs
+carry at most 2/3 of the stake) is the parent's carried forward, never 0.
+
+RAND is a RANDAO accumulator (`blocks/randao.go`, S4-06), not the validators'
+proposals: each block carries its producer's `RandReveal` (the seed behind the
+commitment it made in its previous block, required while that is younger than
+`RandaoCommitExpiry`), a new `RandCommit`, and `RandMix` = hash of the parent's
+mix, the height and the reveal; `RandOracle` derives from `RandMix`. The live
+commitment is staking state (`StakingAccount.RandCommit/RandCommitHeight`,
+in the state root). Seeds are derived, never stored: `wallet.RandaoSeed(height)`
+from the BIP39 seed (or the primary secret key). `RandOracleData` must be empty
+and the nonce's rand slot is zero and ignored.
 
 P2P frames are length-prefixed: `MessageInitialization || uint32 BE length ||
 body` (`tcpip.encodeFrame` / `frameAssembler`), never delimiter-based.

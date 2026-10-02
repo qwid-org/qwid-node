@@ -64,6 +64,8 @@ func ComputeStateRoot() (common.Hash, error) {
 			w.bool(sa.OperationalAccount)
 			w.i64(sa.OperationalSince)
 			w.i64(sa.LastStakeHeight)
+			w.bytes(sa.RandCommit[:])
+			w.i64(sa.RandCommitHeight)
 		}
 	}
 	account.StakingRWMutex.RUnlock()

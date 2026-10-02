@@ -56,6 +56,13 @@ var (
 	// transaction older than this (or one claiming a height above its block) is
 	// a replay or a forged exemption. 8640 blocks is one day.
 	MaxTransactionAgeBlocks int64 = 8640
+	// RandaoCommitExpiry bounds how long a producer's RANDAO commitment binds
+	// it (S4-06). Within it, the producer's next block must reveal the
+	// committed seed; after it, the commitment lapses and the block carries no
+	// reveal. It only matters for a producer that lost the secret its seeds
+	// derive from (a wallet without a recovery phrase meeting a key change):
+	// such a node cannot produce until its commitment lapses. One day.
+	RandaoCommitExpiry int64 = 8640
 	// DexTokenCallGas is the EVM budget of the token call inside a DEX
 	// operation; it is part of a DEX transaction's minimum gas (S6-03), so the
 	// execution is paid for.
@@ -192,6 +199,14 @@ var (
 	// shadow the canonical one. Key: prefix + height(8) + derivedAddr(20);
 	// value: mainAddress(20).
 	PubKeyRegistrationJournalDBPrefix = [2]byte{'P', 'J'}
+	// PubKeyRegistrationHeightDBPrefix + derivedAddr(20) holds the height of
+	// the block that registered that key (8 bytes) - the historical key
+	// registry (S3-06). Block application asks "which keys did this identity
+	// have after the parent block" instead of "which keys does it have now",
+	// so neither the order of work inside one block nor a registration left
+	// over from an abandoned apply can change a verdict. No record means
+	// height 0: genesis keys and keys stored before the index existed.
+	PubKeyRegistrationHeightDBPrefix = [2]byte{'P', 'R'}
 	//StakingDBPrefix                    = [2]byte{'S', 'S'}
 	TransactionPoolHashesDBPrefix    = [2]byte{'D', '0'}
 	TransactionToSendHashesDBPrefix  = [2]byte{'E', '0'}

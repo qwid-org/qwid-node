@@ -46,7 +46,6 @@ func TestExtractOracleSubmission(t *testing.T) {
 	assert.Equal(t, uint8(5), id)
 	assert.Equal(t, int64(42), sub.height)
 	assert.Equal(t, int64(100000000), sub.price)
-	assert.Equal(t, int64(777), sub.rand)
 }
 
 func TestExtractOracleSubmissionRejectsNonZeroAmount(t *testing.T) {
@@ -64,12 +63,11 @@ func TestMatchOracleDataAcceptsBackedTriples(t *testing.T) {
 	defer logger.CloseLogger()
 
 	subs := map[uint8]oracleSubmission{
-		2: {height: 10, price: 100, rand: 500},
-		5: {height: 12, price: 200, rand: 600},
+		2: {height: 10, price: 100},
+		5: {height: 12, price: 200},
 	}
 	priceData := append(oracleTriple(2, 10, 100), oracleTriple(5, 12, 200)...)
-	randData := append(oracleTriple(2, 10, 500), oracleTriple(5, 12, 600)...)
-	assert.NoError(t, matchOracleData(subs, priceData, randData))
+	assert.NoError(t, matchOracleData(subs, priceData))
 }
 
 func TestMatchOracleDataRejectsFabricatedValue(t *testing.T) {
@@ -77,12 +75,11 @@ func TestMatchOracleDataRejectsFabricatedValue(t *testing.T) {
 	defer logger.CloseLogger()
 
 	subs := map[uint8]oracleSubmission{
-		2: {height: 10, price: 100, rand: 500},
+		2: {height: 10, price: 100},
 	}
 	// Producer declares price 999 for id 2 while the signed proof says 100.
 	priceData := oracleTriple(2, 10, 999)
-	randData := oracleTriple(2, 10, 500)
-	assert.Error(t, matchOracleData(subs, priceData, randData))
+	assert.Error(t, matchOracleData(subs, priceData))
 }
 
 func TestMatchOracleDataRejectsUnbackedID(t *testing.T) {
@@ -90,24 +87,11 @@ func TestMatchOracleDataRejectsUnbackedID(t *testing.T) {
 	defer logger.CloseLogger()
 
 	subs := map[uint8]oracleSubmission{
-		2: {height: 10, price: 100, rand: 500},
+		2: {height: 10, price: 100},
 	}
 	// id 7 has no signed proof.
 	priceData := append(oracleTriple(2, 10, 100), oracleTriple(7, 10, 300)...)
-	randData := oracleTriple(2, 10, 500)
-	assert.Error(t, matchOracleData(subs, priceData, randData))
-}
-
-func TestMatchOracleDataRejectsRandMismatch(t *testing.T) {
-	logger.InitLogger()
-	defer logger.CloseLogger()
-
-	subs := map[uint8]oracleSubmission{
-		2: {height: 10, price: 100, rand: 500},
-	}
-	priceData := oracleTriple(2, 10, 100)
-	randData := oracleTriple(2, 10, 999) // proof says 500
-	assert.Error(t, matchOracleData(subs, priceData, randData))
+	assert.Error(t, matchOracleData(subs, priceData))
 }
 
 // decoderFor returns an injected decoder keyed by the first proof byte, so the
@@ -136,9 +120,8 @@ func TestAuthenticateOracleProofsAcceptsFreshSignedProofs(t *testing.T) {
 	}
 	proofs := [][]byte{{1}, {2}}
 	priceData := append(oracleTriple(2, 10, 100), oracleTriple(5, 10, 200)...)
-	randData := append(oracleTriple(2, 10, 500), oracleTriple(5, 10, 600)...)
 
-	err := authenticateOracleProofs(12, proofs, priceData, randData, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(12, proofs, priceData, decoderFor(txs, 0xff))
 	assert.NoError(t, err)
 }
 
@@ -151,9 +134,8 @@ func TestAuthenticateOracleProofsRejectsStaleProof(t *testing.T) {
 	}
 	proofs := [][]byte{{1}}
 	priceData := oracleTriple(2, 1, 100)
-	randData := oracleTriple(2, 1, 500)
 
-	err := authenticateOracleProofs(1+common.OraclesHeightDistance+5, proofs, priceData, randData, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(1+common.OraclesHeightDistance+5, proofs, priceData, decoderFor(txs, 0xff))
 	assert.Error(t, err)
 }
 
@@ -167,9 +149,8 @@ func TestAuthenticateOracleProofsRejectsDuplicateID(t *testing.T) {
 	}
 	proofs := [][]byte{{1}, {2}}
 	priceData := oracleTriple(2, 10, 100)
-	randData := oracleTriple(2, 10, 500)
 
-	err := authenticateOracleProofs(12, proofs, priceData, randData, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(12, proofs, priceData, decoderFor(txs, 0xff))
 	assert.Error(t, err)
 }
 
@@ -179,7 +160,7 @@ func TestAuthenticateOracleProofsPropagatesDecodeError(t *testing.T) {
 
 	txs := map[byte]*transactionsDefinition.Transaction{}
 	proofs := [][]byte{{0xff}} // decoder fails on 0xff
-	err := authenticateOracleProofs(12, proofs, nil, nil, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(12, proofs, nil, decoderFor(txs, 0xff))
 	assert.Error(t, err)
 }
 

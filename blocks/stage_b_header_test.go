@@ -37,6 +37,9 @@ func signedTestBlock(t *testing.T, k stageBKey, h int64, parent Block, stateRoot
 		},
 		TransactionsHashes: []common.Hash{},
 	}
+	// A producer without a live commitment: no reveal, a fresh commitment.
+	bl.BaseBlock.RandCommit, bl.BaseBlock.RandMix, bl.BaseBlock.RandOracle =
+		RandaoFields(parent, h, nil, bytes.Repeat([]byte{0x77}, randaoSeedLength))
 	body, err := bl.BaseBlock.CalcBodyHash()
 	if err != nil {
 		t.Fatal(err)

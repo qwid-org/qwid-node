@@ -82,18 +82,20 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	// the two always agree, and the values are computed the way validators
 	// recompute them.
 	oracleProofs := oracles.GenerateOracleProofs(heightTransaction)
-	priceOracleData, randOracleData, err := blocks.OracleDataFromProofs(oracleProofs)
+	priceOracleData, err := blocks.OracleDataFromProofs(oracleProofs)
 	if err != nil {
 		return blocks.Block{}, err
 	}
 	totalStaked := account.GetStakedInAllDelegatedAccounts()
 	priceOracle, err := oracles.PriceFromData(priceOracleData, totalStaked)
 	if err != nil {
-		logger.GetLogger().Println("could not establish price oracle", err)
+		// S4-06: an unestablished price carries the parent's forward.
+		logger.GetLogger().Println("could not establish price oracle, carrying the previous one forward:", err)
+		priceOracle = lastBlock.BaseBlock.PriceOracle
 	}
-	randOracle, err := oracles.RandFromData(randOracleData, totalStaked)
+	randReveal, randCommit, randMix, randOracle, err := randaoForBlock(myWallet, lastBlock, heightTransaction)
 	if err != nil {
-		logger.GetLogger().Println("could not establish rand oracle", err)
+		return blocks.Block{}, err
 	}
 	bb := blocks.BaseBlock{
 		BlockTimeStamp:   blockTimeStamp,
@@ -102,8 +104,10 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 		PriceOracle:      priceOracle,
 		RandOracle:       randOracle,
 		PriceOracleData:  priceOracleData,
-		RandOracleData:   randOracleData,
 		OracleProofs:     oracleProofs,
+		RandReveal:       randReveal,
+		RandCommit:       randCommit,
+		RandMix:          randMix,
 	}
 	bodyHash, err := bb.CalcBodyHash()
 	if err != nil {
@@ -222,4 +226,32 @@ func BroadcastBlock(bl blocks.Block) {
 		copy(ip[:], topicip[2:])
 		SendNonce(ip, nb)
 	}
+}
+
+// randaoForBlock produces this node's RANDAO fields for its block at height on
+// top of lastBlock (S4-06): it opens the commitment the chain holds for it, if
+// one is due, and commits to the seed of this height. A node that cannot open
+// its commitment - its wallet secret changed - cannot produce until the
+// commitment lapses; a block without the reveal would be rejected anyway.
+func randaoForBlock(w *wallet.Wallet, lastBlock blocks.Block, height int64) (reveal []byte, commit, mix common.Hash, rand int64, err error) {
+	n, err := account.IntDelegatedAccountFromAddress(common.GetDelegatedAccount())
+	if err != nil || n < 1 || n > 255 {
+		return nil, common.Hash{}, common.Hash{}, 0, fmt.Errorf("wrong delegated account for RANDAO")
+	}
+	held, heldAt := account.GetRandCommit(n, w.MainAddress.ByteValue)
+	if blocks.RevealDue(heldAt, height) {
+		seed, serr := w.RandaoSeed(heldAt)
+		if serr != nil || !bytes.Equal(blocks.RandaoCommitment(seed).GetBytes(), held[:]) {
+			return nil, common.Hash{}, common.Hash{}, 0, fmt.Errorf(
+				"cannot open this node's RANDAO commitment from height %d (wallet secret changed?): "+
+					"it can produce again from height %d", heldAt, heldAt+common.RandaoCommitExpiry+1)
+		}
+		reveal = seed
+	}
+	next, err := w.RandaoSeed(height)
+	if err != nil {
+		return nil, common.Hash{}, common.Hash{}, 0, err
+	}
+	commit, mix, rand = blocks.RandaoFields(lastBlock, height, reveal, next)
+	return reveal, commit, mix, rand, nil
 }

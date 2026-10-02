@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
-	"github.com/qwid-org/qwid-node/logger"
 	"sort"
 	"sync"
 )
@@ -16,18 +15,9 @@ type PriceOracle struct {
 	Staked int64 `json:"staked"`
 }
 
-type RandOracle struct {
-	Rand   int64 `json:"rand"`
-	Height int64 `json:"height"`
-	Staked int64 `json:"staked"`
-}
-
 var (
 	PriceOracles        = make(map[uint8]PriceOracle)
 	PriceOraclesRWMutex sync.RWMutex
-
-	RandOracles        = make(map[uint8]RandOracle)
-	RandOraclesRWMutex sync.RWMutex
 
 	// oracleProofs retains the raw signed nonce-transaction bytes per delegated
 	// id so a block producer can embed them as provenance proofs for the
@@ -43,7 +33,7 @@ type oracleProof struct {
 
 // SaveOracleProof stores the signed nonce transaction backing a delegated
 // account's oracle submission, keeping only the most recent height (mirroring
-// SavePriceOracle/SaveRandOracle).
+// SavePriceOracle).
 func SaveOracleProof(delegatedAccount common.Address, height int64, txBytes []byte) error {
 	id, err := common.GetIDFromDelegatedAccountAddress(delegatedAccount)
 	if err != nil {
@@ -55,8 +45,8 @@ func SaveOracleProof(delegatedAccount common.Address, height int64, txBytes []by
 	oracleProofsRWMutex.Lock()
 	defer oracleProofsRWMutex.Unlock()
 
-	// See SaveRandOracle: the proof must back the submission that was actually
-	// retained, so it follows the same strictly-newer rule.
+	// See SavePriceOracle: the proof must back the submission that was
+	// actually retained, so it follows the same strictly-newer rule.
 	p, exists := oracleProofs[uint8(id)]
 	if !exists || p.height < height {
 		cp := make([]byte, len(txBytes))
@@ -68,7 +58,7 @@ func SaveOracleProof(delegatedAccount common.Address, height int64, txBytes []by
 
 // GenerateOracleProofs returns the stored proof transactions for delegated
 // accounts whose submission is still fresh at height, in strictly ascending id
-// order (matching GeneratePriceData/GenerateRandData).
+// order (matching GeneratePriceData).
 func GenerateOracleProofs(height int64) [][]byte {
 	oracleProofsRWMutex.RLock()
 	defer oracleProofsRWMutex.RUnlock()
@@ -98,8 +88,11 @@ func SavePriceOracle(price int64, height int64, delegatedAccount common.Address,
 	PriceOraclesRWMutex.Lock()
 	defer PriceOraclesRWMutex.Unlock()
 
-	// See SaveRandOracle: first submission at a height wins, and all three
-	// oracle stores have to agree on which one that is.
+	// Strictly newer only: accepting a resubmission at the same height let a
+	// delegated account replace its submission after seeing the others'.
+	// SaveOracleProof follows the same rule - blocks.matchOracleData requires
+	// the (id, height, value) triple in a block to equal the one inside the
+	// signed proof, so the two stores must keep the same submission.
 	po, exists := PriceOracles[uint8(id)]
 	if !exists || po.Height < height {
 		PriceOracles[uint8(id)] = PriceOracle{
@@ -109,42 +102,6 @@ func SavePriceOracle(price int64, height int64, delegatedAccount common.Address,
 		}
 	} else {
 		return errors.New("invalid height in price oracle")
-	}
-
-	return nil
-}
-
-func SaveRandOracle(rand int64, height int64, delegatedAccount common.Address, staked int64) error {
-	id, err := common.GetIDFromDelegatedAccountAddress(delegatedAccount)
-	if err != nil {
-		return err
-	}
-
-	if (id <= 0) || (id >= 256) {
-		return fmt.Errorf("delegated account is invalid: %d", id)
-	}
-	RandOraclesRWMutex.Lock()
-	defer RandOraclesRWMutex.Unlock()
-
-	// Strictly newer only, as in the voting path under AC-M4. Accepting a
-	// resubmission at the same height let a delegated account replace its own
-	// randomness contribution after seeing what the others had sent — a
-	// grinding lever on top of the documented subset-grinding one.
-	//
-	// SavePriceOracle and SaveOracleProof must use the same rule: blocks.
-	// matchOracleData requires the (id, height, value) triple in the block to
-	// equal the one inside the signed proof, so a store that keeps the first
-	// submission while another keeps the second makes every block built from
-	// that state unverifiable.
-	po, exists := RandOracles[uint8(id)]
-	if !exists || po.Height < height {
-		RandOracles[uint8(id)] = RandOracle{
-			Rand:   rand,
-			Height: height,
-			Staked: staked,
-		}
-	} else {
-		return errors.New("invalid height in rand oracle")
 	}
 
 	return nil
@@ -213,119 +170,14 @@ func ParsePriceData(priceData []byte) (map[uint8]PriceOracle, []int64, int64, er
 	return parsedData, prices, allStaked, nil
 }
 
-func ParseRandData(randData []byte) (map[uint8]RandOracle, []byte, int64, error) {
-	parsedData := make(map[uint8]RandOracle)
-	dataLen := len(randData)
-	rands := make([]byte, 0)
-	allStaked := int64(0)
-
-	if dataLen%17 != 0 {
-		return nil, nil, 0, fmt.Errorf("invalid randData length: %d", dataLen)
-	}
-
-	prevID := -1
-	for i := 0; i < dataLen; i += 17 {
-		id := randData[i]
-		// Require strictly ascending delegated ids so the hashed proposal order
-		// is canonical (removes producer ordering-grinding on the randomness) and
-		// no id can be repeated to inflate the represented stake.
-		if int(id) <= prevID {
-			return nil, nil, 0, fmt.Errorf("randData delegated ids must be strictly ascending, got %d after %d", id, prevID)
-		}
-		prevID = int(id)
-		height := common.GetInt64FromByte(randData[i+1 : i+9])
-		rand := common.GetInt64FromByte(randData[i+9 : i+17])
-		if rand <= 0 { // as GenerateRandData proposes only positive values
-			return nil, nil, 0, fmt.Errorf("randData entry for delegated id %d has non-positive value %d", id, rand)
-		}
-		rands = append(rands, randData[i+9:i+17]...)
-		_, staked, _ := account.GetStakedInDelegatedAccount(int(id))
-		allStaked += int64(staked)
-		parsedData[id] = RandOracle{
-			Rand:   rand,
-			Height: height,
-			Staked: int64(staked),
-		}
-	}
-
-	return parsedData, rands, allStaked, nil
-}
-
-func GenerateRandData(height int64) ([]byte, []byte, int64) {
-	randData := make([]byte, 0)
-	rands := make([]byte, 0)
-	staked := int64(0)
-	RandOraclesRWMutex.RLock()
-	defer RandOraclesRWMutex.RUnlock()
-	ids := make([]uint8, 0, len(RandOracles))
-	for i := range RandOracles {
-		ids = append(ids, i)
-	}
-	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
-	for _, i := range ids {
-		po := RandOracles[i]
-		if height <= po.Height+common.OraclesHeightDistance && po.Rand > 0 {
-			randData = append(randData, i)
-			randData = append(randData, common.GetByteInt64(po.Height)...)
-			randData = append(randData, common.GetByteInt64(po.Rand)...)
-			rands = append(rands, common.GetByteInt64(po.Rand)...)
-			staked += po.Staked
-		}
-	}
-	return randData, rands, staked
-}
-
-func CalculateRandOracle(height int64, totalStaked int64) (int64, []byte, error) {
-	var rand int64
-	randData, rands, staked := GenerateRandData(height)
-
-	if staked <= 2*totalStaked/3 {
-		return 0, randData, errors.New("in rand, there is not enough staked value for 2/3")
-	}
-
-	if len(rands) == 0 {
-		return 0, randData, errors.New("not enough rands propositions")
-	}
-
-	// Calculate hash from all rand numbers propositions
-	bytes, err := common.CalcHashFromBytes(rands)
-	if err != nil {
-		return 0, nil, err
-	}
-	rand = common.GetInt64FromByte(bytes[24:])
-	return rand, randData, nil
-}
-
-func VerifyRandOracle(height int64, totalStaked int64, randBlock int64, randData []byte) bool {
-
-	_, rands, staked, err := ParseRandData(randData)
-	if err != nil {
-		return false
-	}
-
-	if staked <= 2*totalStaked/3 {
-		if randBlock == 0 {
-			logger.GetLogger().Println("rand oracle is 0 , cannot be established")
-			return true
-		}
-		return false
-	}
-
-	if len(rands) == 0 {
-		return false
-	}
-
-	// Calculate hash from all rand numbers propositions
-	bytes, err := common.CalcHashFromBytes(rands)
-	if err != nil {
-		return false
-	}
-	rand := common.GetInt64FromByte(bytes[24:])
-	return rand == randBlock
-}
-
-// one has to think what happens when verification is not on current block than GetStakedInDelegatedAccount should depend on height
-func VerifyPriceOracle(height int64, totalStaked int64, priceBlock int64, priceData []byte) bool {
+// VerifyPriceOracle checks a block's price against its oracle data. When the
+// data does not carry more than 2/3 of the stake the price cannot be
+// established and the block must carry fallback - the parent's price (S4-06).
+// Accepting 0 there let any producer zero the price by embedding too few
+// proofs; carried forward, it can at most hold the price for one block.
+// Stake comes from the current snapshot, which block application keeps at the
+// parent's.
+func VerifyPriceOracle(height int64, totalStaked int64, priceBlock int64, priceData []byte, fallback int64) bool {
 
 	_, prices, staked, err := ParsePriceData(priceData)
 	if err != nil {
@@ -333,11 +185,7 @@ func VerifyPriceOracle(height int64, totalStaked int64, priceBlock int64, priceD
 	}
 
 	if staked <= 2*totalStaked/3 {
-		if priceBlock == 0 {
-			logger.GetLogger().Println("price oracle is 0 , cannot be established")
-			return true
-		}
-		return false
+		return priceBlock == fallback
 	}
 
 	if len(prices) > 2 {
@@ -406,23 +254,4 @@ func PriceFromData(priceData []byte, totalStaked int64) (int64, error) {
 		return 0, errors.New("not enough prices propositions after removing min and max")
 	}
 	return Median(prices), nil
-}
-
-// RandFromData is PriceFromData for RAND: the hash of all proposals.
-func RandFromData(randData []byte, totalStaked int64) (int64, error) {
-	_, rands, staked, err := ParseRandData(randData)
-	if err != nil {
-		return 0, err
-	}
-	if staked <= 2*totalStaked/3 {
-		return 0, errors.New("in rand, there is not enough staked value for 2/3")
-	}
-	if len(rands) == 0 {
-		return 0, errors.New("not enough rands propositions")
-	}
-	h, err := common.CalcHashFromBytes(rands)
-	if err != nil {
-		return 0, err
-	}
-	return common.GetInt64FromByte(h[24:]), nil
 }

@@ -12,11 +12,11 @@ import (
 )
 
 // oracleSubmission is the authenticated content of one validator's oracle nonce
-// transaction: the delegated-account height plus the signed price/rand values.
+// transaction: its height and the signed price. (RAND comes from RANDAO,
+// S4-06; the nonce's former rand slot is ignored.)
 type oracleSubmission struct {
 	height int64
 	price  int64
-	rand   int64
 }
 
 // oracleOptDataMinLen is the smallest OptData that carries oracle values:
@@ -29,8 +29,8 @@ type verifiedDecoder func(proof []byte) (*transactionsDefinition.Transaction, er
 
 type oracleProofAuthorizer func(id int, sender common.Address) bool
 
-// extractOracleSubmission pulls the delegated id and signed (height, price,
-// rand) out of a decoded oracle nonce transaction. It does not check the
+// extractOracleSubmission pulls the delegated id and signed (height, price)
+// out of a decoded oracle nonce transaction. It does not check the
 // signature; that is the decoder's responsibility.
 func extractOracleSubmission(tx *transactionsDefinition.Transaction) (uint8, oracleSubmission, error) {
 	id, err := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient)
@@ -47,15 +47,14 @@ func extractOracleSubmission(tx *transactionsDefinition.Transaction) (uint8, ora
 	return uint8(id), oracleSubmission{
 		height: tx.Height,
 		price:  common.GetInt64FromByte(o[:8]),
-		rand:   common.GetInt64FromByte(o[8:16]),
 	}, nil
 }
 
 // authenticateOracleProofs is the testable core: the decoder (which verifies
 // signatures) is injected. It builds the set of authenticated submissions from
-// the proofs and then confirms every embedded price/rand triple is backed by
-// one of them.
-func authenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData, randData []byte, decode verifiedDecoder) error {
+// the proofs and then confirms every embedded price triple is backed by one of
+// them.
+func authenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData []byte, decode verifiedDecoder) error {
 	subs := make(map[uint8]oracleSubmission)
 	for _, pb := range proofs {
 		tx, err := decode(pb)
@@ -76,29 +75,28 @@ func authenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData, ran
 		}
 		subs[id] = sub
 	}
-	if err := matchOracleData(subs, priceData, randData); err != nil {
+	if err := matchOracleData(subs, priceData); err != nil {
 		return err
 	}
 	// S4-06: and nothing embedded may be left out. Without this a producer
 	// could embed a proof (counting its signer's stake towards the 2/3) while
-	// dropping the value it disliked from the median or the RAND hash.
-	wantPrice, wantRand := encodeOracleData(subs)
-	if !bytes.Equal(priceData, wantPrice) || !bytes.Equal(randData, wantRand) {
+	// dropping the value it disliked from the median.
+	if !bytes.Equal(priceData, encodeOracleData(subs)) {
 		return fmt.Errorf("oracle data is not exactly the values of the embedded proofs")
 	}
 	return nil
 }
 
-// encodeOracleData is the canonical oracle data for a set of submissions:
-// ascending delegated id, one (id, height, value) triple per non-zero value -
-// the layout ParsePriceData/ParseRandData read and GeneratePriceData writes.
-func encodeOracleData(subs map[uint8]oracleSubmission) (priceData, randData []byte) {
+// encodeOracleData is the canonical price data for a set of submissions:
+// ascending delegated id, one (id, height, price) triple per non-zero price -
+// the layout ParsePriceData reads and GeneratePriceData writes.
+func encodeOracleData(subs map[uint8]oracleSubmission) (priceData []byte) {
 	ids := make([]int, 0, len(subs))
 	for id := range subs {
 		ids = append(ids, int(id))
 	}
 	sort.Ints(ids)
-	priceData, randData = []byte{}, []byte{}
+	priceData = []byte{}
 	for _, i := range ids {
 		sub := subs[uint8(i)]
 		if sub.price > 0 {
@@ -106,48 +104,42 @@ func encodeOracleData(subs map[uint8]oracleSubmission) (priceData, randData []by
 			priceData = append(priceData, common.GetByteInt64(sub.height)...)
 			priceData = append(priceData, common.GetByteInt64(sub.price)...)
 		}
-		if sub.rand > 0 {
-			randData = append(randData, uint8(i))
-			randData = append(randData, common.GetByteInt64(sub.height)...)
-			randData = append(randData, common.GetByteInt64(sub.rand)...)
-		}
 	}
-	return priceData, randData
+	return priceData
 }
 
-// oracleDataFromProofs derives the canonical oracle data from embedded proofs;
+// oracleDataFromProofs derives the canonical price data from embedded proofs;
 // the producer uses it so its data and proofs can never disagree.
-func oracleDataFromProofs(proofs [][]byte, decode verifiedDecoder) (priceData, randData []byte, err error) {
+func oracleDataFromProofs(proofs [][]byte, decode verifiedDecoder) (priceData []byte, err error) {
 	subs := make(map[uint8]oracleSubmission)
 	for _, pb := range proofs {
 		tx, err := decode(pb)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		id, sub, err := extractOracleSubmission(tx)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if _, dup := subs[id]; dup {
-			return nil, nil, fmt.Errorf("duplicate oracle proof for delegated id %d", id)
+			return nil, fmt.Errorf("duplicate oracle proof for delegated id %d", id)
 		}
 		subs[id] = sub
 	}
-	priceData, randData = encodeOracleData(subs)
-	return priceData, randData, nil
+	return encodeOracleData(subs), nil
 }
 
 // OracleDataFromProofs is oracleDataFromProofs for proofs this node collected
 // and verified on receipt.
-func OracleDataFromProofs(proofs [][]byte) (priceData, randData []byte, err error) {
+func OracleDataFromProofs(proofs [][]byte) (priceData []byte, err error) {
 	return oracleDataFromProofs(proofs, decodeProof)
 }
 
-// matchOracleData requires every (id, height, value) entry embedded in the
-// block's price/rand data to be backed by an authenticated submission with the
-// identical id, height, and value. This is what stops a producer from putting
+// matchOracleData requires every (id, height, price) entry embedded in the
+// block's price data to be backed by an authenticated submission with the
+// identical id, height, and price. This is what stops a producer from putting
 // fabricated oracle values (attributed to other validators) into a block.
-func matchOracleData(subs map[uint8]oracleSubmission, priceData, randData []byte) error {
+func matchOracleData(subs map[uint8]oracleSubmission, priceData []byte) error {
 	priceMap, _, _, err := oracles.ParsePriceData(priceData)
 	if err != nil {
 		return err
@@ -159,19 +151,6 @@ func matchOracleData(subs map[uint8]oracleSubmission, priceData, randData []byte
 		}
 		if sub.height != po.Height || sub.price != po.Price {
 			return fmt.Errorf("price entry for delegated id %d does not match its signed proof", id)
-		}
-	}
-	randMap, _, _, err := oracles.ParseRandData(randData)
-	if err != nil {
-		return err
-	}
-	for id, ro := range randMap {
-		sub, ok := subs[id]
-		if !ok {
-			return fmt.Errorf("rand entry for delegated id %d has no signed proof", id)
-		}
-		if sub.height != ro.Height || sub.rand != ro.Rand {
-			return fmt.Errorf("rand entry for delegated id %d does not match its signed proof", id)
 		}
 	}
 	return nil
@@ -237,7 +216,7 @@ func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 		isPaused, isPaused2 bool
 	}
 	cache := map[int64]sigNames{}
-	return authenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, newBlock.BaseBlock.RandOracleData, func(pb []byte) (*transactionsDefinition.Transaction, error) {
+	return authenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, func(pb []byte) (*transactionsDefinition.Transaction, error) {
 		var tx transactionsDefinition.Transaction
 		decoded, _, err := tx.GetFromBytes(pb)
 		if err != nil {

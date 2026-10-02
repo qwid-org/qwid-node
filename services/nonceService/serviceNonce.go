@@ -139,9 +139,10 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	if !ok {
 		priceOracle = 0
 	}
-	randOracle := cryptoRandInt63()
 	optData = append(optData, common.GetByteInt64(priceOracle)...)
-	optData = append(optData, common.GetByteInt64(randOracle)...)
+	// The former rand proposal slot stays in the layout, zeroed: RAND now
+	// comes from the producers' RANDAO reveals (S4-06), not from nonces.
+	optData = append(optData, common.GetByteInt64(0)...)
 
 	voting.VotesEncryptionMutex.Lock()
 	if voting.AfterReset {

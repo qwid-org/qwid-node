@@ -324,8 +324,8 @@ func OnMessage(addr [4]byte, m []byte) {
 						// NP-C6: verify the signature whenever the sender's public key is
 						// available (embedded in the tx, or already registered). Only skip
 						// verification when the pubkey is genuinely not yet known during
-						// sync — the signed block merkle root still enforces integrity when
-						// the referencing block is later validated.
+						// sync — block application verifies every transaction's signature
+						// as of the referencing block's parent (S3-06).
 						sigBytes := t.GetSignature().GetBytes()
 						if len(sigBytes) == 0 {
 							resMutex.Lock()
@@ -352,10 +352,11 @@ func OnMessage(addr [4]byte, m []byte) {
 							// stalled sync forever at the block that contains it
 							// ("NOT FOUND in any DB" loop, incident 2026-09-08).
 							// Storing is safe: transactions are hash-addressed (a
-							// forged body changes the hash), and the block's signed
-							// merkle root is the consensus gate at apply time. When
-							// NOT syncing, keep dropping (NP-C6: bounds junk a peer
-							// can push into the pool DB).
+							// forged body changes the hash), and block application
+							// verifies every signature against the chain state of
+							// the block's parent (S3-06, verifyBlockTransactions).
+							// When NOT syncing, keep dropping (NP-C6: bounds junk a
+							// peer can push into the pool DB).
 							if !common.IsSyncing.Load() {
 								resMutex.Lock()
 								droppedCount++

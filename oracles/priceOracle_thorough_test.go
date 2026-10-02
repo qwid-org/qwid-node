@@ -265,7 +265,7 @@ func TestVerifyAcceptsWhatCalculatePriceProduced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CalculatePriceOracle: %v", err)
 	}
-	if !VerifyPriceOracle(100, total, price, priceData) {
+	if !VerifyPriceOracle(100, total, price, priceData, 0) {
 		t.Fatal("a validator rejected the price its own producer path computed")
 	}
 }
@@ -278,7 +278,7 @@ func TestVerifyRejectsATamperedPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CalculatePriceOracle: %v", err)
 	}
-	if VerifyPriceOracle(100, total, price+1, priceData) {
+	if VerifyPriceOracle(100, total, price+1, priceData, 0) {
 		t.Fatal("a price that does not follow from the submissions was accepted")
 	}
 }
@@ -322,3 +322,20 @@ func TestPriceArithmeticIsExactAtRealBTCMagnitudes(t *testing.T) {
 		t.Fatalf("price = %d, want the exact middle quote", price)
 	}
 }
+
+// stakeDelegated gives delegated account id a total staked balance, which is
+// what ParsePriceData reads to weigh a submission — it never trusts the stake
+// written into the block.
+func stakeDelegated(t *testing.T, id int, amount int64) {
+	t.Helper()
+	account.StakingRWMutex.Lock()
+	defer account.StakingRWMutex.Unlock()
+	addr := [20]byte{}
+	addr[19] = byte(id)
+	account.StakingAccounts[id].AllStakingAccounts[addr] = account.StakingAccount{
+		StakedBalance: amount,
+		Address:       addr,
+	}
+}
+
+func delegatedAddr(id int16) common.Address { return common.GetDelegatedAccountAddress(id) }

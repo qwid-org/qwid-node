@@ -264,35 +264,46 @@ func ProcessBlockPubKey(block Block) error {
 			continue
 		}
 
-		// Is this a genuinely NEW registration for the identity? Only new ones
-		// are journalled, so a rewind never undoes a key that a still-canonical
-		// earlier block first registered (QWID-2026-07 annex). A duplicate
-		// registration tx in a later block is a no-op in the trie and must not
-		// produce a journal entry that would later delete the canonical key.
-		isNew := true
-		if idx, ferr := pubkeys.FindAddressForMainAddress(pk.MainAddress, pk.Address); ferr == nil && idx >= 0 {
-			isNew = false
-		}
-
-		err = StorePubKey(pk)
-		if err != nil {
-			logger.GetLogger().Printf("ERROR: storing the key %s of identity %s from tx %s failed: %v",
+		if err := registerPubKeyAtHeight(pk, block.GetHeader().Height); err != nil {
+			logger.GetLogger().Printf("ERROR: registering the key %s of identity %s from tx %s failed: %v",
 				pk.Address.GetHex(), pk.MainAddress.GetHex(), txh.GetHex(), err)
 			return err
-		}
-		err = StorePubKeyInPatriciaTrie(pk)
-		if err != nil {
-			logger.GetLogger().Printf("ERROR: recording the key %s under identity %s from tx %s failed: %v",
-				pk.Address.GetHex(), pk.MainAddress.GetHex(), txh.GetHex(), err)
-			return err
-		}
-		if isNew {
-			journalPubKeyRegistration(block.GetHeader().Height, pk.Address, pk.MainAddress)
 		}
 		logger.GetLogger().Printf("registered %s key %s (%d bytes) for identity %s from tx %s",
 			map[bool]string{true: "primary", false: "secondary"}[pk.Primary],
 			pk.Address.GetHex(), len(pk.GetBytes()), pk.MainAddress.GetHex(), txh.GetHex())
 	}
+	return nil
+}
+
+// registerPubKeyAtHeight registers pk as of block `height`: the key record,
+// the identity's address list, and - for a genuinely NEW registration - the
+// registration height (historical registry, S3-06) and the rewind journal.
+//
+// A key the identity already holds keeps its original height and gets no
+// journal entry, so a duplicate registration in a later block neither makes
+// the key look younger nor lets a rewind of that later block delete a key a
+// still-canonical earlier block registered (QWID-2026-07 annex). Membership is
+// read from the address list: FindAddressForMainAddress, used here before,
+// compares the raw address with hashed trie leaves, never matched, and so
+// journalled every duplicate.
+func registerPubKeyAtHeight(pk common.PubKey, height int64) error {
+	isNew := !pubkeys.IsRegisteredUnder(pk.MainAddress, pk.Address)
+	if err := StorePubKey(pk); err != nil {
+		return err
+	}
+	if err := StorePubKeyInPatriciaTrie(pk); err != nil {
+		return err
+	}
+	if !isNew {
+		return nil
+	}
+	// Not best effort, unlike the journal: a key without its height would
+	// count as registered at genesis and pass every as-of check.
+	if err := pubkeys.StoreRegistrationHeight(pk.Address, height); err != nil {
+		return err
+	}
+	journalPubKeyRegistration(height, pk.Address, pk.MainAddress)
 	return nil
 }
 
@@ -397,6 +408,7 @@ const journalPerHeightScanLimit = 2048
 func unregisterPubKey(derived, mainAddr common.Address) {
 	_ = database.MainDB.Delete(append(common.PubKeyMarshalDBPrefix[:], derived.GetBytes()...))
 	pubkeys.InvalidatePubKeyCache(derived.GetBytes())
+	_ = pubkeys.DeleteRegistrationHeight(derived)
 
 	addrs, err := pubkeys.LoadAddresses(mainAddr)
 	if err != nil {

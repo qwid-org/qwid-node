@@ -11,7 +11,9 @@ import (
 //
 // The chain's consensus carries two oracle values in every block header —
 // PriceOracle (BTC/USD, median of staked-node submissions, verified by oracle
-// proofs) and RandOracle (median-derived randomness) — but until these
+// proofs; carried forward when it cannot be established) and RandOracle (the
+// RANDAO accumulator of the block, blocks/randao.go - never negative, and its
+// producer can only choose not to produce it) — but until these
 // precompiles existed no smart contract could read them: the only "randomness"
 // reachable from the EVM was PREVRANDAO (the parent block hash, producer-
 // influenceable), and the price was not reachable at all.

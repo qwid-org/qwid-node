@@ -68,9 +68,10 @@ func TestUnmarshalAcceptsSnapshotWithoutLastStakeHeight(t *testing.T) {
 		StakingDetails:   make(map[int64][]StakingDetail),
 	}
 
-	// An old snapshot is byte-identical minus the trailing 8 bytes.
+	// An old snapshot is byte-identical minus the trailing 8 bytes - and the
+	// RANDAO commitment appended after them (S4-06).
 	old := acc.Marshal()
-	old = old[:len(old)-8]
+	old = old[:len(old)-common.HashLength-8-8]
 
 	var restored StakingAccount
 	err := restored.Unmarshal(old)
@@ -120,4 +121,31 @@ func TestStakingDelayStillEnforcedAfterStateReload(t *testing.T) {
 	late := stakeHeight + common.MinNumberOfBlocksInStake
 	err = Stake(addr, common.MinStakingUser, late, late, delegated, false, 0, 0)
 	assert.NoError(t, err, "staking after the delay window must still succeed")
+}
+
+// The RANDAO commitment is consensus state and round-trips through the
+// snapshot; a snapshot written before it existed decodes with none (S4-06).
+func TestRandCommitRoundTripsThroughSnapshot(t *testing.T) {
+	addr := [common.AddressLength]byte{1, 2, 3}
+	acc := StakingAccount{
+		StakedBalance:    5,
+		Address:          addr,
+		LastStakeHeight:  99,
+		StakingDetails:   make(map[int64][]StakingDetail),
+		RandCommitHeight: 1234,
+	}
+	acc.RandCommit[0], acc.RandCommit[31] = 0xAB, 0xCD
+
+	var restored StakingAccount
+	assert.NoError(t, restored.Unmarshal(acc.Marshal()))
+	assert.Equal(t, acc.RandCommit, restored.RandCommit)
+	assert.Equal(t, int64(1234), restored.RandCommitHeight)
+	assert.Equal(t, int64(99), restored.LastStakeHeight)
+
+	old := acc.Marshal()
+	old = old[:len(old)-common.HashLength-8]
+	var legacy StakingAccount
+	assert.NoError(t, legacy.Unmarshal(old))
+	assert.Equal(t, int64(99), legacy.LastStakeHeight)
+	assert.Equal(t, int64(0), legacy.RandCommitHeight)
 }
