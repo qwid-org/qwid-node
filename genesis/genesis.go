@@ -2,8 +2,10 @@
 package genesis
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
@@ -13,6 +15,7 @@ import (
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
 	"github.com/qwid-org/qwid-node/wallet"
+	"math"
 	"os"
 	"strings"
 )
@@ -470,6 +473,14 @@ func setInitParams(genesisConfig Genesis) {
 
 	common.BlockTimeInterval = genesisConfig.BlockTimeInterval
 	common.RewardRatio = genesisConfig.RewardRatio
+	ratioE10, err := rewardRatioToE10(genesisConfig.RewardRatio)
+	if err != nil {
+		logger.GetLogger().Fatal("genesis: ", err)
+	}
+	common.RewardRatioPerE10 = ratioE10
+	if err := validateWireParams(genesisConfig); err != nil {
+		logger.GetLogger().Fatal("genesis: ", err)
+	}
 	common.BlockTimeInterval = genesisConfig.BlockTimeInterval
 	common.MaxTotalSupply = genesisConfig.MaxTotalSupply
 	common.InitSupply = genesisConfig.InitSupply
@@ -488,11 +499,13 @@ func setInitParams(genesisConfig Genesis) {
 	common.VotingHeightDistance = genesisConfig.VotingHeightDistance
 	common.MaxTransactionDelay = genesisConfig.MaxTransactionDelay
 	common.MaxTransactionInMultiSigPool = genesisConfig.MaxTransactionInMultiSigPool
-	common.MessageInitialization = [4]byte{genesisConfig.MessageInitialization[0],
-		genesisConfig.MessageInitialization[1],
-		genesisConfig.MessageInitialization[2],
-		genesisConfig.MessageInitialization[3]}
-	common.MaxMessageSizeBytes = genesisConfig.MaxMessageSizeBytes
+	if len(genesisConfig.MessageInitialization) == 4 { // validated above
+		common.MessageInitialization = [4]byte{genesisConfig.MessageInitialization[0],
+			genesisConfig.MessageInitialization[1],
+			genesisConfig.MessageInitialization[2],
+			genesisConfig.MessageInitialization[3]}
+		common.MaxMessageSizeBytes = genesisConfig.MaxMessageSizeBytes
+	}
 }
 
 // Load opens and consumes the genesis file.
@@ -542,4 +555,36 @@ func Load(path string) (Genesis, error) {
 			common.HexPrefix(mainWallet.Account1.PublicKey.GetHex(), 40))
 	}
 	return genesis, nil
+}
+
+// rewardRatioToE10 converts genesis reward_ratio to the exact integer units
+// of 1e-10 that account.GetReward computes with (S9-02). A ratio that is not
+// a whole number of those units is refused rather than silently rounded.
+func rewardRatioToE10(r float64) (int64, error) {
+	if !(r > 0 && r < 1) {
+		return 0, fmt.Errorf("reward_ratio %g must be in (0, 1)", r)
+	}
+	scaled := r * 1e10
+	n := math.Round(scaled)
+	if n < 1 || math.Abs(scaled-n) > 1e-6 {
+		return 0, fmt.Errorf("reward_ratio %g is not a whole multiple of 1e-10", r)
+	}
+	return int64(n), nil
+}
+
+// validateWireParams checks that the frame marker encodes the message size,
+// as common's init() checks for the built-in defaults - which genesis then
+// overwrote unchecked (S9-02). Absent fields keep the defaults.
+func validateWireParams(g Genesis) error {
+	if len(g.MessageInitialization) == 0 && g.MaxMessageSizeBytes == 0 {
+		return nil
+	}
+	if len(g.MessageInitialization) != 4 {
+		return fmt.Errorf("message_initialization must be 4 bytes, got %d", len(g.MessageInitialization))
+	}
+	if !bytes.Equal(g.MessageInitialization, common.GetByteInt32(g.MaxMessageSizeBytes)) {
+		return fmt.Errorf("message_initialization %v does not encode max_message_size_bytes %d (want %v)",
+			g.MessageInitialization, g.MaxMessageSizeBytes, common.GetByteInt32(g.MaxMessageSizeBytes))
+	}
+	return nil
 }

@@ -1,10 +1,12 @@
 package transactionsPool
 
 import (
+	"bytes"
 	"container/heap"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"sort"
 	"sync"
 )
 
@@ -25,6 +27,7 @@ type Item struct {
 	value    [common.HashLength]byte
 	priority int64
 	index    int
+	minIndex int // position in TransactionPool.minQueue
 }
 
 func NewItem(tx transactionsDefinition.Transaction, priority int64) *Item {
@@ -55,6 +58,7 @@ type TransactionPool struct {
 	items              map[[common.HashLength]byte]*Item
 	bannedTransactions map[[common.HashLength]byte]int
 	priorityQueue      PriorityQueue
+	minQueue           minQueue
 	maxTransactions    int
 	typePool           uint8 // 0 - standard Tx, 1 - Escrow/delayed, 2 - MultiSign
 	// pendingBySender is the sum of (fee+amount) of every pooled transaction per
@@ -110,6 +114,7 @@ func NewTransactionPool(maxTransactions int, typePool uint8) *TransactionPool {
 		transactions:       make(map[[common.HashLength]byte]transactionsDefinition.Transaction),
 		bannedTransactions: make(map[[common.HashLength]byte]int),
 		priorityQueue:      make(PriorityQueue, 0),
+		minQueue:           make(minQueue, 0),
 		items:              map[[common.HashLength]byte]*Item{},
 		pendingBySender:    make(map[[common.AddressLength]byte]int64),
 		typePool:           typePool,
@@ -154,6 +159,7 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 		}
 
 		heap.Push(&tp.priorityQueue, item)
+		heap.Push(&tp.minQueue, item)
 		tp.items[hash] = item
 		if tp.priorityQueue.Len() > tp.maxTransactions {
 			// The queue is a MAX-heap (basePool.Less), so heap.Pop removes the
@@ -166,20 +172,15 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 			// entry so no pending settlement is ever lost.
 			if tp.typePool != 0 {
 				tp.subPendingLocked(tx) // undo the add above; this entry is refused
-				heap.Remove(&tp.priorityQueue, item.index)
+				tp.removeItemLocked(item)
 				delete(tp.transactions, hash)
 				delete(tp.items, hash)
 				tp.rwmutex.Unlock()
 				logger.GetLogger().Println("escrow/multisign pool full: refusing new entry rather than evicting a pending settlement")
 				return false
 			}
-			minIdx := 0
-			for i := 1; i < len(tp.priorityQueue); i++ {
-				if tp.priorityQueue[i].priority < tp.priorityQueue[minIdx].priority {
-					minIdx = i
-				}
-			}
-			removed := heap.Remove(&tp.priorityQueue, minIdx).(*Item)
+			removed := tp.minQueue[0]
+			tp.removeItemLocked(removed)
 			if evTx, ok := tp.transactions[removed.value]; ok {
 				tp.subPendingLocked(evTx)
 			}
@@ -190,6 +191,7 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 	tp.rwmutex.Unlock()
 	return true
 }
+
 // Clear drops every pending transaction and the per-sender spend accounting,
 // keeping the ban list. It is used when the active signature scheme changes:
 // every pooled transaction was verified at admission under the PREVIOUS scheme
@@ -205,6 +207,7 @@ func (tp *TransactionPool) Clear() int {
 	tp.transactions = make(map[[common.HashLength]byte]transactionsDefinition.Transaction)
 	tp.items = map[[common.HashLength]byte]*Item{}
 	tp.priorityQueue = make(PriorityQueue, 0)
+	tp.minQueue = make(minQueue, 0)
 	tp.pendingBySender = make(map[[common.AddressLength]byte]int64)
 	return n
 }
@@ -218,6 +221,17 @@ func (tp *TransactionPool) HasTransaction(hash []byte) bool {
 	return exists
 }
 
+// removeItemLocked takes an item out of both heaps. The caller holds the
+// write lock.
+func (tp *TransactionPool) removeItemLocked(item *Item) {
+	if item.index >= 0 && item.index < len(tp.priorityQueue) && tp.priorityQueue[item.index] == item {
+		heap.Remove(&tp.priorityQueue, item.index)
+	}
+	if item.minIndex >= 0 && item.minIndex < len(tp.minQueue) && tp.minQueue[item.minIndex] == item {
+		heap.Remove(&tp.minQueue, item.minIndex)
+	}
+}
+
 func (tp *TransactionPool) PeekTransactions(n int, heightOrHash int64) []transactionsDefinition.Transaction {
 
 	hash := [common.HashLength]byte{}
@@ -226,6 +240,25 @@ func (tp *TransactionPool) PeekTransactions(n int, heightOrHash int64) []transac
 	defer tp.rwmutex.RUnlock()
 	if n > len(tp.transactions) {
 		n = len(tp.transactions)
+	}
+
+	if tp.typePool == 0 {
+		// S4-08: best-paying first (ties by hash, so the order is canonical),
+		// not the heap array's arbitrary prefix. The escrow and multisig
+		// pools keep their filter below unchanged: settlement depends on it.
+		sorted := append([]*Item(nil), tp.priorityQueue...)
+		sort.Slice(sorted, func(i, j int) bool {
+			if sorted[i].priority != sorted[j].priority {
+				return sorted[i].priority > sorted[j].priority
+			}
+			return bytes.Compare(sorted[i].value[:], sorted[j].value[:]) < 0
+		})
+		for i := 0; i < n && i < len(sorted); i++ {
+			if tx, ok := tp.transactions[sorted[i].value]; ok {
+				topTransactions = append(topTransactions, tx)
+			}
+		}
+		return topTransactions
 	}
 
 	for i := 0; i < n; i++ {
@@ -312,9 +345,7 @@ func (tp *TransactionPool) RemoveTransactionByHash(hash []byte) {
 	copy(h[:], hash)
 	tp.rwmutex.Lock()
 	if item, exists := tp.items[h]; exists {
-		if item.index >= 0 {
-			heap.Remove(&tp.priorityQueue, item.index)
-		}
+		tp.removeItemLocked(item)
 		if tx, ok := tp.transactions[h]; ok {
 			tp.subPendingLocked(tx)
 		}
@@ -364,9 +395,7 @@ func (tp *TransactionPool) PopTransactionByHash(hash []byte) transactionsDefinit
 	var tx transactionsDefinition.Transaction
 	if item, exists := tp.items[h]; exists {
 		tx = tp.transactions[h]
-		if item.index >= 0 {
-			heap.Remove(&tp.priorityQueue, item.index)
-		}
+		tp.removeItemLocked(item)
 		delete(tp.transactions, h)
 		delete(tp.items, h)
 	}

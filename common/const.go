@@ -18,6 +18,9 @@ var (
 	MaxTotalSupply                 int64   = 230000000000000000
 	InitSupply                     int64   = 23000000000000000
 	RewardRatio                            = 2e-8
+	// RewardRatioPerE10 is RewardRatio in units of 1e-10, the exact integer
+	// form GetReward uses (S9-02); set from genesis reward_ratio.
+	RewardRatioPerE10 int64 = 200
 	ValidationTag                          = "validationTag"
 	DifficultyMultiplier           int32   = 10
 	BlockTimeInterval              float32 = 10 // 10 sec.
@@ -53,6 +56,14 @@ var (
 	// transaction older than this (or one claiming a height above its block) is
 	// a replay or a forged exemption. 8640 blocks is one day.
 	MaxTransactionAgeBlocks int64 = 8640
+	// DexTokenCallGas is the EVM budget of the token call inside a DEX
+	// operation; it is part of a DEX transaction's minimum gas (S6-03), so the
+	// execution is paid for.
+	DexTokenCallGas int64 = 210000
+	// EVMGasEstimateHeadroom: wallets declare this multiple of the minimum for
+	// contract calls and deployments. The EVM runs on exactly the declared
+	// gas, so the headroom is paid for, not given away (S6-03).
+	EVMGasEstimateHeadroom int64 = 10
 	MaxTransactionInMultiSigPool   int64   = 60480        //one week
 	// MaxNumberTransactionInChunk sizes one bt request / bx answer during
 	// missing-transaction recovery. 500 txs ≈ up to ~3MB with embedded pubkeys,
@@ -193,6 +204,10 @@ var (
 	EVMStateDBPrefix                 = [2]byte{'E', 'V'}
 	TokenDetailsDBPrefix             = [2]byte{'T', 'D'}
 	DexAccountsDBPrefix              = [2]byte{'D', 'A'}
+	// StateCommitDBPrefix + height holds the state root after that block,
+	// written LAST after all of its snapshots (S9-03): its presence commits
+	// the height, its value lets startup verify the stored state.
+	StateCommitDBPrefix = [2]byte{'S', 'C'}
 	BadTransactionDBPrefix           = [2]byte{'B', 'T'}
 	EscrowPoolDBPrefix               = [2]byte{'E', 'P'}
 	// MultiSignPoolDBPrefix mirrors EscrowPoolDBPrefix for the multisig pool.

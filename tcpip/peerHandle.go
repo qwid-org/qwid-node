@@ -27,13 +27,30 @@ import (
 //
 // The real transport IP is kept per handle for the few places that genuinely
 // need it: dialing, banning, and per-source rate limiting.
+//
+// Handles are never shared (S1-06). The 16-bit counter used to wrap after
+// 65 536 nodeIDs - cheap to mint - and hand a live handle to a new peer,
+// redirecting the honest peer's bans, limits and dials to the attacker. Now a
+// handle is reused only after it has been evicted; one transport address
+// holds at most maxHandlesPerIP of them (its oldest is evicted first), and
+// only if the whole space is in use is the globally least recently used one
+// evicted.
 var (
 	handleMutex    sync.Mutex
 	handleByNodeID        = map[[common.AddressLength]byte][4]byte{}
 	realIPByHandle        = map[[4]byte][4]byte{}
 	nodeIDByHandle        = map[[4]byte]common.Address{}
+	handleLastUse         = map[[4]byte]int64{}
+	handlesByIP           = map[[4]byte]map[[4]byte]struct{}{}
+	handleUseClock int64
 	nextHandle     uint16 = 1
+	// handleSpace is the number of usable handles: 10.254.0.1 - 10.254.255.254.
+	handleSpace = 65534
 )
+
+// maxHandlesPerIP bounds the nodeIDs one transport address can hold handles
+// for: well above the inbound connections it may keep (4 per topic, S1-04).
+const maxHandlesPerIP = 32
 
 // IsPeerHandle reports whether a 4-byte address is a virtual peer handle
 // rather than a transport IP.
@@ -49,17 +66,97 @@ func HandleForPeer(nodeID common.Address, realIP [4]byte) [4]byte {
 	copy(key[:], nodeID.GetBytes())
 	handleMutex.Lock()
 	defer handleMutex.Unlock()
+	handleUseClock++
 	if h, ok := handleByNodeID[key]; ok {
-		realIPByHandle[h] = realIP
+		setHandleIPLocked(h, realIP)
+		handleLastUse[h] = handleUseClock
 		return h
 	}
-	h := [4]byte{10, 254, byte(nextHandle >> 8), byte(nextHandle)}
-	nextHandle++
+	if len(handlesByIP[realIP]) >= maxHandlesPerIP {
+		evictHandleLocked(oldestHandleLocked(handlesByIP[realIP]))
+	}
+	h, ok := freeHandleLocked()
+	if !ok {
+		all := make(map[[4]byte]struct{}, len(nodeIDByHandle))
+		for k := range nodeIDByHandle {
+			all[k] = struct{}{}
+		}
+		evictHandleLocked(oldestHandleLocked(all))
+		h, _ = freeHandleLocked()
+	}
 	handleByNodeID[key] = h
-	realIPByHandle[h] = realIP
 	nodeIDByHandle[h] = nodeID
+	setHandleIPLocked(h, realIP)
+	handleLastUse[h] = handleUseClock
 	logger.GetLogger().Printf("peer handle %v allocated for nodeID %x (transport %v)", h, nodeID.GetBytes()[:6], realIP)
 	return h
+}
+
+func setHandleIPLocked(h, realIP [4]byte) {
+	if old, ok := realIPByHandle[h]; ok && old != realIP {
+		delete(handlesByIP[old], h)
+		if len(handlesByIP[old]) == 0 {
+			delete(handlesByIP, old)
+		}
+	}
+	realIPByHandle[h] = realIP
+	if handlesByIP[realIP] == nil {
+		handlesByIP[realIP] = map[[4]byte]struct{}{}
+	}
+	handlesByIP[realIP][h] = struct{}{}
+}
+
+// freeHandleLocked returns the next handle not currently assigned.
+func freeHandleLocked() ([4]byte, bool) {
+	if len(nodeIDByHandle) >= handleSpace {
+		return [4]byte{}, false
+	}
+	for i := 0; i <= handleSpace; i++ {
+		n := nextHandle
+		nextHandle++
+		if int(nextHandle) > handleSpace {
+			nextHandle = 1
+		}
+		if n == 0 || int(n) > handleSpace {
+			continue
+		}
+		h := [4]byte{10, 254, byte(n >> 8), byte(n)}
+		if _, used := nodeIDByHandle[h]; !used {
+			return h, true
+		}
+	}
+	return [4]byte{}, false
+}
+
+func oldestHandleLocked(set map[[4]byte]struct{}) [4]byte {
+	var oldest [4]byte
+	best := int64(-1)
+	for h := range set {
+		if t := handleLastUse[h]; best < 0 || t < best {
+			oldest, best = h, t
+		}
+	}
+	return oldest
+}
+
+func evictHandleLocked(h [4]byte) {
+	id, ok := nodeIDByHandle[h]
+	if !ok {
+		return
+	}
+	var key [common.AddressLength]byte
+	copy(key[:], id.GetBytes())
+	delete(handleByNodeID, key)
+	delete(nodeIDByHandle, h)
+	delete(handleLastUse, h)
+	if ip, ok := realIPByHandle[h]; ok {
+		delete(handlesByIP[ip], h)
+		if len(handlesByIP[ip]) == 0 {
+			delete(handlesByIP, ip)
+		}
+	}
+	delete(realIPByHandle, h)
+	logger.GetLogger().Printf("peer handle %v evicted (nodeID %x)", h, id.GetBytes()[:6])
 }
 
 // RealIPForHandle translates a handle back to the transport IP last seen
@@ -278,10 +375,9 @@ func acceptedReceiveLoop(topic [2]byte, key [4]byte, realIP [4]byte, conn net.Co
 		payloads, violation := fa.push(r)
 		if violation {
 			PeersMutex.Lock()
-			ReduceTrustRegisterPeer(realIP)
-			trust, ok := validPeersConnected[realIP]
+			ban := ReduceTrustRegisterPeer(realIP)
 			PeersMutex.Unlock()
-			if ok && trust <= 0 {
+			if ban {
 				BanIP(realIP)
 				conn.Close()
 				return
@@ -298,10 +394,9 @@ func acceptedReceiveLoop(topic [2]byte, key [4]byte, realIP [4]byte, conn net.Co
 			if !AllowMessageFromIPForHead(realIP, head) {
 				logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", realIP, string(head[:]))
 				PeersMutex.Lock()
-				ReduceTrustRegisterPeer(realIP)
-				trust, ok := validPeersConnected[realIP]
+				ban := ReduceTrustRegisterPeer(realIP)
 				PeersMutex.Unlock()
-				if ok && trust <= 0 {
+				if ban {
 					BanIP(realIP)
 					conn.Close()
 					return

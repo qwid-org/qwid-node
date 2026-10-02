@@ -455,7 +455,13 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 
 			if tx.GetLockedAmount() > 0 {
 				if amount >= common.MinStakingUser {
-					err := account.Stake(addressRecipient.GetBytes(), amount, height, blockTime, n, operational, tx.GetLockedAmount(), tx.GetReleasePerBlock())
+					var err error
+					if bytes.Equal(addressRecipient.GetBytes(), address.GetBytes()) {
+						err = account.Stake(addressRecipient.GetBytes(), amount, height, blockTime, n, operational, tx.GetLockedAmount(), tx.GetReleasePerBlock())
+					} else {
+						// S4-07: a lock paid into someone else's account
+						err = account.StakeLockedFor(addressRecipient.GetBytes(), amount, height, blockTime, n, tx.GetLockedAmount(), tx.GetReleasePerBlock())
+					}
 					if err != nil {
 						return err
 					}

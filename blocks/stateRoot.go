@@ -9,6 +9,7 @@ import (
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/crypto/blake2b"
+	"github.com/qwid-org/qwid-node/database"
 )
 
 // ComputeStateRoot hashes the consensus state - accounts, staking, DEX and
@@ -172,4 +173,39 @@ func sortedAddrKeys[V any](m map[[common.AddressLength]byte]V) [][common.Address
 	}
 	sort.Slice(keys, func(i, j int) bool { return bytes.Compare(keys[i][:], keys[j][:]) < 0 })
 	return keys
+}
+
+// Crash consistency (S9-03). Applying a block writes the block and then the
+// accounts, staking, EVM and DEX snapshots separately; a crash in between left
+// a height whose block is stored but whose state is partly missing or stale,
+// and startup only checked accounts and staking. StoreStateCommit is called
+// after the last snapshot write and records the root of the in-memory state
+// (the state after block height). VerifyStateCommit, run at startup once all
+// snapshots of that height are loaded, accepts the height only if the marker
+// exists and the loaded state hashes to it.
+func StoreStateCommit(height int64) error {
+	root, err := ComputeStateRoot()
+	if err != nil {
+		return err
+	}
+	return database.MainDB.Put(stateCommitKey(height), root.GetBytes())
+}
+
+func VerifyStateCommit(height int64) error {
+	want, err := database.MainDB.Get(stateCommitKey(height))
+	if err != nil || len(want) != common.HashLength {
+		return fmt.Errorf("height %d was never committed (no state commit marker)", height)
+	}
+	root, err := ComputeStateRoot()
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(root.GetBytes(), want) {
+		return fmt.Errorf("stored state at height %d does not match its commit marker", height)
+	}
+	return nil
+}
+
+func stateCommitKey(height int64) []byte {
+	return append(common.StateCommitDBPrefix[:], common.GetByteInt64(height)...)
 }

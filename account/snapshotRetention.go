@@ -117,6 +117,8 @@ func PruneStateSnapshots(tip int64) {
 		{"accounts", common.AccountsDBPrefix},
 		{"staking", common.StakingAccountsDBPrefix},
 		{"dex", common.DexAccountsDBPrefix},
+		// State commit markers (S9-03) sit at the same heights.
+		{"state commit", common.StateCommitDBPrefix},
 	} {
 		removed, err := pruneSnapshots(p.prefix, tip)
 		if err != nil {

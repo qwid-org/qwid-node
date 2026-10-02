@@ -237,7 +237,8 @@ func ResetAccountsAndBlocksSyncLocked(height int64) {
 	// Undo public-key registrations above the rewind target in a single journal
 	// sweep, instead of one RocksDB iterator per removed block (QWID-2026-07
 	// annex; sync-perf optimization).
-	blocks.UnregisterPubKeysAboveHeight(height)
+	top := max(hb, ha, hsa, common.GetHeight())
+	blocks.UnregisterPubKeysAboveHeight(height, top)
 	for i := ha; i > height; i-- {
 		err := account.RemoveAccountsFromDB(i)
 		if err != nil {

@@ -1,10 +1,12 @@
 package logger
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,10 +25,19 @@ var (
 )
 
 type MultiWriter struct {
+	mu      sync.Mutex // rotation swaps a writer while the async goroutine writes (S9-05)
 	writers []io.Writer
 }
 
+func (t *MultiWriter) setWriter(i int, w io.Writer) {
+	t.mu.Lock()
+	t.writers[i] = w
+	t.mu.Unlock()
+}
+
 func (t *MultiWriter) Write(p []byte) (n int, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for _, w := range t.writers {
 		n, err = w.Write(p)
 		if err != nil {
@@ -57,14 +68,9 @@ func InitLogger() {
 			log.Fatal(err)
 		}
 		logsDir := filepath.Join(homePath, DefaultLogsHomePath)
-
-		if err := os.MkdirAll(logsDir, 0755); err != nil {
-			log.Fatal(err)
-		}
-		// Create daily log file
-		timestamp := time.Now().Format("2006-01-02")
-		logFilePath := filepath.Join(logsDir, "mining-"+timestamp+".log")
-		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		// Assign the package-level logFile (S9-05): ":=" here declared a local
+		// one, so CloseLogger and the first rotation never closed the file.
+		logFile, err = openLogFile(logsDir, time.Now())
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -101,10 +107,34 @@ func CloseLogger() {
 	}
 }
 
+// openLogFile opens today's log file. Logs carry peer addresses, accounts
+// and transaction hashes, so the directory and files are owner-only (S9-05);
+// existing ones are tightened too, since the mode only applies on creation.
+func openLogFile(logsDir string, now time.Time) (*os.File, error) {
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(logsDir, 0o700)
+	path := filepath.Join(logsDir, "mining-"+now.Format("2006-01-02")+".log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	_ = f.Chmod(0o600)
+	return f, nil
+}
+
+// untilMidnight is the wait until the next local midnight, so each daily
+// file holds one calendar day (rotation used to run 24 h after start).
+func untilMidnight(now time.Time) time.Duration {
+	y, m, d := now.Date()
+	return time.Date(y, m, d+1, 0, 0, 0, 0, now.Location()).Sub(now)
+}
+
 // cleanupOldLogs removes log files older than 7 days
 func cleanupOldLogs(logsDir string) {
 	for {
-		time.Sleep(24 * time.Hour) // Run cleanup once per day
+		time.Sleep(untilMidnight(time.Now()))
 		rotateLogFile(logsDir)
 		// Get all log files
 		files, err := filepath.Glob(filepath.Join(logsDir, "mining-*.log"))
@@ -130,17 +160,17 @@ func cleanupOldLogs(logsDir string) {
 
 // rotateLogFile creates a new log file for the current day
 func rotateLogFile(logsDir string) {
-	if logFile != nil {
-		logFile.Close()
-	}
-	var err error
-	timestamp := time.Now().Format("2006-01-02")
-	logFilePath := filepath.Join(logsDir, "mining-"+timestamp+".log")
-	logFile, err = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := openLogFile(logsDir, time.Now())
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("cannot rotate log file: %v", err)
+		return
 	}
-	mw.writers[1] = logFile
+	old := logFile
+	mw.setWriter(1, f) // the old file is closed only once nothing writes to it
+	logFile = f
+	if old != nil {
+		old.Close()
+	}
 }
 
 // GetHomePath returns the user's home directory
@@ -166,104 +196,51 @@ func GetLogFiles(dir string) ([]string, error) {
 	return result, nil
 }
 
-// ReadLogFile reads a log file with optional filtering
+// ReadLogFile reads a log file with optional filtering. It streams the file
+// with a buffered scanner and keeps only the offset+limit newest matching
+// lines (S9-05): reading byte by byte and holding every line made one request
+// on a sync-sized log take minutes and hundreds of MB.
 func ReadLogFile(path, filter string, offset, limit int) ([]string, int, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer file.Close()
-
-	var lines []string
-	var allLines []string
-	scanner := newScanner(file)
-
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	keep := offset + limit
+	ring := make([]string, 0, min(keep, 4096))
+	next, total := 0, 0
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Apply filter if specified
-		if filter == "" || containsFilter(line, filter) {
-			allLines = append(allLines, line)
+		if filter != "" && !strings.Contains(line, filter) {
+			continue
+		}
+		total++
+		if keep == 0 {
+			continue
+		}
+		if len(ring) < keep {
+			ring = append(ring, line)
+		} else {
+			ring[next] = line
+			next = (next + 1) % keep
 		}
 	}
-
-	totalLines := len(allLines)
-
-	// Apply offset and limit (from end for most recent logs)
-	if offset >= totalLines {
-		return []string{}, totalLines, nil
+	// ring holds the newest min(total, keep) lines, oldest at index next.
+	ordered := make([]string, 0, len(ring))
+	for i := 0; i < len(ring); i++ {
+		ordered = append(ordered, ring[(next+i)%len(ring)])
 	}
-
-	// Get lines from the end (most recent first)
-	start := totalLines - offset - limit
-	if start < 0 {
-		start = 0
+	lines := []string{}
+	for i := len(ordered) - 1 - offset; i >= 0 && len(lines) < limit; i-- {
+		lines = append(lines, ordered[i])
 	}
-	end := totalLines - offset
-
-	for i := end - 1; i >= start; i-- {
-		lines = append(lines, allLines[i])
-	}
-
-	return lines, totalLines, scanner.Err()
-}
-
-func newScanner(file *os.File) *lineScanner {
-	return &lineScanner{file: file, buf: make([]byte, 0, 64*1024)}
-}
-
-type lineScanner struct {
-	file *os.File
-	buf  []byte
-	line string
-	err  error
-	pos  int64
-}
-
-func (s *lineScanner) Scan() bool {
-	s.buf = s.buf[:0]
-	for {
-		b := make([]byte, 1)
-		n, err := s.file.Read(b)
-		if n == 0 || err != nil {
-			if len(s.buf) > 0 {
-				s.line = string(s.buf)
-				return true
-			}
-			s.err = err
-			if err == io.EOF {
-				s.err = nil
-			}
-			return false
-		}
-		if b[0] == '\n' {
-			s.line = string(s.buf)
-			return true
-		}
-		s.buf = append(s.buf, b[0])
-	}
-}
-
-func (s *lineScanner) Text() string {
-	return s.line
-}
-
-func (s *lineScanner) Err() error {
-	return s.err
-}
-
-func containsFilter(line, filter string) bool {
-	return stringContains(line, filter)
-}
-
-func stringContains(s, substr string) bool {
-	return indexOf(s, substr) >= 0
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
+	return lines, total, scanner.Err()
 }

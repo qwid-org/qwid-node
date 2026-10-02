@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -70,15 +71,20 @@ func main() {
 	}
 	logger.InitLogger()
 	defer logger.CloseLogger()
-	// The net/http/pprof import registers its handlers on the default mux, but
-	// nothing ever served it - the import was dead. Loopback-only, so nothing
-	// is exposed to the network; `go tool pprof http://127.0.0.1:6060/debug/pprof/profile`
-	// answers "what is this node doing right now" definitively.
-	go func() {
-		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
-			logger.GetLogger().Println("pprof server:", err)
-		}
-	}()
+	// The net/http/pprof import registers its handlers on the default mux.
+	// Loopback-only, and opt-in with -pprof (S10-01): left always on, any
+	// local user - or a DNS-rebinding page in the operator's browser - could
+	// read /debug/pprof/cmdline and goroutine dumps and load the node with CPU
+	// profiles. The Host check closes the rebinding route.
+	// `go tool pprof http://127.0.0.1:6060/debug/pprof/profile` answers "what
+	// is this node doing right now" definitively.
+	if pprofRequested(os.Args[1:]) {
+		go func() {
+			if err := http.ListenAndServe("127.0.0.1:6060", loopbackHostOnly(http.DefaultServeMux)); err != nil {
+				logger.GetLogger().Println("pprof server:", err)
+			}
+		}()
+	}
 	database.InitDB()
 	defer database.CloseDB()
 	pubkeys.InitTrie()
@@ -496,4 +502,30 @@ func keepBootstrapPeersConnected(peers [][4]byte, d *dialer) {
 			d.connectToPeer(ip)
 		}
 	}
+}
+
+// pprofRequested reports whether the operator asked for the profiling server.
+func pprofRequested(args []string) bool {
+	for _, a := range args {
+		if a == "-pprof" || a == "--pprof" {
+			return true
+		}
+	}
+	return false
+}
+
+// loopbackHostOnly refuses requests whose Host header is not a loopback name,
+// so a page that rebinds its own domain to 127.0.0.1 cannot read responses.
+func loopbackHostOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

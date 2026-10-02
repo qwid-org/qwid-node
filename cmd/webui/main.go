@@ -82,6 +82,7 @@ func main() {
 	mux.HandleFunc("/api/stats", corsMiddleware(handlers.GetStats))
 	mux.HandleFunc("/api/wallet/load", corsMiddleware(handlers.LoadWallet))
 	mux.HandleFunc("/api/wallet/create", corsMiddleware(handlers.CreateWallet))
+	mux.HandleFunc("/api/logout", corsMiddleware(handlers.Logout))
 	mux.HandleFunc("/api/wallet/info", corsMiddleware(auth(handlers.GetWalletInfo)))
 	mux.HandleFunc("/api/wallet/change-password", corsMiddleware(auth(handlers.ChangePassword)))
 	mux.HandleFunc("/api/wallet/mnemonic", corsMiddleware(auth(handlers.GetMnemonic)))

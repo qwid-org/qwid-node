@@ -640,20 +640,16 @@ func evmGasBudget(declared int64) uint64 {
 	if declared > common.MaxGasUsage {
 		declared = common.MaxGasUsage
 	}
-	return uint64(declared) * uint64(gasHeadroomMult)
+	// Exactly the declared gas (S6-03): fee, per-transaction and per-block
+	// limits all count the declaration, so the EVM may not burn more.
+	return uint64(declared)
 }
-
-// gasHeadroomMult is the historic execution-headroom multiplier applied to a
-// transaction's declared gas. Kept as an integer so the budget arithmetic in
-// evmGasBudget stays provably non-wrapping.
-const gasHeadroomMult = 10
 
 func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, ret []byte, address common.Address, leftOverGas uint64, err error) {
 	if len(tx.TxData.OptData) == 0 {
 		loggerMain.GetLogger().Println("no smart contract in transaction")
 		return logs, ret, address, leftOverGas, nil
 	}
-	gasMult := 10.0
 
 	origin := tx.TxParam.Sender
 	code := tx.TxData.OptData
@@ -668,7 +664,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 			return common.BytesToHash(hashBytes)
 		},
 		Coinbase:    common.EmptyAddress(),
-		GasLimit:    uint64(common.MaxGasUsage) * uint64(gasMult),
+		GasLimit:    uint64(common.MaxGasUsage),
 		BlockNumber: new(big.Int).SetInt64(bl.GetHeader().Height),
 		// The COMMITTED block timestamp, never the wall clock. Every validator
 		// replays this block at a different moment; TIMESTAMP fed from the
@@ -749,7 +745,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		}
 	}
 
-	return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, uint64(float64(leftOverGas) / gasMult), nil
+	return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, nil
 }
 
 // formatEVMLogs renders the LOG-opcode events collected via StateDB.AddLog
@@ -772,7 +768,6 @@ func formatEVMLogs(evmLogs []*types.Log) string {
 
 func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData []byte, tx transactionsDefinition.Transaction, bl Block) (logs string, ret []byte, address common.Address, leftOverGas uint64, err error) {
 
-	gasMult := 10.0
 
 	// Publish this block's consensus oracle values for the oracle precompiles
 	// (0x100 price, 0x101 rand) before any EVM execution (deterministic:
@@ -785,7 +780,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 			return common.BytesToHash(hashBytes)
 		},
 		Coinbase:    common.EmptyAddress(),
-		GasLimit:    uint64(common.MaxGasUsage) * uint64(gasMult),
+		GasLimit:    uint64(common.MaxGasUsage),
 		BlockNumber: new(big.Int).SetInt64(bl.GetHeader().Height),
 		// The COMMITTED block timestamp, never the wall clock. Every validator
 		// replays this block at a different moment; TIMESTAMP fed from the
@@ -841,12 +836,12 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	// EvaluateSC or EvaluateSCDex call don't bleed into this DEX execution.
 	State.ResetTransient()
 
-	ret, leftOverGas, err = VM.Call(vm.AccountRef(sender), tokenAddress, optData, uint64(210000), new(big.Int).SetInt64(0))
+	ret, leftOverGas, err = VM.Call(vm.AccountRef(sender), tokenAddress, optData, uint64(common.DexTokenCallGas), new(big.Int).SetInt64(0))
 	if err != nil {
 		return logger.ToString(), ret, tokenAddress, leftOverGas, err
 	}
 
-	return logger.ToString(), ret, tokenAddress, uint64(float64(leftOverGas) / gasMult), nil
+	return logger.ToString(), ret, tokenAddress, leftOverGas, nil
 }
 
 func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Block) (outputs string, logs string, ret []byte, address common.Address, leftOverGas uint64, err error) {
@@ -920,10 +915,12 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	ret, leftOverGas, err = VM.StaticCall(vm.AccountRef(origin), contractAddr, input, uint64(common.MaxGasUsage))
 	// The output is the call's return data, hex-encoded - what the tracer's
 	// CaptureExit used to record for the top frame before tracing was turned
-	// off (S6-01). The StaticCall error is still not returned: GetBalance on
-	// the block-application path (DEX) depends on that behaviour, so changing
-	// it is a consensus change (S6-05), not a local fix.
+	// off (S6-01). A revert or out-of-gas is an error (S6-05): read as empty
+	// output it made a DEX token balance look like 0.
 	output := hex.EncodeToString(ret)
+	if err != nil {
+		return output, string(ret), ret, address, leftOverGas, err
+	}
 	return output, string(ret), ret, address, leftOverGas, nil
 }
 

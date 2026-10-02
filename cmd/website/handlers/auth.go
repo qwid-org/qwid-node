@@ -93,17 +93,21 @@ func (rl *rateLimiter) clearFailures(username string) {
 }
 
 func (rl *rateLimiter) isLockedOut(username string) bool {
+	return rl.lockedOutAfter(username, maxFailedLogins)
+}
+
+func (rl *rateLimiter) lockedOutAfter(key string, limit int) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	cutoff := time.Now().Add(-lockoutWindow)
 	var valid []time.Time
-	for _, t := range rl.entries[username] {
+	for _, t := range rl.entries[key] {
 		if t.After(cutoff) {
 			valid = append(valid, t)
 		}
 	}
-	rl.entries[username] = valid
-	return len(valid) >= maxFailedLogins
+	rl.entries[key] = valid
+	return len(valid) >= limit
 }
 
 // cleanup drops keys whose timestamps are all older than maxAge, so the map does
@@ -133,7 +137,7 @@ func init() {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			for _, rl := range []*rateLimiter{registerLimiter, loginLimiter, loginLockout, financialLimiter, welcomeLimiter} {
+			for _, rl := range []*rateLimiter{registerLimiter, loginLimiter, loginLockout, loginLockoutGlobal, financialLimiter, welcomeLimiter, publicReadLimiter, changePasswordLimiter} {
 				rl.cleanup(time.Hour)
 			}
 		}
@@ -169,8 +173,13 @@ func (rl *rateLimiter) allow(ip string, maxCount int, window time.Duration) bool
 // address is used, so an attacker cannot rotate the header to bypass limits.
 func getClientIP(r *http.Request) string {
 	if os.Getenv("TRUST_PROXY") == "true" {
+		// The proxy APPENDS the address it saw; earlier entries are whatever
+		// the client sent, so the last one is the only trustworthy one.
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			return strings.TrimSpace(strings.Split(fwd, ",")[0])
+			parts := strings.Split(fwd, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				return last
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -243,6 +252,13 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		JsonError(w, "Failed to create wallet directory", http.StatusInternalServerError)
 		return
 	}
+
+	// S7-03: key generation, Argon2id and bcrypt run in a bounded number of slots.
+	if !acquireKDF(r.Context()) {
+		JsonError(w, "Server busy. Try again shortly.", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseKDF()
 
 	// Create wallet
 	wl := wallet.EmptyWallet(0, SigName, SigName2)
@@ -350,22 +366,30 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// WH-M11: reject logins for an account that has hit the failed-attempt limit.
-	if loginLockout.isLockedOut(req.Username) {
+	// WH-M11/S7-04: reject logins from a source that has hit the failed-attempt
+	// limit for this account, or once the account's overall ceiling is hit.
+	if loginLockedOut(req.Username, ip) {
 		JsonError(w, "Account temporarily locked due to failed login attempts. Try again later.", http.StatusTooManyRequests)
 		return
 	}
 
+	// S7-03: bcrypt + Argon2id run in a bounded number of slots.
+	if !acquireKDF(r.Context()) {
+		JsonError(w, "Server busy. Try again shortly.", http.StatusServiceUnavailable)
+		return
+	}
 	entry, err := Users.Authenticate(req.Username, req.Password)
 	if err != nil {
-		loginLockout.recordFailure(req.Username)
+		releaseKDF()
+		recordLoginFailure(req.Username, ip)
 		JsonError(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
-	loginLockout.clearFailures(req.Username)
+	clearLoginFailures(req.Username, ip)
 
 	// Load user's wallet
 	userWallet, err := loadUserWallet(entry.WalletDir, req.Password)
+	releaseKDF()
 	if err != nil {
 		JsonError(w, fmt.Sprintf("Failed to load wallet: %v", err), http.StatusInternalServerError)
 		return
@@ -513,7 +537,12 @@ func sendWelcomeTransaction(recipient common.Address) {
 		return
 	}
 
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
+	// S7-05: a rejected welcome payment is not "sent" - the deferred refund
+	// returns its amount to the faucet budget.
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), msg.GetBytes()...))); err != nil {
+		logger.GetLogger().Println("sendWelcomeTransaction: node rejected the transaction:", err)
+		return
+	}
 	sent = true
 
 	logger.GetLogger().Println("sendWelcomeTransaction: sent", welcomeAmountQWD, "QWD to", recipient.GetHex())

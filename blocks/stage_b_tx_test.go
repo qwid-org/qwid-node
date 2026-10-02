@@ -75,7 +75,7 @@ func TestDexTokenAddressIsSigned(t *testing.T) {
 	tx := transactionsDefinition.Transaction{
 		TxParam: transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: k.addr, SendingTime: 1, Nonce: 1},
 		TxData:  transactionsDefinition.TxData{Recipient: common.GetDelegatedAccountAddress(512 + 3), OptData: common.GetByteInt64(1000)},
-		Height:  common.GetHeight(), GasPrice: 1, GasUsage: 100000,
+		Height:  common.GetHeight(), GasPrice: 1, GasUsage: 300000, // above the DEX minimum incl. DexTokenCallGas (S6-03)
 	}
 	tx.ContractAddress.ByteValue[19] = 0xA1
 	k.sign(t, &tx)

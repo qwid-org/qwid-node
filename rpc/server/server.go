@@ -16,9 +16,9 @@ import (
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
-	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/core/stateDB"
 	"github.com/qwid-org/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/pubkeys"
@@ -499,6 +499,18 @@ func handleHELO(line []byte, reply *[]byte) {
 	}
 }
 
+// miningStarted makes MINE idempotent (S7-06): InitNonceService starts the
+// nonce listeners, and a second Listen on their bound ports panicked the node.
+var miningStarted atomic.Bool
+
+func startMiningOnce(start func()) bool {
+	if !miningStarted.CompareAndSwap(false, true) {
+		return false
+	}
+	start()
+	return true
+}
+
 func handleMINE(line []byte, reply *[]byte) {
 	ip := [4]byte{0, 0, 0, 0}
 	if len(line) == 4 {
@@ -506,11 +518,17 @@ func handleMINE(line []byte, reply *[]byte) {
 	}
 	firstDel := common.GetDelegatedAccountAddress(1)
 	if firstDel.GetHex() != common.GetDelegatedAccount().Hex() {
-		nonceServices.InitNonceService()
-		go nonceServices.StartSubscribingNonceMsgSelf()
-		go nonceServices.StartSubscribingNonceMsg(tcpip.MyIP)
+		started := startMiningOnce(func() {
+			nonceServices.InitNonceService()
+			go nonceServices.StartSubscribingNonceMsgSelf()
+			go nonceServices.StartSubscribingNonceMsg(tcpip.MyIP)
+		})
 		if bytes.Equal(ip[:], []byte{0, 0, 0, 0}) == false {
 			go nonceServices.StartSubscribingNonceMsg(ip)
+		}
+		if !started {
+			*reply = []byte("Mining already running")
+			return
 		}
 		*reply = []byte("Mining initiated")
 	} else {
@@ -1007,17 +1025,17 @@ func handleCNCL(byt []byte, reply *[]byte) {
 		return
 	}
 	if transactionsPool.PoolTxMultiSign.TransactionExists(hash) {
-		tx := transactionsPool.PoolTxMultiSign.PopTransactionByHash(hash)
+		tx, _ := transactionsPool.PoolTxMultiSign.GetTransactionByHash(hash)
 		if bytes.Equal(tx.TxParam.Sender.GetBytes(), ownerBytes) == false {
-			transactionsPool.AddMultiSignTransaction(tx)
 			*reply = []byte("you are not the owner of transaction")
 			return
 		}
-		// Drop the persisted copy too, or the restart would resurrect the
-		// cancelled transaction into the pool.
-		transactionsPool.RemoveMultiSignTransaction(hash)
-		transactionsPool.PoolTxMultiSign.BanTransactionByHash(hash)
-		*reply = []byte("transaction cancelled locally")
+		// S7-06: like escrow, the multisig pool decides settlement
+		// (ProcessTransactionsMultiSign). Removing one node's copy would make
+		// it settle differently from the network.
+		// The protocol has no multisig cancellation; the transaction settles
+		// only once co-signed and otherwise expires from every pool alike.
+		*reply = []byte("multisig transactions cannot be cancelled locally: it settles only when co-signed, otherwise it expires")
 		return
 	}
 	*reply = []byte("transaction not found in a cancellable pool")

@@ -1028,6 +1028,10 @@ func OnMessage(addr [4]byte, m []byte) {
 			if err := account.StoreDexAccounts(hNow); err != nil {
 				logger.GetLogger().Println(err)
 			}
+			// S9-03: written last - commits this batch end for startup.
+			if err := blocks.StoreStateCommit(hNow); err != nil {
+				logger.GetLogger().Println("cannot store state commit marker", err)
+			}
 
 			logger.GetLogger().Println("sync batch timing:", timing.summary())
 		}()
@@ -1135,6 +1139,10 @@ func OnMessage(addr [4]byte, m []byte) {
 		bHeight := common.GetInt64FromByte(bhb)
 		eHeight := common.GetInt64FromByte(ehb)
 		bHeight, eHeight = clampHeaderSpan(bHeight, eHeight) // NP-M13: bound the requested span
+		if eHeight >= bHeight && !allowHeaderServe(addr, eHeight-bHeight+1, time.Now()) {
+			logger.GetLogger().Printf("gh from %v over its header-serving budget; dropping", addr)
+			return
+		}
 		logger.GetLogger().Printf("gh request: bHeight=%d, eHeight=%d, sending headers to %v", bHeight, eHeight, addr)
 		SendHeaders(addr, bHeight, eHeight)
 	default:

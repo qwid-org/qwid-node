@@ -107,12 +107,13 @@ func BanIP(ip [4]byte) {
 func ReduceAndCheckIfBanIP(ip [4]byte) {
 	ip = canonicalIP(ip) // trust/bans are per transport source, tags may be handles
 	PeersMutex.Lock()
+	ban := false
 	if _, ok := validPeersConnected[ip]; ok {
-		ReduceTrustRegisterPeer(ip)
+		ban = ReduceTrustRegisterPeer(ip)
 	}
 	_, trusted := validPeersConnected[ip]
 	PeersMutex.Unlock()
-	if !trusted {
+	if ban || !trusted {
 		logger.GetLogger().Println("not trusted ip", ip)
 		// Outside PeersMutex (S1-05): BanIP severs the peer's connections under
 		// PeersMutex itself, and called with the lock held its TryLock always

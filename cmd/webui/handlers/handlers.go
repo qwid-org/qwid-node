@@ -174,11 +174,13 @@ func LoadWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refuseIfAnotherSession(w, r) {
+		return
+	}
 	// Throttle load attempts to defeat a localhost password brute-force
-	// (QWID-2026-28). A successful load resets the counter below, so a
-	// legitimate single user is never locked out by their own use.
-	if !loadWalletThrottleAllow(time.Now()) {
-		jsonError(w, "Too many wallet-load attempts; please wait a minute and try again", http.StatusTooManyRequests)
+	// (QWID-2026-28); past the cap attempts are delayed, not refused (S8-03).
+	if !loadWalletGate(r.Context(), time.Now()) {
+		jsonError(w, "Wallet-load attempt cancelled", http.StatusTooManyRequests)
 		return
 	}
 
@@ -229,6 +231,9 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refuseIfAnotherSession(w, r) {
+		return
+	}
 	if req.WalletNumber < 0 || req.WalletNumber > 255 {
 		jsonError(w, "Wallet number should be between 0 and 255", http.StatusBadRequest)
 		return
@@ -754,7 +759,10 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), tmm...))); err != nil {
+		jsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -841,7 +849,10 @@ func CancelTransaction(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("Failed to generate cancellation message: %v", err), http.StatusInternalServerError)
 		return
 	}
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), msg.GetBytes()...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), msg.GetBytes()...))); err != nil {
+		jsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -1062,7 +1073,10 @@ func ExecuteStaking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), tmm...))); err != nil {
+		jsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -1687,7 +1701,10 @@ func ModifyEscrow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), tmm...))); err != nil {
+		jsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -1755,8 +1772,55 @@ func CallSmartContract(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// solImportRE matches a Solidity import statement (WH-C1).
-var solImportRE = regexp.MustCompile(`(?m)^\s*import\b`)
+// solImportWordRE finds the import keyword once comments and string literals
+// are blanked out.
+var solImportWordRE = regexp.MustCompile(`\bimport\b`)
+
+// containsSolImport reports whether Solidity source has an import statement
+// anywhere (WH-C1). The old line-start pattern missed `pragma ...; import
+// "/path";` on one line (S8-04). Comments and string literals are blanked
+// first, so a mention of the word there is not an import. --base-path and
+// --allow-paths remain the actual confinement.
+func containsSolImport(code string) bool {
+	return solImportWordRE.MatchString(blankSolCommentsAndStrings(code))
+}
+
+func blankSolCommentsAndStrings(code string) string {
+	out := []byte(code)
+	for i := 0; i < len(out); i++ {
+		switch {
+		case out[i] == '/' && i+1 < len(out) && out[i+1] == '/':
+			for i < len(out) && out[i] != '\n' {
+				out[i] = ' '
+				i++
+			}
+		case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
+			end := strings.Index(code[i+2:], "*/")
+			stop := len(out)
+			if end >= 0 {
+				stop = i + 2 + end + 2
+			}
+			for ; i < stop; i++ {
+				out[i] = ' '
+			}
+			i--
+		case out[i] == '"' || out[i] == '\'':
+			q := out[i]
+			out[i] = ' '
+			for i++; i < len(out) && out[i] != q; i++ {
+				if out[i] == '\\' && i+1 < len(out) {
+					out[i] = ' '
+					i++
+				}
+				out[i] = ' '
+			}
+			if i < len(out) {
+				out[i] = ' '
+			}
+		}
+	}
+	return string(out)
+}
 
 // sanitizeSolcError strips the temp directory path from compiler output so
 // filesystem structure and any included file contents are not leaked (WH-H1).
@@ -1796,7 +1860,7 @@ func CompileSmartContract(w http.ResponseWriter, r *http.Request) {
 	// WH-C1: reject imports. Solidity `import` is the only way user code can pull
 	// in external files (e.g. import "/etc/passwd"), so disallow it entirely. The
 	// --base-path/--allow-paths confinement below is the defense-in-depth backstop.
-	if solImportRE.MatchString(req.Code) {
+	if containsSolImport(req.Code) {
 		jsonError(w, "import statements are not allowed", http.StatusBadRequest)
 		return
 	}
@@ -2057,7 +2121,10 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), tmm...))); err != nil {
+		jsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	jsonResponse(w, map[string]string{
 		"success": "true",
@@ -2169,7 +2236,10 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmm := msg.GetBytes()
-	clientrpc.Call(SignMessage(append([]byte("TRAN"), tmm...)))
+	if err := clientrpc.SubmitTransaction(SignMessage(append([]byte("TRAN"), tmm...))); err != nil {
+		jsonError(w, "Transaction rejected by node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	jsonResponse(w, map[string]string{
 		"success": "true",

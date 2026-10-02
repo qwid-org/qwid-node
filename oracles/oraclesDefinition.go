@@ -196,6 +196,10 @@ func ParsePriceData(priceData []byte) (map[uint8]PriceOracle, []int64, int64, er
 		prevID = int(id)
 		height := common.GetInt64FromByte(priceData[i+1 : i+9])
 		price := common.GetInt64FromByte(priceData[i+9 : i+17])
+		// S4-09: generation only ever proposes positive prices; so must data.
+		if price <= 0 {
+			return nil, nil, 0, fmt.Errorf("priceData entry for delegated id %d has non-positive price %d", id, price)
+		}
 		prices = append(prices, price)
 		_, staked, _ := account.GetStakedInDelegatedAccount(int(id))
 		allStaked += int64(staked)
@@ -231,6 +235,9 @@ func ParseRandData(randData []byte) (map[uint8]RandOracle, []byte, int64, error)
 		prevID = int(id)
 		height := common.GetInt64FromByte(randData[i+1 : i+9])
 		rand := common.GetInt64FromByte(randData[i+9 : i+17])
+		if rand <= 0 { // as GenerateRandData proposes only positive values
+			return nil, nil, 0, fmt.Errorf("randData entry for delegated id %d has non-positive value %d", id, rand)
+		}
 		rands = append(rands, randData[i+9:i+17]...)
 		_, staked, _ := account.GetStakedInDelegatedAccount(int(id))
 		allStaked += int64(staked)
@@ -371,7 +378,10 @@ func CalculatePriceOracle(height int64, totalStaked int64) (int64, []byte, error
 func Median(prices []int64) int64 {
 	mid := len(prices) / 2
 	if len(prices)%2 == 0 {
-		return (prices[mid-1] + prices[mid]) / 2
+		// a + (b-a)/2: (a+b)/2 overflowed for large prices (S4-09). Prices are
+		// positive (ParsePriceData), so b-a cannot overflow.
+		a, b := prices[mid-1], prices[mid]
+		return a + (b-a)/2
 	}
 	return prices[mid]
 }

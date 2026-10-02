@@ -117,6 +117,11 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	if newBlock.GetBlockSupply() > common.MaxTotalSupply {
 		return nil, fmt.Errorf("supply is too high")
 	}
+	// S3-07: reject an out-of-range reward percentage here, before any
+	// transaction of the block is applied.
+	if rp := newBlock.GetRewardPercentage(); rp < 0 || rp > 500 {
+		return nil, fmt.Errorf("reward percentage %d outside 0..500", rp)
+	}
 	// Reject repeated or over-count transaction hashes before any per-tx work
 	// (QWID-2026-35); this runs on the sync path too since CheckBaseBlock does.
 	if err := validateBlockTxHashes(newBlock.TransactionsHashes); err != nil {

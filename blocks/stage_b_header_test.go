@@ -172,3 +172,36 @@ func TestVerifyStateRootRejectsMismatch(t *testing.T) {
 		t.Fatal("a mismatching state root was accepted")
 	}
 }
+
+// S3-07: a negative reward percentage is rejected up front, not after the
+// block's transactions have been applied.
+func TestCheckBaseBlockRejectsNegativeRewardPercentage(t *testing.T) {
+	k, parent := headerTestSetup(t)
+	bl := signedTestBlock(t, k, 10, parent, common.Hash{})
+	bl.BaseBlock.RewardPercentage = -1
+	bl = resealTestBlock(t, k, bl)
+	if _, err := CheckBaseBlock(bl, parent, false); err == nil {
+		t.Fatal("negative reward percentage accepted")
+	}
+}
+
+// resealTestBlock recomputes body hash, signature and hashes after an edit.
+func resealTestBlock(t *testing.T, k stageBKey, bl Block) Block {
+	t.Helper()
+	body, err := bl.BaseBlock.CalcBodyHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bl.BaseBlock.BaseHeader.BodyHash = body
+	msg := bl.BaseBlock.BaseHeader.GetBytesWithoutSignature()
+	digest, _ := common.CalcHashToByte(msg)
+	raw, err := k.s.Sign(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bl.BaseBlock.BaseHeader.Signature, _ = common.GetSignatureFromBytes(append([]byte{0}, raw...), k.addr)
+	bl.BaseBlock.BaseHeader.SignatureMessage = msg
+	bl.BaseBlock.BlockHeaderHash, _ = bl.BaseBlock.BaseHeader.CalcHash()
+	bl.BlockHash, _ = bl.CalcBlockHash()
+	return bl
+}

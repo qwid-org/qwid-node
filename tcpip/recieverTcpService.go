@@ -527,20 +527,23 @@ func NodeRegisterPeer(ip [4]byte) {
 }
 
 // ReduceTrustRegisterPeer limit connections attempts needs to be peer lock
-func ReduceTrustRegisterPeer(ip [4]byte) {
+// ReduceTrustRegisterPeer records a protocol violation by ip and reports
+// whether the source is now to be banned (S1-07: decided by the violation
+// ledger, which survives reconnects). The caller holds PeersMutex and must
+// release it before calling BanIP.
+func ReduceTrustRegisterPeer(ip [4]byte) bool {
 	ip = canonicalIP(ip) // trust is per transport source, tags may be handles
 	// || bytes.Equal(ip[:2], InternalIP[:2])
 	if bytes.Equal(ip[:], MyIP[:]) || bytes.Equal(ip[:], []byte{0, 0, 0, 0}) {
-		return
+		return false
 	}
-	if _, ok := validPeersConnected[ip]; !ok {
-		return
+	if _, ok := validPeersConnected[ip]; ok {
+		validPeersConnected[ip]--
+		if validPeersConnected[ip] <= 0 {
+			delete(validPeersConnected, ip)
+		}
 	}
-
-	validPeersConnected[ip]--
-	if validPeersConnected[ip] <= 0 {
-		delete(validPeersConnected, ip)
-	}
+	return recordViolation(ip, time.Now())
 }
 
 func FullyDeleteConnection(tcpConn net.Conn) {

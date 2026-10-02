@@ -57,10 +57,40 @@ func (mt *Transaction) GetParam() TxParam {
 	return mt.TxParam
 }
 
+// MinGasUsage is the least gas a transaction may declare: size-based, plus
+// the token call a DEX operation executes (S6-03).
+func (mt *Transaction) MinGasUsage() int64 {
+	gas := int64(len(mt.TxData.OptData)) * 100
+	gas += int64(len(mt.TxData.Pubkey.GetBytes())) * 100
+	gas += 30000
+	if isDexOperation(mt.TxData.Recipient) {
+		gas += common.DexTokenCallGas
+	}
+	return gas
+}
+
+// GasUsageEstimate is what wallets declare. A contract call or deployment
+// gets EVMGasEstimateHeadroom times the minimum, capped at MaxGasUsage: the
+// EVM runs on exactly the declared gas, so the sender pays for the headroom.
 func (mt *Transaction) GasUsageEstimate() int64 {
-	gas := len(mt.TxData.OptData) * 100
-	gas += len(mt.TxData.Pubkey.GetBytes()) * 100
-	return int64(gas) + 30000
+	gas := mt.MinGasUsage()
+	if mt.runsEVM() {
+		if gas > common.MaxGasUsage/common.EVMGasEstimateHeadroom {
+			return common.MaxGasUsage
+		}
+		gas *= common.EVMGasEstimateHeadroom
+	}
+	return gas
+}
+
+// runsEVM mirrors the transaction-side part of blocks.isContractCallTx:
+// OptData for a non-delegated recipient.
+func (mt *Transaction) runsEVM() bool {
+	if len(mt.TxData.OptData) == 0 {
+		return false
+	}
+	_, err := account.IntDelegatedAccountFromAddress(mt.TxData.Recipient)
+	return err != nil
 }
 
 func (mt *Transaction) GetGasUsage() int64 {
@@ -399,8 +429,8 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			logger.GetLogger().Println("transaction gas price must be greater than 0")
 			return false
 		}
-		if tx.GasUsage < tx.GasUsageEstimate() {
-			logger.GetLogger().Println("transaction gas usage must be at least ", tx.GasUsageEstimate())
+		if tx.GasUsage < tx.MinGasUsage() {
+			logger.GetLogger().Println("transaction gas usage must be at least ", tx.MinGasUsage())
 			return false
 		}
 		// Upper bounds too (QWID-2026-11). MaxGasUsage/MaxGasPrice existed as

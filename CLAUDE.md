@@ -19,7 +19,8 @@ go get ./...
 # Generate a new wallet
 go run cmd/generateNewWallet/main.go
 
-# Run mining node (requires peer IP)
+# Run mining node (requires peer IP); -log enables logging, -pprof starts
+# the loopback-only profiler on 127.0.0.1:6060
 go run cmd/mining/main.go <peer_ip>
 
 # Run GUI wallet (requires Qt5)
@@ -81,7 +82,7 @@ go test -v ./wallet       # verbose output
 
 ### Database Prefix System
 
-RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height), `EV` (EVM state snapshots, store-on-change), `HS`/`HR` (per-account sent/received tx-history index).
+RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height), `EV` (EVM state snapshots, store-on-change), `HS`/`HR` (per-account sent/received tx-history index), `SC` (state commit marker: state root after a height, written last after all its snapshots; startup accepts a height only if it exists and matches the loaded state).
 
 State-size invariants: account snapshots must stay O(number of accounts) — per-account transaction history lives in the `HS`/`HR` index (`account/txHistory.go`) with only `SentCount`/`ReceivedCount` counters in state (a rewind restores the counters; re-applied txs overwrite the index tail). Staking detail entries older than `common.StakingDetailsRetentionBlocks` fold into one aggregate at key 0. Accounts/staking snapshots are written once per sync batch (per block on the live path), so snapshot heights have gaps — the highest stored height comes from a `prefix+"LAST"` meta key (`account/heightMeta.go`), never from contiguity-assuming search.
 
@@ -208,7 +209,7 @@ CONTACT_TO=support@qwid.org          # Where the contact form delivers.
 CONTACT_FROM=support@qwid.org        # Envelope + From: sender. MUST be an identity verified in SES, or SES rejects the message. Never SMTP_USER — the visitor's address goes in Reply-To.
 ```
 
-Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change and website-registration flows.
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change, website-registration and CLI wallet-generator flows. Gas: the EVM runs on exactly the declared gas; `MinGasUsage()` is the validation floor (DEX ops include `DexTokenCallGas`), `GasUsageEstimate()` is what wallets declare (10x the floor for contract calls/deploys, capped at `MaxGasUsage`). The web UI session idles out after 30 min (`POST /api/logout` ends it).
 
 Recovery phrases — exactly which flows produce one:
 - **CLI generator** (`go run cmd/generateNewWallet/main.go`): creates a wallet **from** a fresh 24-word BIP39 phrase (shown once, three words typed back to confirm), and restores a wallet from an existing phrase. The phrase is read without echo and stored encrypted in the wallet file.

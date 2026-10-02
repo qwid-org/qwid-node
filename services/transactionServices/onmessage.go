@@ -481,30 +481,11 @@ func OnMessage(addr [4]byte, m []byte) {
 		for topic, v := range txn {
 			txs := []transactionsDefinition.Transaction{}
 			for _, hs := range v {
-				// First try to load from confirmed DB
-				t, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], hs)
-				if err != nil {
-					// If not in confirmed DB, try to load from Pool
-					t, err = transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], hs)
-					if err != nil {
-						// If not in Pool, try bad transaction DB
-						t, err = transactionsDefinition.LoadFromDBPoolTx(common.BadTransactionDBPrefix[:], hs)
-						if err != nil {
-							logger.GetLogger().Printf("  tx %x NOT FOUND in any DB", hs[:8])
-							continue
-						}
-						// Validate recovered bad transaction
-						if !t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
-							logger.GetLogger().Printf("  tx %x from badTx FAILED validation", hs[:8])
-							continue
-						}
-						// Store to confirmed DB
-						err = t.StoreToDBPoolTx(common.TransactionDBPrefix[:])
-						if err != nil {
-							logger.GetLogger().Printf("  tx %x failed to store to confirmed DB: %v", hs[:8], err)
-							continue
-						}
-					}
+				t, ok := loadForBt(hs, func(t transactionsDefinition.Transaction) bool {
+					return t.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2())
+				})
+				if !ok {
+					continue
 				}
 				txs = append(txs, t)
 			}
@@ -595,4 +576,28 @@ func noteUnpayableDropped(n int) int {
 	total := unpayableDrops
 	unpayableDrops = 0
 	return total
+}
+
+// loadForBt finds a requested transaction: confirmed DB, then pool, then the
+// bad-transaction DB - the last only if it still verifies. A bad transaction
+// is served as it is and NOT copied into the confirmed prefix (S2-07): that
+// prefix means "already in the chain" to gossip dedup and the nonce service,
+// so promoting it kept a once-rejected transaction out of every later block.
+func loadForBt(hs []byte, verify func(transactionsDefinition.Transaction) bool) (transactionsDefinition.Transaction, bool) {
+	if t, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], hs); err == nil {
+		return t, true
+	}
+	if t, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], hs); err == nil {
+		return t, true
+	}
+	t, err := transactionsDefinition.LoadFromDBPoolTx(common.BadTransactionDBPrefix[:], hs)
+	if err != nil {
+		logger.GetLogger().Printf("  tx %x NOT FOUND in any DB", hs[:min(8, len(hs))])
+		return t, false
+	}
+	if !verify(t) {
+		logger.GetLogger().Printf("  tx %x from badTx FAILED validation", hs[:min(8, len(hs))])
+		return t, false
+	}
+	return t, true
 }

@@ -265,15 +265,18 @@ func canProduce() bool {
 	return isEligibleProducer(operator, delID, pkErr == nil)
 }
 
+// mayEmitNonce: a node that is behind, syncing, or not a registered, staked
+// producer must not emit nonces - neither in the send loop nor as a reply
+// (S2-09).
+func mayEmitNonce() bool {
+	if common.IsBehindNetwork() || common.IsSyncing.Load() {
+		return false
+	}
+	return canProduce()
+}
+
 func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
-	if common.IsBehindNetwork() {
-		return false
-	}
-	isync := common.IsSyncing.Load()
-	if isync == true {
-		return false
-	}
-	if !canProduce() {
+	if !mayEmitNonce() {
 		return false
 	}
 	n, err := generateNonceMsg(topic)
@@ -400,6 +403,9 @@ func StartSubscribingNonceMsg(ip [4]byte) {
 }
 
 func sendReply(addr [4]byte) {
+	if !mayEmitNonce() {
+		return
+	}
 	logger.GetLogger().Println("send reply to", tcpip.PeerLabel(addr))
 	var topic = [2]byte{'N', 'N'}
 	n, err := generateNonceMsg(topic)
