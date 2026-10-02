@@ -109,21 +109,13 @@ func main() {
 	logger.GetLogger().Println("Loading accounts...")
 	err = account.LoadAccounts(-1)
 	if err != nil {
-		addrbytes := [common.AddressLength]byte{}
-		copy(addrbytes[:], wallet.GetActiveWallet().Account1.Address.GetBytes())
-		// Initialize accounts
-		a := account.Account{
-			Balance:               0,
-			Address:               addrbytes,
-			TransactionDelay:      0,
-			MultiSignNumber:       0,
-			MultiSignAddresses:    make([][20]byte, 0),
-			TransactionsSender:    make([]common.Hash, 0),
-			TransactionsRecipient: make([]common.Hash, 0),
-		}
-		allAccounts := map[[20]byte]account.Account{}
-		allAccounts[addrbytes] = a
-		account.Accounts = account.AccountsType{AllAccounts: allAccounts}
+		// A brand-new database starts from EMPTY state. It used to be seeded
+		// with this node's wallet address - a zero-balance account plus a
+		// zero staking entry in every delegated account - but that is
+		// consensus state: ComputeStateRoot hashes every entry, zero or not,
+		// so each node's state after genesis depended on its own wallet and
+		// a second node rejected block 1 ("state root does not match").
+		account.Accounts = account.AccountsType{AllAccounts: map[[20]byte]account.Account{}}
 		err = account.StoreAccounts(0)
 		if err != nil {
 			logger.GetLogger().Fatal("Failed to store accounts:", err)
@@ -141,18 +133,7 @@ func main() {
 		// Initialize staking accounts
 		logger.GetLogger().Println("Setting up staking accounts...")
 		for i := 1; i < 256; i++ {
-			del := common.GetDelegatedAccountAddress(int16(i))
-			delbytes := [common.AddressLength]byte{}
-			copy(delbytes[:], del.GetBytes())
-			sa := account.StakingAccount{
-				StakedBalance:    0,
-				StakingRewards:   0,
-				DelegatedAccount: delbytes,
-				StakingDetails:   nil,
-			}
-			allStakingAccounts := map[[20]byte]account.StakingAccount{}
-			allStakingAccounts[addrbytes] = sa
-			account.StakingAccounts[i] = account.StakingAccountsType{AllStakingAccounts: allStakingAccounts}
+			account.StakingAccounts[i] = account.StakingAccountsType{AllStakingAccounts: map[[20]byte]account.StakingAccount{}}
 		}
 		err = account.StoreStakingAccounts(0)
 		if err != nil {
