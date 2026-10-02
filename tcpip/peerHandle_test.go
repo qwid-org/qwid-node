@@ -48,7 +48,7 @@ func TestHandlesSeparateNodesBehindOneIP(t *testing.T) {
 func TestFrameAssembler(t *testing.T) {
 	topic := TransactionTopic
 	mk := func(payload string) []byte {
-		return append(append(append([]byte{}, common.MessageInitialization[:]...), []byte(payload)...), frameEnd...)
+		return encodeFrame([]byte(payload))
 	}
 
 	// Two glued frames in a single chunk - the case the old framing lost.
@@ -58,28 +58,32 @@ func TestFrameAssembler(t *testing.T) {
 		t.Fatalf("glued frames: msgs=%q viol=%v", msgs, viol)
 	}
 
-	// One frame split across three chunks, with the delimiter itself split.
+	// One frame split across three chunks, with the length header itself split.
 	fa = frameAssembler{topic: topic}
 	wire := mk("gamma-payload")
 	if msgs, viol = fa.push(wire[:5]); viol || len(msgs) != 0 {
 		t.Fatalf("fragment 1: msgs=%d viol=%v", len(msgs), viol)
 	}
 	if msgs, viol = fa.push(wire[5 : len(wire)-3]); viol || len(msgs) != 0 {
-		t.Fatalf("fragment 2 (split delimiter): msgs=%d viol=%v", len(msgs), viol)
+		t.Fatalf("fragment 2: msgs=%d viol=%v", len(msgs), viol)
 	}
 	msgs, viol = fa.push(wire[len(wire)-3:])
 	if viol || len(msgs) != 1 || string(msgs[0]) != "gamma-payload" {
 		t.Fatalf("reassembled: msgs=%q viol=%v", msgs, viol)
 	}
 
-	// Wrong initialization marker is a violation; the NEXT frame still parses.
+	// Wrong initialization marker is a violation. With length framing the
+	// stream cannot be resynchronised, so everything after it is discarded.
 	fa = frameAssembler{topic: topic}
-	bad := append(append([]byte{9, 9, 9, 9}, []byte("junk")...), frameEnd...)
+	bad := append([]byte{9, 9, 9, 9, 0, 0, 0, 4}, []byte("junk")...)
 	msgs, viol = fa.push(append(bad, mk("delta")...))
 	if !viol {
 		t.Fatal("bad init marker must be flagged as a violation")
 	}
-	if len(msgs) != 1 || string(msgs[0]) != "delta" {
-		t.Fatalf("frame after violation must survive: msgs=%q", msgs)
+	if len(msgs) != 0 {
+		t.Fatalf("nothing after a desynchronised header may be trusted: msgs=%q", msgs)
+	}
+	if msgs, viol = fa.push(mk("epsilon")); !viol || len(msgs) != 0 {
+		t.Fatalf("a broken stream stays broken: msgs=%q viol=%v", msgs, viol)
 	}
 }

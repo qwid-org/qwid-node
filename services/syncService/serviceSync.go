@@ -82,7 +82,9 @@ func generateSyncMsgHeight() []byte {
 	n.TransactionsBytes[[2]byte{'L', 'B'}] = [][]byte{lastBlockHash}
 
 	// GB names the chain we are on. ChainID (int16) only says "some QWID chain";
-	// two networks started from different genesis configs share it.
+	// two networks started from different genesis configs share it. The genesis
+	// hash covers the whole genesis.json - parameters and staking allocation -
+	// through the config digest in the genesis StateRoot (S9-01).
 	n.TransactionsBytes[[2]byte{'G', 'B'}] = [][]byte{localGenesisHash}
 
 	// NP-M14: share only a bounded random subset of connected peers, so no single

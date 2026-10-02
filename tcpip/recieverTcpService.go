@@ -427,8 +427,7 @@ func releaseHandshake(ip [4]byte) {
 
 func Send(conn net.Conn, message []byte) error {
 
-	message = append(common.MessageInitialization[:], message...)
-	message = append(message, []byte("<-END->")...)
+	message = encodeFrame(message)
 
 	// The write deadline scales with the message. A flat deadline broke the
 	// connection in a way no retry could fix: the encrypted transport writes

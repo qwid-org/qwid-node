@@ -85,6 +85,20 @@ RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts
 
 State-size invariants: account snapshots must stay O(number of accounts) — per-account transaction history lives in the `HS`/`HR` index (`account/txHistory.go`) with only `SentCount`/`ReceivedCount` counters in state (a rewind restores the counters; re-applied txs overwrite the index tail). Staking detail entries older than `common.StakingDetailsRetentionBlocks` fold into one aggregate at key 0. Accounts/staking snapshots are written once per sync batch (per block on the live path), so snapshot heights have gaps — the highest stored height comes from a `prefix+"LAST"` meta key (`account/heightMeta.go`), never from contiguity-assuming search.
 
+### Block header commitments
+
+`BaseHeader` carries `BodyHash` (timestamp, reward percentage, supply, oracle
+values and proofs) and `StateRoot` (`blocks.ComputeStateRoot`: canonical hash
+of accounts, staking, DEX and EVM state **after the parent block**), both
+covered by the producer's signature. Validators recompute `BlockHeaderHash`,
+`BodyHash` and `StateRoot` before applying a block. Signature-scheme votes are
+counted from the signed nonces embedded in the block (`OracleProofs`) against
+the parent's stake (`blocks/encryptionVote.go`); oracle data must be exactly
+the values of the embedded proofs.
+
+P2P frames are length-prefixed: `MessageInitialization || uint32 BE length ||
+body` (`tcpip.encodeFrame` / `frameAssembler`), never delimiter-based.
+
 ### Dual Signature System
 
 Transactions use two post-quantum signature schemes:
@@ -111,6 +125,11 @@ tag, and a node refuses to sync with a peer whose hash differs — the peer is
 dropped, its advertised peers are not dialled, and, most importantly, its height
 claim is not recorded (an unrecorded claim cannot inflate `networkHeight()` and
 send the stall watchdog rewinding the chain).
+
+The genesis block's `StateRoot` holds `GenesisConfigDigest` - a hash of the
+whole `genesis.json` minus its signature (consensus parameters, staking
+allocation, genesis transactions) - so the genesis hash, and with it `GB`,
+differs whenever two nodes' genesis configs differ in any byte.
 
 `ChainID` (int16, 23) is checked one layer down in `message.BaseMessage`, but it
 only says "some QWID chain": two networks started from different genesis configs

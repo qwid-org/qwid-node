@@ -12,12 +12,12 @@ import (
 )
 
 type BaseHeader struct {
-	PreviousHash     common.Hash      `json:"previous_hash"`
-	Difficulty       int32            `json:"difficulty"`
-	Height           int64            `json:"height"`
-	DelegatedAccount common.Address   `json:"delegated_account"`
-	OperatorAccount  common.Address   `json:"operator_account"`
-	RootMerkleTree   common.Hash      `json:"root_merkle_tree"`
+	PreviousHash     common.Hash    `json:"previous_hash"`
+	Difficulty       int32          `json:"difficulty"`
+	Height           int64          `json:"height"`
+	DelegatedAccount common.Address `json:"delegated_account"`
+	OperatorAccount  common.Address `json:"operator_account"`
+	RootMerkleTree   common.Hash    `json:"root_merkle_tree"`
 	// BodyHash commits the signed header to the rest of the block (S3-04):
 	// timestamp, reward percentage, supply and the oracle values, data and
 	// proofs. Without it a relay could edit any of them and present another

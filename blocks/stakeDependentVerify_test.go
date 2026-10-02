@@ -41,15 +41,15 @@ func TestVerifyStakeDependent(t *testing.T) {
 	}
 
 	t.Run("top-128 producer with empty oracle data passes", func(t *testing.T) {
-		assert.NoError(t, VerifyStakeDependent(stakeDependentBlock(128, 0)))
+		assert.NoError(t, VerifyStakeDependent(stakeDependentBlock(128, 0), Block{}))
 	})
 
 	t.Run("non-top-128 producer is rejected", func(t *testing.T) {
-		assert.Error(t, VerifyStakeDependent(stakeDependentBlock(129, 0)))
+		assert.Error(t, VerifyStakeDependent(stakeDependentBlock(129, 0), Block{}))
 	})
 
 	t.Run("unbacked non-zero price oracle is rejected", func(t *testing.T) {
 		// PriceOracle != 0 but no oracle data reaches the 2/3 stake threshold.
-		assert.Error(t, VerifyStakeDependent(stakeDependentBlock(128, 12345)))
+		assert.Error(t, VerifyStakeDependent(stakeDependentBlock(128, 12345), Block{}))
 	})
 }

@@ -375,3 +375,44 @@ func Median(prices []int64) int64 {
 	}
 	return prices[mid]
 }
+
+// PriceFromData computes a block's price from its oracle data exactly as
+// VerifyPriceOracle checks it: stake from the current (parent) snapshot,
+// min and max dropped, median of the rest. An error means the price cannot
+// be established and the block carries 0.
+func PriceFromData(priceData []byte, totalStaked int64) (int64, error) {
+	_, prices, staked, err := ParsePriceData(priceData)
+	if err != nil {
+		return 0, err
+	}
+	if staked <= 2*totalStaked/3 {
+		return 0, errors.New("in price, there is not enough staked value for 2/3")
+	}
+	if len(prices) > 2 {
+		sort.Slice(prices, func(i, j int) bool { return prices[i] < prices[j] })
+		prices = prices[1 : len(prices)-1]
+	}
+	if len(prices) == 0 {
+		return 0, errors.New("not enough prices propositions after removing min and max")
+	}
+	return Median(prices), nil
+}
+
+// RandFromData is PriceFromData for RAND: the hash of all proposals.
+func RandFromData(randData []byte, totalStaked int64) (int64, error) {
+	_, rands, staked, err := ParseRandData(randData)
+	if err != nil {
+		return 0, err
+	}
+	if staked <= 2*totalStaked/3 {
+		return 0, errors.New("in rand, there is not enough staked value for 2/3")
+	}
+	if len(rands) == 0 {
+		return 0, errors.New("not enough rands propositions")
+	}
+	h, err := common.CalcHashFromBytes(rands)
+	if err != nil {
+		return 0, err
+	}
+	return common.GetInt64FromByte(h[24:]), nil
+}

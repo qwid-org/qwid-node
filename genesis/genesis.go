@@ -73,6 +73,28 @@ type Genesis struct {
 	MaxMessageSizeBytes          int32                 `json:"max_message_size_bytes"`
 }
 
+// GenesisConfigDigest hashes the whole genesis configuration - consensus
+// parameters, staking allocation, genesis transactions - except the header
+// signature, which signs over this digest (S9-01). It is stored as the
+// genesis block's StateRoot, so it enters the genesis BlockHash that peers
+// compare in the hi handshake (GB): a node started from a different
+// genesis.json has a different chain identity and is refused, instead of
+// syncing and then forking on the first block the two configs judge apart.
+// Genesis has no parent state to commit to, so the field is free at height 0
+// (VerifyStateRoot skips it).
+func GenesisConfigDigest(g Genesis) (common.Hash, error) {
+	g.Signature = ""
+	b, err := json.Marshal(g)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	h, err := common.CalcHashToByte(b)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return common.GetHashFromBytes(h), nil
+}
+
 func storeGenesisPubKey(pubkeystr string, primary bool) common.PubKey {
 	pubKeyOpBytes, err := hex.DecodeString(pubkeystr)
 	if err != nil {
@@ -215,6 +237,21 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	if err != nil {
 		logger.GetLogger().Fatalf("connot generate encryption bytes %v", err)
 	}
+	// The header signature covers the body through BodyHash (S3-04), so the
+	// body is fixed first. StateRoot carries the config digest (S9-01).
+	bb := blocks.BaseBlock{
+		BlockTimeStamp:   genesis.Timestamp,
+		RewardPercentage: 0,
+		Supply:           common.InitSupply + account.GetReward(common.InitSupply),
+	}
+	bodyHash, err := bb.CalcBodyHash()
+	if err != nil {
+		logger.GetLogger().Fatalf("cannot calculate hash of genesis block body %v", err)
+	}
+	configDigest, err := GenesisConfigDigest(genesis)
+	if err != nil {
+		logger.GetLogger().Fatalf("cannot hash genesis config %v", err)
+	}
 	bh := blocks.BaseHeader{
 		PreviousHash:     common.EmptyHash(),
 		Difficulty:       genesis.Difficulty,
@@ -222,6 +259,8 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 		DelegatedAccount: common.GetDelegatedAccountAddress(1),
 		OperatorAccount:  addressOp1,
 		RootMerkleTree:   rootHash,
+		BodyHash:         bodyHash,
+		StateRoot:        configDigest,
 		Encryption1:      enc1,
 		Encryption2:      enc2,
 		Signature:        common.Signature{},
@@ -256,13 +295,8 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	if bh.Verify(common.SigName(), common.SigName2(), false, false) == false {
 		logger.GetLogger().Fatal("Block Header signature in genesis block fails to verify")
 	}
-	bb := blocks.BaseBlock{
-		BaseHeader:       bh,
-		BlockHeaderHash:  bhHash,
-		BlockTimeStamp:   genesis.Timestamp,
-		RewardPercentage: 0,
-		Supply:           common.InitSupply + account.GetReward(common.InitSupply),
-	}
+	bb.BaseHeader = bh
+	bb.BlockHeaderHash = bhHash
 
 	bl := blocks.Block{
 		BaseBlock:          bb,
