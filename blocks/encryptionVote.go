@@ -146,9 +146,6 @@ func checkEncryptionChangeShape(newBytes []byte, parent Block, primary bool) (bo
 }
 
 func encryptionChangeAuthorised(proofs [][]byte, parent Block, want []byte, primary bool, height int64, total int64, decode verifiedDecoder, stakeOf func(id int) int64) error {
-	if height < OracleProofsActivationHeight {
-		return fmt.Errorf("no scheme change before height %d: proofs are not authenticated there", OracleProofsActivationHeight)
-	}
 	next, err := oqs.FromBytesToEncryptionConfig(want)
 	if err != nil {
 		return err

@@ -85,24 +85,6 @@ func TestBaseBlockOracleProofsRoundTrip(t *testing.T) {
 	assert.Equal(t, trailer, rest, "GetFromBytes must consume exactly the BaseBlock bytes")
 }
 
-func TestBaseBlockLegacyEncodingLeavesFollowingBlockFieldsUntouched(t *testing.T) {
-	orig := BaseBlock{
-		BaseHeader:      buildMinimalBaseHeader(),
-		PriceOracleData: []byte{},
-		RandOracleData:  []byte{},
-		OracleProofs:    [][]byte{{1, 2, 3}},
-	}
-	orig.BaseHeader.Height = OracleProofsActivationHeight - 1
-	trailer := make([]byte, 40) // legacy BlockHash + BlockFee
-	trailer[0] = 0x7f
-
-	var decoded BaseBlock
-	rest, err := decoded.GetFromBytes(append(orig.GetBytes(), trailer...))
-	assert.NoError(t, err)
-	assert.Nil(t, decoded.OracleProofs)
-	assert.Equal(t, trailer, rest)
-}
-
 func TestBaseHeaderGetBytesWithoutSignature(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()

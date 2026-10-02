@@ -68,10 +68,8 @@ func VerifyStakeDependent(newBlock, lastBlock Block) error {
 	) {
 		return fmt.Errorf("block producer is not an eligible top-128 staking node")
 	}
-	if blockHeight >= OracleProofsActivationHeight {
-		if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
-			return fmt.Errorf("oracle proof authorization fails: %w", err)
-		}
+	if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
+		return fmt.Errorf("oracle proof authorization fails: %w", err)
 	}
 	if err := VerifyEncryptionVotes(newBlock, lastBlock); err != nil {
 		return fmt.Errorf("scheme vote fails: %w", err)
@@ -187,10 +185,8 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// Bind the embedded oracle values to signed nonce transactions: every price
 	// and rand entry must be backed by a signature-verified, fresh proof so a
 	// producer cannot fabricate values attributed to other validators.
-	if blockHeight >= OracleProofsActivationHeight {
-		if err := AuthenticateOracleProofs(newBlock, lastBlock); err != nil {
-			return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
-		}
+	if err := AuthenticateOracleProofs(newBlock, lastBlock); err != nil {
+		return nil, fmt.Errorf("oracle proof authentication fails: %w", err)
 	}
 	if len(newBlock.BaseBlock.BaseHeader.Encryption1[:]) == 0 || len(newBlock.BaseBlock.BaseHeader.Encryption2[:]) == 0 {
 		return nil, fmt.Errorf("encryption opt data should be always present in block")
@@ -202,7 +198,7 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	// Recompute the expected difficulty from the parent block and the committed
 	// timestamps and reject any block that declares a different value. Without
 	// this a producer could declare an arbitrarily low difficulty (consensus).
-	if blockHeight >= TimestampDifficultyActivationHeight && !ValidDifficulty(
+	if !ValidDifficulty(
 		newBlock.GetHeader().Difficulty,
 		lastBlock.GetHeader().Difficulty,
 		lastBlock.GetBlockTimeStamp(),

@@ -205,3 +205,25 @@ func resealTestBlock(t *testing.T, k stageBKey, bl Block) Block {
 	bl.BlockHash, _ = bl.CalcBlockHash()
 	return bl
 }
+
+// Regression (chain stalled at height 0): the body hash covers the oracle
+// proofs, so they must survive serialization at EVERY height - the wire
+// format used to drop them below an activation height, and every early block
+// failed its own body hash at the receiver.
+func TestBodyHashSurvivesWireRoundTripWithProofsAtLowHeight(t *testing.T) {
+	k, parent := headerTestSetup(t)
+	bl := signedTestBlock(t, k, 1, parent, common.Hash{})
+	bl.BaseBlock.OracleProofs = [][]byte{{1, 2, 3}, {4, 5}}
+	bl = resealTestBlock(t, k, bl)
+	got, err := Block{}.GetFromBytes(bl.GetBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := got.BaseBlock.CalcBodyHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != got.GetHeader().BodyHash {
+		t.Fatal("a received block no longer matches its signed body hash")
+	}
+}

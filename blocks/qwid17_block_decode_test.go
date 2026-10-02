@@ -69,8 +69,8 @@ func TestQWID17_BlockDecodersNeverPanic(t *testing.T) {
 	base = append(base, common.BytesToLenAndBytes([]byte{0x01})...) // Signature
 	// BaseBlock fixed tail: 66 bytes (block header hash 32 + ts 8 + reward 2 +
 	// supply 8 + priceOracle 8 + randOracle 8), then two zero-length oracle
-	// data fields. Height field (b[36:44]) is 0x02020202... which is below
-	// OracleProofsActivationHeight? Use whatever; oracle proofs branch is gated.
+	// data fields; oracle proofs are serialized at every height and are
+	// absent here, so decoding must fail cleanly.
 	tail := make([]byte, 66)
 	base = append(base, tail...)
 	base = append(base, common.BytesToLenAndBytes(nil)...) // PriceOracleData

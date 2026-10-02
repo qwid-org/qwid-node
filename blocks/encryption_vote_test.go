@@ -138,7 +138,4 @@ func TestEncryptionChangeAuthorisedOnlyByBlockProofs(t *testing.T) {
 	if err := encryptionChangeAuthorised([][]byte{{2}}, parent, pause, true, 100, 100, decoderFor(txs, 0), stake); err == nil {
 		t.Fatal("a change without votes in the block must be rejected")
 	}
-	if err := encryptionChangeAuthorised([][]byte{{1}}, parent, pause, true, OracleProofsActivationHeight-1, 100, decoderFor(txs, 0), stake); err == nil {
-		t.Fatal("below proof activation the proofs are unauthenticated and cannot vote")
-	}
 }

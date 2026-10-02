@@ -51,12 +51,6 @@ type BaseBlock struct {
 }
 
 const (
-	// Consensus upgrades activate at the first height after the currently
-	// published network height (23). Blocks below these heights retain their
-	// historical encoding and validation rules.
-	OracleProofsActivationHeight        int64 = 24
-	TimestampDifficultyActivationHeight int64 = 24
-
 	// There are only 255 encodable delegated ids (with zero reserved). Keep
 	// parser limits explicit so peer-controlled counts cannot drive allocations.
 	MaxOracleProofs     int32 = 255
@@ -324,9 +318,11 @@ func (bb *BaseBlock) GetBytes() []byte {
 	b = append(b, common.GetByteInt64(bb.RandOracle)...)
 	b = append(b, common.BytesToLenAndBytes(bb.PriceOracleData)...)
 	b = append(b, common.BytesToLenAndBytes(bb.RandOracleData)...)
-	if bb.BaseHeader.Height >= OracleProofsActivationHeight {
-		b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
-	}
+	// Always serialized: BodyHash covers the proofs (S3-04). An activation
+	// height that dropped them below 24 made every early block fail its own
+	// body hash at the receiver; the chain starts from a new genesis, so no
+	// historical encoding has to be kept.
+	b = append(b, bytesSliceToBytes(bb.OracleProofs)...)
 	return b
 }
 
@@ -360,13 +356,9 @@ func (bb *BaseBlock) GetFromBytes(b []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if bb.BaseHeader.Height >= OracleProofsActivationHeight {
-		bb.OracleProofs, b, err = bytesSliceFromBytes(b[:])
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		bb.OracleProofs = nil
+	bb.OracleProofs, b, err = bytesSliceFromBytes(b[:])
+	if err != nil {
+		return nil, err
 	}
 	return b[:], nil
 }
