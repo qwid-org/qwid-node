@@ -46,3 +46,18 @@ the usual `a9059cbb`.
 and exercises mint, transfer, the insufficient-balance revert and the
 minter-only restriction, so a compiler upgrade that drops a selector or emits an
 unsupported opcode fails the test suite rather than the chain.
+
+## Example: a token using both oracles
+
+`oracleToken.sol` (`OracleDollar`, QUSD) carries the five registration
+selectors, so the node registers it and the DEX can trade it. It mints 1 QUSD
+per 1 USD worth of QWD sent (`mint(int64 minQusd)`, payable) and redeems at the
+same rate (`redeem(int64 qusd, uint256 minQwd)`), both at the price oracle value
+of the including block, with slippage guards. `openDraw` / `enter` / `draw`
+run a prize draw among holders with the RAND oracle, drawing only
+`DRAW_DELAY` blocks after entries close. Checked through the node's EVM:
+deployment and registration, mint, transfer, redeem and the draw.
+
+```sh
+solc --evm-version paris --optimize --bin --abi oracleToken.sol
+```

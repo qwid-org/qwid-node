@@ -4,8 +4,9 @@ pragma solidity ^0.8.4;
 /// ---------------------------------------------------------------------------
 /// QWID oracle precompiles
 /// ---------------------------------------------------------------------------
-/// The QWID chain seals two oracle values into every block header, medianed
-/// from staked-node submissions and verified by oracle proofs:
+/// The QWID chain seals two oracle values into every block: the price, a
+/// median of staked-node submissions verified by oracle proofs, and RAND, the
+/// block's RANDAO value:
 ///
 ///   0x…0100  Price oracle — BTC/USD as the raw consensus int64
 ///   0x…0101  RAND oracle  — consensus randomness (int64)

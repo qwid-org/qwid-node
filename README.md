@@ -288,9 +288,11 @@ Encryption schemes summary:
 
 ## Oracles in smart contracts
 
-Every QWID block seals two consensus oracle values, medianed from staked-node
-submissions and verified by oracle proofs. Smart contracts read them through
-two precompiled contracts:
+Every QWID block seals two consensus oracle values: the price, a median of
+staked-node submissions verified by oracle proofs, and RAND, the block's RANDAO
+value built from the producers' committed-then-revealed seeds
+(`docs/oracle-randomness-limitation.md`). Smart contracts read them through two
+precompiled contracts:
 
 | Precompile | Address | Value                           |
 |---|---|---------------------------------|
@@ -326,7 +328,9 @@ chosen block height and draw only in a strictly LATER block.
 
 A complete worked example — a QWD price-direction game using both oracles with
 the commit-first randomness pattern — is in `smartContracts/oracleDemo.sol`
-(library `QwidOracles` + contract `BtcUpDown`). Compile with the official
+(library `QwidOracles` + contract `BtcUpDown`). A token that the node registers
+for the DEX and that uses both oracles (mint/redeem at the oracle price, a prize
+draw with RAND) is in `smartContracts/oracleToken.sol`. Compile with the official
 static solc release and the `paris` EVM target, exactly as the web UI does:
 
     solc --evm-version paris --bin --abi smartContracts/oracleDemo.sol
