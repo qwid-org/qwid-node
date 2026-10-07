@@ -29,6 +29,12 @@ var (
 	ErrInsufficientBalance      = errors.New("insufficient balance for transfer")
 	ErrContractAddressCollision = errors.New("contract address collision")
 	ErrExecutionReverted        = errors.New("execution reverted")
+	// ErrPrecompileFailed wraps every error a precompiled contract returns
+	// for its input (bad curve point, wrong length, oversized operand). Like
+	// any other execution failure it fails the call and consumes its gas; the
+	// common type lets block processing recognise it as a failed transaction
+	// rather than a node error.
+	ErrPrecompileFailed = errors.New("precompiled contract failed")
 	ErrMaxCodeSizeExceeded      = errors.New("max code size exceeded")
 	ErrInvalidJump              = errors.New("invalid jump destination")
 	ErrWriteProtection          = errors.New("write protection")

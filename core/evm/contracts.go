@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/qwid-org/qwid-node/common"
@@ -151,7 +152,10 @@ func RunPrecompiledContract(p PrecompiledContract, input []byte, suppliedGas uin
 	}
 	suppliedGas -= gasCost
 	output, err := p.Run(input)
-	return output, suppliedGas, err
+	if err != nil {
+		return output, suppliedGas, fmt.Errorf("%w: %v", ErrPrecompileFailed, err)
+	}
+	return output, suppliedGas, nil
 }
 
 // ECRECOVER implemented as a native contract.

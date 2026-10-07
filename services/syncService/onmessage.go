@@ -787,7 +787,7 @@ func OnMessage(addr [4]byte, m []byte) {
 					from := max(index-1-common.NumberOfHashesInBucket, 0)
 					logger.GetLogger().Printf("competing block %d from %s does not link to our block %d - asking for headers from %d",
 						index, tcpip.PeerLabel(addr), index-1, from)
-					sendGetHeadersRange(addr, from, h)
+					sendForkHeaderRequest(addr, from, h)
 				default:
 					logger.GetLogger().Printf("competing block %d from %s fails verification - not rewinding", index, tcpip.PeerLabel(addr))
 					tcpip.ReduceAndCheckIfBanIP(addr)
@@ -946,7 +946,7 @@ func OnMessage(addr [4]byte, m []byte) {
 				if !parentFromPeer && !bytes.Equal(block.GetHeader().PreviousHash.GetBytes(), oldBlock.BlockHash.GetBytes()) {
 					from := max(h-common.NumberOfHashesInBucket, 0)
 					logger.GetLogger().Printf("block %d does not link to our tip %d - asking %s for headers from %d", index, index-1, tcpip.PeerLabel(addr), from)
-					sendGetHeadersRange(addr, from, index)
+					sendForkHeaderRequest(addr, from, index)
 				} else {
 					tcpip.ReduceAndCheckIfBanIP(addr)
 				}

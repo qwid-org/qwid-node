@@ -244,6 +244,38 @@ func sendGetHeadersRange(addr [4]byte, bHeight, eHeight int64) {
 	if !allowHeaderRequest(addr) {
 		return
 	}
+	sendHeaderRequest(addr, bHeight, eHeight)
+}
+
+// Fork-resolution header requests have a limiter of their own. They used to
+// share allowHeaderRequest with the routine sync request, which every round
+// sends first - so the request for the earlier headers that locate the fork
+// point was always the one refused, and a node left on a minority branch
+// asked forever and never rejoined the network (audit F3-01).
+var (
+	lastForkHeaderRequest      = map[[4]byte]time.Time{}
+	lastForkHeaderRequestMutex sync.Mutex
+)
+
+func allowForkHeaderRequest(addr [4]byte) bool {
+	lastForkHeaderRequestMutex.Lock()
+	defer lastForkHeaderRequestMutex.Unlock()
+	if t, ok := lastForkHeaderRequest[addr]; ok && time.Since(t) < headerRequestMinInterval {
+		return false
+	}
+	lastForkHeaderRequest[addr] = time.Now()
+	return true
+}
+
+// sendForkHeaderRequest asks addr for the headers that locate a fork point.
+func sendForkHeaderRequest(addr [4]byte, bHeight, eHeight int64) {
+	if !allowForkHeaderRequest(addr) {
+		return
+	}
+	sendHeaderRequest(addr, bHeight, eHeight)
+}
+
+func sendHeaderRequest(addr [4]byte, bHeight, eHeight int64) {
 	if !Send(addr, generateSyncMsgGetHeadersRange(bHeight, eHeight)) {
 		logger.GetLogger().Println("could not send get headers")
 		return

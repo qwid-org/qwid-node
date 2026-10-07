@@ -82,7 +82,8 @@ func isEVMExecutionError(err error) bool {
 		errors.Is(err, vm.ErrReturnDataOutOfBounds),
 		errors.Is(err, vm.ErrGasUintOverflow),
 		errors.Is(err, vm.ErrInvalidCode),
-		errors.Is(err, vm.ErrNonceUintOverflow):
+		errors.Is(err, vm.ErrNonceUintOverflow),
+		errors.Is(err, vm.ErrPrecompileFailed):
 		return true
 	}
 	var opErr *vm.ErrInvalidOpCode
@@ -459,14 +460,16 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			//DEX checking transaction
 			dexOptData, fromAddress, coinAmount, tokenAmount, price, err := GenerateOptDataDEX(t, operation)
 			loggerMain.GetLogger().Printf("Token Price: %v\n", price)
-			if errors.Is(err, ErrDexLimitExceeded) {
-				// Not executed; the fee was charged in ProcessTransaction.
+			if err != nil {
+				// An order that cannot execute against the current state -
+				// unknown token, balances or pool too small, its price limit
+				// broken - is skipped: its fee was charged in
+				// ProcessTransaction and nothing else has moved yet. Making it
+				// a block error let one such order (any user's mistake)
+				// invalidate every block that carried it, while it stayed in
+				// the pool to poison the next one.
 				loggerMain.GetLogger().Println("DEX order skipped:", err)
 				continue
-			}
-			if err != nil {
-				loggerMain.GetLogger().Println(err)
-				return false, nil, nil, nil, nil
 			}
 			// The DEX execution below runs token transfers through the EVM and
 			// mutates State (token balances, prices). Mark before executing:
@@ -479,6 +482,11 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			l, _, _, _, err := EvaluateSCDex(t.ContractAddress, fromAddress, dexOptData, t, bl)
 			if err != nil {
 				loggerMain.GetLogger().Println(err)
+				if isEVMExecutionError(err) {
+					// The token's transfer failed and the EVM reverted it;
+					// no coins have moved. Skip the order like above.
+					continue
+				}
 				return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
 			}
 			t.OutputLogs = []byte(l)
