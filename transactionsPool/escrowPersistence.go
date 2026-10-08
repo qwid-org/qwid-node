@@ -39,6 +39,7 @@ var verifyPersistedEscrow = func(tx *transactionsDefinition.Transaction) bool {
 func AddEscrowTransaction(tx transactionsDefinition.Transaction) bool {
 	ok := PoolTxEscrow.AddTransaction(tx, tx.GetHash())
 	if ok {
+		journalPendingChange(journalEscrow, journalAdded, tx)
 		if err := tx.StoreToDBPoolTx(common.EscrowPoolDBPrefix[:]); err != nil {
 			logger.GetLogger().Println("could not persist escrow transaction", err)
 		}
@@ -49,10 +50,65 @@ func AddEscrowTransaction(tx transactionsDefinition.Transaction) bool {
 // RemoveEscrowTransaction removes a transaction from the escrow pool and the
 // database, used on settlement and on owner-authorized cancellation.
 func RemoveEscrowTransaction(hash []byte) {
+	if tx, ok := PoolTxEscrow.GetTransactionByHash(hash); ok {
+		journalPendingChange(journalEscrow, journalRemoved, tx)
+	}
 	PoolTxEscrow.RemoveTransactionByHash(hash)
 	if err := transactionsDefinition.RemoveTransactionFromDBbyHash(common.EscrowPoolDBPrefix[:], hash); err != nil {
 		logger.GetLogger().Println("could not delete persisted escrow transaction", err)
 	}
+}
+
+// Outcome of checking one persisted pending-pool entry.
+const (
+	pendingEntryLoad       = iota // valid: load it
+	pendingEntryDrop              // malformed: delete it
+	pendingEntryQuarantine        // unverifiable now: keep it, do not load it
+)
+
+// checkPersistedPendingTx checks a persisted escrow or multisig entry stored
+// under key (prefix + transaction hash).
+//
+// Block application resets a held transaction's Height to its inclusion block
+// (S4-02, so the delay counts from inclusion) and keeps its original hash. The
+// loaders used to recompute the hash from that modified body, found it
+// different from the key and DELETED the entry - every pending escrow and
+// multisig transfer was erased on every restart, and the node diverged from
+// the network at the next settlement (audit 2026-10-07 F3-08). An entry whose
+// body is not the signed one is now checked against the signed original, kept
+// in the confirmed-transaction DB: the two may differ in Height and nothing
+// else, and the original's signature must verify.
+func checkPersistedPendingTx(key, bt []byte, prefixLen int, verify func(*transactionsDefinition.Transaction) bool) (transactionsDefinition.Transaction, int, string) {
+	mt := &transactionsDefinition.Transaction{}
+	tx, rest, err := mt.GetFromBytes(bt)
+	if err != nil {
+		return tx, pendingEntryDrop, fmt.Sprintf("cannot decode: %v", err)
+	}
+	if len(rest) != 0 {
+		return tx, pendingEntryDrop, "trailing bytes"
+	}
+	if len(key) != prefixLen+common.HashLength || !bytes.Equal(key[prefixLen:], tx.GetHash().GetBytes()) {
+		return tx, pendingEntryDrop, "hash does not match database key"
+	}
+	if tx.HashMatchesBody() {
+		if !verify(&tx) {
+			return tx, pendingEntryQuarantine, "signature does not verify under the current scheme"
+		}
+		return tx, pendingEntryLoad, ""
+	}
+	orig, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], key[prefixLen:])
+	if err != nil {
+		return tx, pendingEntryQuarantine, fmt.Sprintf("signed original not found: %v", err)
+	}
+	held := tx
+	held.Height = orig.Height
+	if !bytes.Equal(held.GetBytes(), orig.GetBytes()) {
+		return tx, pendingEntryQuarantine, "differs from its signed original in more than its height"
+	}
+	if !verify(&orig) {
+		return tx, pendingEntryQuarantine, "signature does not verify under the current scheme"
+	}
+	return tx, pendingEntryLoad, ""
 }
 
 // LoadEscrowPoolFromDB repopulates the in-memory escrow pool from persisted
@@ -73,25 +129,13 @@ func LoadEscrowPoolFromDB() error {
 		return fmt.Errorf("escrow persistence key/value count mismatch: %d/%d", len(keys), len(values))
 	}
 	for i, bt := range values {
-		mt := &transactionsDefinition.Transaction{}
-		tx, rest, err := mt.GetFromBytes(bt)
-		if err != nil {
-			logger.GetLogger().Println("could not decode persisted escrow transaction", err)
+		tx, verdict, why := checkPersistedPendingTx(keys[i], bt, len(common.EscrowPoolDBPrefix), verifyPersistedEscrow)
+		switch verdict {
+		case pendingEntryDrop:
+			logger.GetLogger().Println("persisted escrow transaction dropped:", why)
 			_ = database.MainDB.Delete(keys[i])
 			continue
-		}
-		if len(rest) != 0 {
-			logger.GetLogger().Println("persisted escrow transaction has trailing bytes")
-			_ = database.MainDB.Delete(keys[i])
-			continue
-		}
-		if err := tx.CalcHashAndSet(); err != nil || len(keys[i]) != len(common.EscrowPoolDBPrefix)+common.HashLength ||
-			!bytes.Equal(keys[i][len(common.EscrowPoolDBPrefix):], tx.GetHash().GetBytes()) {
-			logger.GetLogger().Println("persisted escrow transaction hash does not match database key")
-			_ = database.MainDB.Delete(keys[i])
-			continue
-		}
-		if !verifyPersistedEscrow(&tx) {
+		case pendingEntryQuarantine:
 			// QUARANTINE, do not delete. A signature that fails to verify here
 			// is not necessarily corrupt: after a voted scheme replacement every
 			// entry signed under the superseded scheme fails verification under
@@ -99,9 +143,8 @@ func LoadEscrowPoolFromDB() error {
 			// settlements that still-running nodes go on to perform — a silent,
 			// unrecoverable balance divergence (QWID-2026-36). Leaving it in the
 			// pool DB unloaded preserves it until a restart with the correct
-			// scheme installed can verify and load it; malformed entries
-			// (decode/hash/trailing failures above) are still deleted.
-			logger.GetLogger().Println("persisted escrow transaction signature did not verify under the current scheme; quarantining (kept, not loaded)")
+			// scheme installed can verify and load it.
+			logger.GetLogger().Println("persisted escrow transaction quarantined (kept, not loaded):", why)
 			continue
 		}
 		PoolTxEscrow.AddTransaction(tx, tx.GetHash())

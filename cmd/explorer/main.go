@@ -83,6 +83,9 @@ func main() {
 	// Rate limiting sits outside the header middleware so that a throttled 429
 	// still carries them.
 	handler := securityHeaders(rateLimit(mux))
+	// Outermost, so throttled and rejected requests are logged too. Only the
+	// direct (port 80) traffic: nginx logs what it forwards.
+	handler = newAccessLogFromEnv().middleware(handler)
 
 	fmt.Printf("\n===========================================\n")
 	fmt.Printf("  QWID Blockchain Explorer\n")

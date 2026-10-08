@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"sync/atomic"
 
 	"github.com/qwid-org/qwid-node/account"
@@ -319,23 +320,32 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 			*reply = []byte("Private operations only allowed from localhost")
 			return nil
 		}
-		if len(signatureBytes) == 0 {
+		// S7-07: a replay guard sits between the request and its signature.
+		if len(signatureBytes) <= common.RPCGuardLength {
 			*reply = []byte("Invalid signature with length 0")
 			return nil
 		}
+		guard := signatureBytes[:common.RPCGuardLength]
+		signatureBytes = signatureBytes[common.RPCGuardLength:]
+		signedMessage := append(common.BytesToLenAndBytes(line), guard...)
 		primary := signatureBytes[0] == 0
 		signed := false
 		for _, pubKey := range candidateVerificationKeys(operation, byt, primary) {
 			if len(pubKey) == 0 {
 				continue
 			}
-			if wallet.Verify(common.BytesToLenAndBytes(line), signatureBytes, pubKey, common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+			if wallet.Verify(signedMessage, signatureBytes, pubKey, common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
 				signed = true
 				break
 			}
 		}
 		if !signed {
 			*reply = []byte("Invalid signature")
+			return nil
+		}
+		// Only after the signature: unsigned junk must not fill the cache.
+		if err := acceptRPCGuard(guard, time.Now().Unix()); err != nil {
+			*reply = []byte(err.Error())
 			return nil
 		}
 	}
@@ -1333,4 +1343,34 @@ func handleVALS(line []byte, reply *[]byte) {
 		return
 	}
 	*reply = result
+}
+
+// Seen replay guards (S7-07), kept for as long as their time can still pass
+// the freshness check, so a request is accepted at most once.
+var (
+	rpcGuardMu   sync.Mutex
+	rpcGuardSeen = map[[common.RPCGuardLength]byte]int64{} // guard -> request time
+)
+
+// acceptRPCGuard admits a signed request's guard once, and only while it is
+// fresh: within common.RPCGuardMaxAge seconds of now.
+func acceptRPCGuard(guard []byte, now int64) error {
+	t := common.RPCGuardTime(guard)
+	if t < now-common.RPCGuardMaxAge || t > now+common.RPCGuardMaxAge {
+		return fmt.Errorf("request expired or from the future (check the clock)")
+	}
+	var k [common.RPCGuardLength]byte
+	copy(k[:], guard)
+	rpcGuardMu.Lock()
+	defer rpcGuardMu.Unlock()
+	for g, gt := range rpcGuardSeen {
+		if gt < now-common.RPCGuardMaxAge {
+			delete(rpcGuardSeen, g)
+		}
+	}
+	if _, dup := rpcGuardSeen[k]; dup {
+		return fmt.Errorf("request already processed (replay)")
+	}
+	rpcGuardSeen[k] = t
+	return nil
 }

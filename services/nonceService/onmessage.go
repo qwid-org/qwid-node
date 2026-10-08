@@ -1,6 +1,7 @@
 package nonceServices
 
 import (
+	"bytes"
 	"runtime/debug"
 
 	"github.com/qwid-org/qwid-node/logger"
@@ -136,10 +137,6 @@ func OnMessage(addr [4]byte, m []byte) {
 		err = oracles.SavePriceOracle(common.GetInt64FromByte(optData[:8]), nonceHeight, txDelAcc, stakedInDelAccInt)
 		if err != nil {
 			logger.GetLogger().Println("could not save price oracle", err)
-		}
-		err = oracles.SaveRandOracle(common.GetInt64FromByte(optData[8:16]), nonceHeight, txDelAcc, stakedInDelAccInt)
-		if err != nil {
-			logger.GetLogger().Println("could not save rand oracle", err)
 		}
 		// Retain the signed nonce transaction so it can be embedded in the block
 		// as a provenance proof for the oracle values above.
@@ -299,6 +296,17 @@ func OnMessage(addr [4]byte, m []byte) {
 
 				if newBlock.GetHeader().Height != h+1 {
 					logger.GetLogger().Println("block of too short chain")
+					return
+				}
+				// A block on a different parent is a competing branch, which
+				// honest producers create whenever two of them build the same
+				// height - not misbehaviour. Penalising it banned honest
+				// peers within seconds of a fork race (S1-07 bans are real),
+				// and a banned peer can no longer be synced from, so the node
+				// stayed on its branch for good (audit F3-02). Leave it to
+				// the sync service, which resolves forks from verified headers.
+				if !bytes.Equal(newBlock.GetHeader().PreviousHash.GetBytes(), lastBlock.BlockHash.GetBytes()) {
+					logger.GetLogger().Println("block does not build on our tip - leaving it to sync")
 					return
 				}
 				merkleTrie, err := blocks.CheckBaseBlock(newBlock, lastBlock, true)

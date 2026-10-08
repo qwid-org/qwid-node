@@ -19,31 +19,29 @@ func TestOracleDataMustCoverEveryEmbeddedProof(t *testing.T) {
 	}
 	proofs := [][]byte{{1}, {2}}
 	full := append(oracleTriple(2, 10, 100), oracleTriple(5, 10, 200)...)
-	fullRand := append(oracleTriple(2, 10, 500), oracleTriple(5, 10, 600)...)
 
-	if err := authenticateOracleProofs(12, proofs, oracleTriple(2, 10, 100), fullRand, decoderFor(txs, 0xff)); err == nil {
+	if err := authenticateOracleProofs(12, proofs, oracleTriple(2, 10, 100), decoderFor(txs, 0xff)); err == nil {
 		t.Fatal("a price left out for an embedded proof must be rejected")
 	}
-	if err := authenticateOracleProofs(12, proofs, full, oracleTriple(5, 10, 600), decoderFor(txs, 0xff)); err == nil {
-		t.Fatal("a rand left out for an embedded proof must be rejected")
-	}
-	if err := authenticateOracleProofs(12, proofs, full, fullRand, decoderFor(txs, 0xff)); err != nil {
+	if err := authenticateOracleProofs(12, proofs, full, decoderFor(txs, 0xff)); err != nil {
 		t.Fatalf("complete data: %v", err)
 	}
 }
 
-// A zero value is "no proposal" and has no entry, as GeneratePriceData does.
+// A zero price is "no proposal" and has no entry, as GeneratePriceData does.
+// The nonce's former rand slot never reaches the block (S4-06: RAND comes from
+// RANDAO), whatever a validator puts there.
 func TestOracleDataFromProofsSkipsZeroValuesAndSortsByID(t *testing.T) {
 	logger.InitLogger()
 	txs := map[byte]*transactionsDefinition.Transaction{
 		1: nonceTxFor(5, 10, 200, 0),
 		2: nonceTxFor(2, 11, 0, 500),
 	}
-	price, rnd, err := oracleDataFromProofs([][]byte{{1}, {2}}, decoderFor(txs, 0xff))
+	price, err := oracleDataFromProofs([][]byte{{1}, {2}}, decoderFor(txs, 0xff))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(price, oracleTriple(5, 10, 200)) || !bytes.Equal(rnd, oracleTriple(2, 11, 500)) {
-		t.Fatalf("price=%x rand=%x", price, rnd)
+	if !bytes.Equal(price, oracleTriple(5, 10, 200)) {
+		t.Fatalf("price=%x", price)
 	}
 }

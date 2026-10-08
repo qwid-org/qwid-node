@@ -82,7 +82,7 @@ go test -v ./wallet       # verbose output
 
 ### Database Prefix System
 
-RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height), `EV` (EVM state snapshots, store-on-change), `HS`/`HR` (per-account sent/received tx-history index), `SC` (state commit marker: state root after a height, written last after all its snapshots; startup accepts a height only if it exists and matches the loaded state).
+RocksDB uses 2-byte prefixes: `BI` (blocks), `TT` (transactions), `AC` (accounts), `SA` (staking), `DA` (DEX), `PK` (public keys), `HB` (headers), `BH` (blocks by height), `EV` (EVM state snapshots, store-on-change), `HS`/`HR` (per-account sent/received tx-history index), `SC` (state commit marker: state root after a height, written last after all its snapshots; startup accepts a height only if it exists and matches the loaded state), `PJ` (pubkey registration journal, undone on rewind), `PR` (pubkey registration height - the historical key registry: block application reads keys as of the parent block via `pubkeys.*AsOf`, never the live registry; no record = height 0).
 
 State-size invariants: account snapshots must stay O(number of accounts) — per-account transaction history lives in the `HS`/`HR` index (`account/txHistory.go`) with only `SentCount`/`ReceivedCount` counters in state (a rewind restores the counters; re-applied txs overwrite the index tail). Staking detail entries older than `common.StakingDetailsRetentionBlocks` fold into one aggregate at key 0. Accounts/staking snapshots are written once per sync batch (per block on the live path), so snapshot heights have gaps — the highest stored height comes from a `prefix+"LAST"` meta key (`account/heightMeta.go`), never from contiguity-assuming search.
 
@@ -95,7 +95,18 @@ covered by the producer's signature. Validators recompute `BlockHeaderHash`,
 `BodyHash` and `StateRoot` before applying a block. Signature-scheme votes are
 counted from the signed nonces embedded in the block (`OracleProofs`) against
 the parent's stake (`blocks/encryptionVote.go`); oracle data must be exactly
-the values of the embedded proofs.
+the values of the embedded proofs. A price that cannot be established (proofs
+carry at most 2/3 of the stake) is the parent's carried forward, never 0.
+
+RAND is a RANDAO accumulator (`blocks/randao.go`, S4-06), not the validators'
+proposals: each block carries its producer's `RandReveal` (the seed behind the
+commitment it made in its previous block, required while that is younger than
+`RandaoCommitExpiry`), a new `RandCommit`, and `RandMix` = hash of the parent's
+mix, the height and the reveal; `RandOracle` derives from `RandMix`. The live
+commitment is staking state (`StakingAccount.RandCommit/RandCommitHeight`,
+in the state root). Seeds are derived, never stored: `wallet.RandaoSeed(height)`
+from the BIP39 seed (or the primary secret key). `RandOracleData` must be empty
+and the nonce's rand slot is zero and ignored.
 
 P2P frames are length-prefixed: `MessageInitialization || uint32 BE length ||
 body` (`tcpip.encodeFrame` / `frameAssembler`), never delimiter-based.
@@ -137,10 +148,10 @@ only says "some QWID chain": two networks started from different genesis configs
 share it. `ChainID` cannot itself be widened to the genesis hash — most
 importantly, it is part of the signed bytes of every transaction
 (`transactionsDefinition/baseTransaction.go`), so changing its width invalidates
-every existing signature. Note that the EVM's exposed chain id (via the CHAINID
-opcode) is a separate value, currently hardcoded to 1337 in
-`params.AllEthashProtocolChanges`, regardless of `ChainID`; they are not the same
-number and serve different purposes.
+every existing signature. The EVM's CHAINID opcode answers the same number
+(`blocks.evmChainConfig`, S6-06; it used to be the development id 1337). The EVM
+runs the Merge instruction set and `params.Rules` reports every fork through
+the Merge as active, matching it.
 
 **A peer that sends no `GB` tag is rejected in the `hi` sync message.** The
 genesis check does not run in other sync message types (`gh`, `sh`
@@ -209,7 +220,7 @@ CONTACT_TO=support@qwid.org          # Where the contact form delivers.
 CONTACT_FROM=support@qwid.org        # Envelope + From: sender. MUST be an identity verified in SES, or SES rejects the message. Never SMTP_USER — the visitor's address goes in Reply-To.
 ```
 
-Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change, website-registration and CLI wallet-generator flows. Gas: the EVM runs on exactly the declared gas; `MinGasUsage()` is the validation floor (DEX ops include `DexTokenCallGas`), `GasUsageEstimate()` is what wallets declare (10x the floor for contract calls/deploys, capped at `MaxGasUsage`). The web UI session idles out after 30 min (`POST /api/logout` ends it).
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change, website-registration and CLI wallet-generator flows. Gas: the EVM runs on exactly the declared gas; `MinGasUsage()` is the validation floor (DEX ops include `DexTokenCallGas`), `GasUsageEstimate()` is what wallets declare (10x the floor for contract calls/deploys, capped at `MaxGasUsage`). The web UI session idles out after 30 min (`POST /api/logout` ends it). Signed RPC requests carry a replay guard (time + nonce, `common.NewRPCGuard`) between the request and the signature; the node accepts each guard once, within 60 s of its clock — build requests only through `wallet.SignRPCRequest`. DEX buy/sell orders may carry a signed coin limit (`transactionsDefinition.DexOrderOptData`, OptData 16 bytes); an order whose limit the trade would break is skipped (fee paid), not a block error.
 
 Recovery phrases — exactly which flows produce one:
 - **CLI generator** (`go run cmd/generateNewWallet/main.go`): creates a wallet **from** a fresh 24-word BIP39 phrase (shown once, three words typed back to confirm), and restores a wallet from an existing phrase. The phrase is read without echo and stored encrypted in the wallet file.

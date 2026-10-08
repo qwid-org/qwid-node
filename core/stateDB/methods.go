@@ -33,6 +33,10 @@ type StateAccount struct {
 	accessAddrs         map[[common.AddressLength]byte]bool                 // transient, EIP-2929 warm addresses
 	accessSlots         map[[common.AddressLength]byte]map[common.Hash]bool // transient, EIP-2929 warm slots
 	refund              uint64                                              // transient
+	// originStorage holds each slot's value at the start of the transaction,
+	// recorded on its first write: GetCommittedState must answer it for the
+	// SSTORE gas rules of EIP-2200/3529 (S6-06).
+	originStorage map[[common.AddressLength]byte]map[common.Hash]common.Hash // transient
 	HeightToSnapShotNum map[int64]int                                       `json:"HeightToSnapShotNum"` // suppose int should be replaced by int64
 	ContractsByHeight   map[int64][][common.AddressLength]byte              `json:"contractsByHeight"`
 	// changedSinceStore is true when the persistable EVM state may have changed
@@ -117,6 +121,9 @@ func (sa *StateAccount) CreateAccount(a common.Address) {
 		TransactionsSender:    make([]common.Hash, 0),
 		TransactionsRecipient: make([]common.Hash, 0),
 	}
+	prev, existed := sa.Accounts[a.ByteValue]
+	sa.journal = append(sa.journal, createAccountChange{addr: a.ByteValue, prev: prev, existed: existed})
+	sa.SnapShotNum = len(sa.journal)
 	(*sa).Accounts[a.ByteValue] = acc
 }
 
@@ -195,6 +202,9 @@ func (sa *StateAccount) GetNonce(a common.Address) uint64 {
 	return sa.Nonces[a.ByteValue]
 }
 func (sa *StateAccount) SetNonce(a common.Address, n uint64) {
+	prev, existed := sa.Nonces[a.ByteValue]
+	sa.journal = append(sa.journal, nonceChange{addr: a.ByteValue, prev: prev, existed: existed})
+	sa.SnapShotNum = len(sa.journal)
 	(*sa).Nonces[a.ByteValue] = n
 }
 
@@ -207,6 +217,9 @@ func (sa *StateAccount) GetCode(a common.Address) []byte {
 }
 
 func (sa *StateAccount) SetCode(a common.Address, c []byte) {
+	prevCode, existed := sa.Codes[a.ByteValue]
+	sa.journal = append(sa.journal, codeChange{addr: a.ByteValue, prevCode: prevCode, prevHash: sa.CodeHashes[a.ByteValue], existed: existed})
+	sa.SnapShotNum = len(sa.journal)
 	(*sa).Codes[a.ByteValue] = c
 	(*sa).CodeHashes[a.ByteValue] = crypto.Keccak256Hash(c)
 }
@@ -229,12 +242,16 @@ func (sa *StateAccount) GetRefund() uint64 {
 	return sa.refund
 }
 
+// GetCommittedState is the slot's value at the start of the transaction
+// (S6-06). It used to return the current value, which priced SSTORE unlike
+// Ethereum (EIP-2200/3529).
 func (sa *StateAccount) GetCommittedState(a common.Address, h common.Hash) common.Hash {
-	s, ok := sa.StatesHashes[a.ByteValue]
-	if ok {
-		return s[h]
+	if m, ok := sa.originStorage[a.ByteValue]; ok {
+		if v, ok := m[h]; ok {
+			return v
+		}
 	}
-	return common.Hash{}
+	return sa.GetState(a, h)
 }
 func (sa *StateAccount) GetState(a common.Address, h common.Hash) common.Hash {
 	s, ok := sa.StatesHashes[a.ByteValue]
@@ -250,6 +267,17 @@ func (sa *StateAccount) SetState(a common.Address, h common.Hash, h2 common.Hash
 		sa.StatesHashes[a.ByteValue] = m
 	}
 	prev, existed := m[h]
+	if sa.originStorage == nil {
+		sa.originStorage = map[[common.AddressLength]byte]map[common.Hash]common.Hash{}
+	}
+	origin, ok := sa.originStorage[a.ByteValue]
+	if !ok {
+		origin = map[common.Hash]common.Hash{}
+		sa.originStorage[a.ByteValue] = origin
+	}
+	if _, recorded := origin[h]; !recorded {
+		origin[h] = prev
+	}
 	sa.journal = append(sa.journal, slotChange{addr: a.ByteValue, key: h, prev: prev, existed: existed})
 	sa.SnapShotNum = len(sa.journal)
 	m[h] = h2
@@ -415,6 +443,23 @@ func (sa *StateAccount) ResetTransient() {
 	sa.accessAddrs = map[[common.AddressLength]byte]bool{}
 	sa.accessSlots = map[[common.AddressLength]byte]map[common.Hash]bool{}
 	sa.refund = 0
+	sa.originStorage = nil
+}
+
+// FinaliseTx applies what a successful transaction leaves for its end
+// (S6-06): an account that self-destructed loses its code, storage and nonce.
+// SELFDESTRUCT used to move the balance and nothing else, so the contract kept
+// running. Call it only after the transaction succeeded; a reverted one has
+// already unmarked its self-destructs through the journal.
+func (sa *StateAccount) FinaliseTx() {
+	for addr := range sa.suicided {
+		delete(sa.Codes, addr)
+		delete(sa.CodeHashes, addr)
+		delete(sa.StatesHashes, addr)
+		delete(sa.Nonces, addr)
+		delete(sa.Accounts, addr)
+	}
+	sa.suicided = map[[common.AddressLength]byte]bool{}
 }
 func (sa *StateAccount) AddPreimage(h common.Hash, b []byte) {
 	(*sa).States[h] = b

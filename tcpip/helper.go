@@ -236,6 +236,7 @@ func MaxMessageSizeForTopic(topic [2]byte) int32 {
 type rateWindow struct {
 	windowStart int64 // unix seconds
 	count       int
+	penalised   bool // an excess in this window has already cost trust
 }
 
 // msgRateKey buckets a peer's message budget by IP *and* traffic class, so one
@@ -281,6 +282,7 @@ func allowInWindow(w *rateWindow, now int64, limit int, windowSecs int64) bool {
 	if now-w.windowStart >= windowSecs {
 		w.windowStart = now
 		w.count = 0
+		w.penalised = false
 	}
 	w.count++
 	return w.count <= limit
@@ -312,9 +314,21 @@ func AllowMessageFromIP(ip [4]byte) bool {
 // in its own class) while guaranteeing that best-effort traffic cannot starve
 // the path sync actually depends on.
 func AllowMessageFromIPForHead(ip [4]byte, head [2]byte) bool {
+	allowed, _ := CheckMessageRate(ip, head)
+	return allowed
+}
+
+// CheckMessageRate is AllowMessageFromIPForHead that also says whether a
+// refused message should cost the sender trust: only the first excess in a
+// window does. Every message over the limit used to count as a violation, so
+// a single burst - the TCP backlog a peer's 'hi' broadcasts pile into while a
+// link is down, delivered at once when it comes back - banned honest peers
+// (audit F3-05). Excess messages are still dropped; a sustained flood still
+// earns a violation per window, faster than violations are forgiven.
+func CheckMessageRate(ip [4]byte, head [2]byte) (allowed, penalise bool) {
 	ip = canonicalIP(ip) // rate limits are per transport source, tags may be handles
 	if isWhitelisted(ip) {
-		return true
+		return true, false
 	}
 	class := msgClassGossip
 	if syncCriticalHeads[head] {
@@ -329,7 +343,12 @@ func AllowMessageFromIPForHead(ip [4]byte, head [2]byte) bool {
 		w = &rateWindow{windowStart: now}
 		msgRate[key] = w
 	}
-	return allowInWindow(w, now, common.MessageRateLimit, common.MessageRateWindowSeconds)
+	if allowInWindow(w, now, common.MessageRateLimit, common.MessageRateWindowSeconds) {
+		return true, false
+	}
+	penalise = !w.penalised
+	w.penalised = true
+	return false, penalise
 }
 
 // AllowConnectionFromIP reports whether ip may make another connection attempt

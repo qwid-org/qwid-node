@@ -640,7 +640,11 @@ func StartNewConnection(ip [4]byte, receiveChan chan []byte, topic [2]byte) {
 				if len(m) >= 2 {
 					copy(head[:], m[:2])
 				}
-				if !AllowMessageFromIPForHead(ip, head) {
+				if allowed, penalise := CheckMessageRate(ip, head); !allowed {
+					// Excess past the first in this window is dropped quietly.
+					if !penalise {
+						continue
+					}
 					logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", ip, string(head[:]))
 					PeersMutex.Lock()
 					ban := ReduceTrustRegisterPeer(ip)

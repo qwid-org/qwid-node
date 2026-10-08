@@ -799,23 +799,34 @@ type Rules struct {
 //	}
 //}
 
-// Rules ensures c's ChainID is not nil.
+// Rules are the fork rules of the QWID EVM: every fork through the Merge.
+//
+// The interpreter runs the Merge instruction set (blocks.evaluate uses
+// GetGenericJumpTable), whose gas functions are those of Berlin and London.
+// Rules used to report every pre-Merge fork as OFF, so the code paths that
+// consult them disagreed with the instruction set (S6-06): create() did not
+// warm the new contract's address, and its first SSTORE hit the EIP-2929
+// "impossible case" panic - any constructor that wrote storage stalled block
+// application; new contracts started at nonce 0, CALL forwarded all gas
+// instead of 63/64, the code-size and 0xEF limits were off, and only the
+// Homestead precompiles existed. Shanghai and later are not in the
+// instruction set and stay off.
 func (c *ChainConfig) Rules(num *big.Int, isMerge bool) Rules {
 
 	chainID := new(big.Int).SetInt64(int64(common.GetChainID()))
 
 	return Rules{
 		ChainID:          new(big.Int).Set(chainID),
-		IsHomestead:      false,
-		IsEIP150:         false,
-		IsEIP155:         false,
-		IsEIP158:         false,
-		IsByzantium:      false,
-		IsConstantinople: false,
-		IsPetersburg:     false,
-		IsIstanbul:       false,
-		IsBerlin:         false,
-		IsLondon:         false,
+		IsHomestead:      true,
+		IsEIP150:         true,
+		IsEIP155:         true,
+		IsEIP158:         true,
+		IsByzantium:      true,
+		IsConstantinople: true,
+		IsPetersburg:     true,
+		IsIstanbul:       true,
+		IsBerlin:         true,
+		IsLondon:         true,
 		IsMerge:          true,
 		IsShanghai:       false,
 		isCancun:         false,

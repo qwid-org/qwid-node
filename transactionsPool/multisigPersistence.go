@@ -38,6 +38,7 @@ func MultiSignPoolKeyFor(tx transactionsDefinition.Transaction) common.Hash {
 func AddMultiSignTransaction(tx transactionsDefinition.Transaction) bool {
 	ok := PoolTxMultiSign.AddTransaction(tx, MultiSignPoolKeyFor(tx))
 	if ok {
+		journalPendingChange(journalMultiSig, journalAdded, tx)
 		if err := tx.StoreToDBPoolTx(common.MultiSignPoolDBPrefix[:]); err != nil {
 			logger.GetLogger().Println("could not persist multisig transaction", err)
 		}
@@ -48,6 +49,9 @@ func AddMultiSignTransaction(tx transactionsDefinition.Transaction) bool {
 // RemoveMultiSignTransaction removes a transaction from the multisig pool and
 // the database, used on settlement, expiry and owner-authorized cancellation.
 func RemoveMultiSignTransaction(hash []byte) {
+	if tx, ok := PoolTxMultiSign.GetTransactionByHash(hash); ok {
+		journalPendingChange(journalMultiSig, journalRemoved, tx)
+	}
 	PoolTxMultiSign.RemoveTransactionByHash(hash)
 	if err := transactionsDefinition.RemoveTransactionFromDBbyHash(common.MultiSignPoolDBPrefix[:], hash); err != nil {
 		logger.GetLogger().Println("could not delete persisted multisig transaction", err)
@@ -74,35 +78,17 @@ func LoadMultiSignPoolFromDB() error {
 	}
 	loaded := 0
 	for i, bt := range values {
-		mt := &transactionsDefinition.Transaction{}
-		tx, rest, err := mt.GetFromBytes(bt)
-		if err != nil {
-			logger.GetLogger().Println("could not decode persisted multisig transaction", err)
+		// Same check as the escrow loader, including the held main transaction
+		// whose Height was reset at inclusion (F3-08).
+		tx, verdict, why := checkPersistedPendingTx(keys[i], bt, len(common.MultiSignPoolDBPrefix), verifyPersistedMultiSign)
+		switch verdict {
+		case pendingEntryDrop:
+			logger.GetLogger().Println("persisted multisig transaction dropped:", why)
 			_ = database.MainDB.Delete(keys[i])
 			continue
-		}
-		if len(rest) != 0 {
-			logger.GetLogger().Println("persisted multisig transaction has trailing bytes")
-			_ = database.MainDB.Delete(keys[i])
-			continue
-		}
-		if err := tx.CalcHashAndSet(); err != nil || len(keys[i]) != len(common.MultiSignPoolDBPrefix)+common.HashLength ||
-			!bytes.Equal(keys[i][len(common.MultiSignPoolDBPrefix):], tx.GetHash().GetBytes()) {
-			logger.GetLogger().Println("persisted multisig transaction hash does not match database key")
-			_ = database.MainDB.Delete(keys[i])
-			continue
-		}
-		if !verifyPersistedMultiSign(&tx) {
-			// QUARANTINE, do not delete. A signature that fails to verify here
-			// is not necessarily corrupt: after a voted scheme replacement every
-			// entry signed under the superseded scheme fails verification under
-			// the now-current scheme, and deleting it permanently erased pending
-			// settlements that still-running nodes go on to perform — a silent,
-			// unrecoverable balance divergence (QWID-2026-36). Leaving it in the
-			// pool DB unloaded preserves it until a restart with the correct
-			// scheme installed can verify and load it; malformed entries
-			// (decode/hash/trailing failures above) are still deleted.
-			logger.GetLogger().Println("persisted multisig transaction signature did not verify under the current scheme; quarantining (kept, not loaded)")
+		case pendingEntryQuarantine:
+			// Kept, not loaded, as in LoadEscrowPoolFromDB (QWID-2026-36).
+			logger.GetLogger().Println("persisted multisig transaction quarantined (kept, not loaded):", why)
 			continue
 		}
 		PoolTxMultiSign.AddTransaction(tx, MultiSignPoolKeyFor(tx))

@@ -228,8 +228,10 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	// already confirmed it. Without this, a node with a single peer crawls one
 	// bucket per round toward a height its operator knows to be real, logging
 	// "not confirmed by enough peers" the whole way. This only lifts the rate
-	// limit: every block is still fully verified, so a lying peer gains nothing
-	// but the ability to serve us the chain faster.
+	// limit: every block is still verified before it is applied (header,
+	// state root, every transaction signature), and a rewind happens only to
+	// the ancestor of a verified competing block (S2-01) - a lying peer can
+	// waste our time, not feed us an invalid chain.
 	if claimedHeight <= common.CurrentHeightOfNetwork {
 		return true, claimedHeight
 	}
@@ -241,8 +243,9 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 	// (two nodes: exactly one peer) a fixed quorum can never be met, so a
 	// lagging node crawled one bucket per round toward a height its only peer
 	// kept honestly reporting, and any hiccup in 'hi' delivery turned the crawl
-	// into a full stall. Blocks are fully verified regardless; this quorum only
-	// rate-limits how fast we ask.
+	// into a full stall. Blocks are verified before they are applied and
+	// rewinds need a verified competing block regardless (S2-01, S2-11); this
+	// quorum only rate-limits how fast we ask.
 	required := common.MinPeersForLargeSync
 	if peers := syncPeerCount(); peers < required {
 		required = peers
@@ -685,13 +688,16 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 		}
 		hmax := common.GetHeightMax()
+		forkAnswer := false
 		if len(indices) > 0 && len(indices) == len(blcks) {
 			first, last := indices[0], indices[0]
 			for _, i := range indices {
 				first, last = min(first, i), max(last, i)
 			}
 			// S2-01: act only on the answer to a request we sent this peer.
-			if !takeHeaderRequest(addr, first, last) {
+			var ok bool
+			ok, forkAnswer = takeHeaderRequest(addr, first, last)
+			if !ok {
 				logger.GetLogger().Printf("ignoring unsolicited sh from %s (heights %d..%d)", tcpip.PeerLabel(addr), first, last)
 				return
 			}
@@ -705,7 +711,11 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 			return
 		}
-		if indices[len(indices)-1] <= h {
+		// The answer to a fork-resolution request lies below our tip by design:
+		// it is how the fork point is located (audit F3-03). Such a request is
+		// sent only after this peer served blocks above our height, so letting
+		// it through does not trade our chain for a shorter one.
+		if indices[len(indices)-1] <= h && !forkAnswer {
 			logger.GetLogger().Println("shorter other chain")
 			// Peer claimed higher but sent lower blocks - suspicious
 			if !common.IsBehindNetwork() {
@@ -739,6 +749,12 @@ func OnMessage(addr [4]byte, m []byte) {
 		// at all. It stays at h when nothing new is complete.
 		completeUpTo := h
 		merkleTries := map[int64]*transactionsPool.MerkleTree{}
+		// One deferred sweep instead of a defer per verified block (S2-11).
+		defer func() {
+			for _, mt := range merkleTries {
+				mt.Destroy()
+			}
+		}()
 
 		// First pass, cheap hash lookups only: detect a fork against the part of
 		// the batch we already have, and take a census of the transactions we are
@@ -778,7 +794,7 @@ func OnMessage(addr [4]byte, m []byte) {
 					from := max(index-1-common.NumberOfHashesInBucket, 0)
 					logger.GetLogger().Printf("competing block %d from %s does not link to our block %d - asking for headers from %d",
 						index, tcpip.PeerLabel(addr), index-1, from)
-					sendGetHeadersRange(addr, from, h)
+					sendForkHeaderRequest(addr, from, h)
 				default:
 					logger.GetLogger().Printf("competing block %d from %s fails verification - not rewinding", index, tcpip.PeerLabel(addr))
 					tcpip.ReduceAndCheckIfBanIP(addr)
@@ -915,8 +931,8 @@ func OnMessage(addr [4]byte, m []byte) {
 			verifyStart := time.Now()
 			merkleTrie, err := blocks.CheckBaseBlock(block, oldBlock, false)
 			timing.verify += time.Since(verifyStart)
-			defer merkleTrie.Destroy()
 			if err != nil {
+				merkleTrie.Destroy()
 				logger.GetLogger().Printf("ERROR: Base block verification failed for block %d: %v", index, err)
 				// A block verified here may depend on state that an earlier block of
 				// this same batch only writes when it is applied - a validator pubkey
@@ -937,7 +953,7 @@ func OnMessage(addr [4]byte, m []byte) {
 				if !parentFromPeer && !bytes.Equal(block.GetHeader().PreviousHash.GetBytes(), oldBlock.BlockHash.GetBytes()) {
 					from := max(h-common.NumberOfHashesInBucket, 0)
 					logger.GetLogger().Printf("block %d does not link to our tip %d - asking %s for headers from %d", index, index-1, tcpip.PeerLabel(addr), from)
-					sendGetHeadersRange(addr, from, index)
+					sendForkHeaderRequest(addr, from, index)
 				} else {
 					tcpip.ReduceAndCheckIfBanIP(addr)
 				}

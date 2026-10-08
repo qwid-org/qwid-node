@@ -276,26 +276,12 @@ func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount in
 	if n > 0 && n < 256 {
 		// If the sender intends to be an operator, verify both pubkeys are registered
 
-		if operational && amount > 0 && !common.IsSyncing.Load() {
-			senderAddr := tx.GetSenderAddress()
-			addresses, err := pubkeys.LoadAddresses(senderAddr)
-			if err != nil {
-				logger.GetLogger().Println("operator must have registered pubkeys: CheckStakingTransaction")
-				return false
-			}
-			hasPrimary := false
-			hasSecondary := false
-			for _, addr := range addresses {
-				if addr.Primary {
-					hasPrimary = true
-				} else {
-					hasSecondary = true
-				}
-			}
-			if !hasPrimary || !hasSecondary {
-				logger.GetLogger().Println("operator must have both primary and secondary pubkeys registered: CheckStakingTransaction")
-				return false
-			}
+		// Keys as of the parent block (S3-06): the check and apply passes see
+		// different live registries (this block's own registrations land in
+		// between), and the check used to be skipped altogether while syncing.
+		if operational && amount > 0 && !pubkeys.HasOperatorKeysAsOf(tx.GetSenderAddress(), block.GetHeader().Height-1) {
+			logger.GetLogger().Println("operator must have both primary and secondary pubkeys registered: CheckStakingTransaction")
+			return false
 		}
 		if tx.GetLockedAmount() > 0 {
 

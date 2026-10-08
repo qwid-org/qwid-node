@@ -50,17 +50,17 @@ func newTestWallet(t *testing.T, number uint8) *wallet.Wallet {
 	return &w
 }
 
-// signRequest is byte-for-byte what cmd/webui/handlers.SignMessage does for an
-// operation that needs verification: length-prefix the line, sign that, append
-// the signature.
+// signRequest is byte-for-byte what wallet.SignRPCRequest (behind every
+// client's SignMessage) does for an operation that needs verification:
+// length-prefix the line, add a replay guard, sign both, append the signature.
 func signRequest(t *testing.T, w *wallet.Wallet, line []byte, primary bool) []byte {
 	t.Helper()
-	framed := common.BytesToLenAndBytes(line)
-	sign, err := w.Sign(framed, primary)
+	msg := append(common.BytesToLenAndBytes(line), common.NewRPCGuard()...)
+	sign, err := w.Sign(msg, primary)
 	if err != nil {
 		t.Fatalf("signing failed: %v", err)
 	}
-	return append(framed, sign.GetBytes()...)
+	return append(msg, sign.GetBytes()...)
 }
 
 // localCall is a request arriving on the loopback RPC socket, the only place

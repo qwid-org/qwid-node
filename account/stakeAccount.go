@@ -3,6 +3,7 @@ package account
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/qwid-org/qwid-node/common"
@@ -23,6 +24,11 @@ type StakingAccount struct {
 	OperationalSince int64                     `json:"operational_since,omitempty"`
 	LastStakeHeight  int64                     `json:"last_stake_height,omitempty"`
 	StakingDetails   map[int64][]StakingDetail `json:"staking_details,omitempty"` // block number as key of map
+	// RandCommit is the RANDAO commitment this operator made in the last block
+	// it produced, at height RandCommitHeight (0: none). Its next block must
+	// reveal the seed behind it (S4-06, blocks/randao.go).
+	RandCommit       [common.HashLength]byte `json:"rand_commit,omitempty"`
+	RandCommitHeight int64                   `json:"rand_commit_height,omitempty"`
 }
 
 type StakingDetail struct {
@@ -363,8 +369,16 @@ func (sa StakingAccount) Marshal() []byte {
 	// StakingDetails count
 	buffer.Write(common.GetByteInt64(int64(len(sa.StakingDetails))))
 
-	// StakingDetails
-	for key, details := range sa.StakingDetails {
+	// StakingDetails, in ascending key order: ranging over the map wrote a
+	// different byte order every time, so two nodes' snapshots of the same
+	// state never compared equal (S4-10).
+	keys := make([]int64, 0, len(sa.StakingDetails))
+	for key := range sa.StakingDetails {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	for _, key := range keys {
+		details := sa.StakingDetails[key]
 		buffer.Write(common.GetByteInt64(key))
 		buffer.Write(common.GetByteInt64(int64(len(details))))
 
@@ -380,6 +394,9 @@ func (sa StakingAccount) Marshal() []byte {
 	// Unstake, so it is consensus data and has to round-trip. Appended last,
 	// for the same backward-compatible reason as OperationalSince.
 	buffer.Write(common.GetByteInt64(sa.LastStakeHeight))
+	// RANDAO commitment (S4-06), consensus data, appended last.
+	buffer.Write(sa.RandCommit[:])
+	buffer.Write(common.GetByteInt64(sa.RandCommitHeight))
 
 	return buffer.Bytes()
 }
@@ -469,6 +486,37 @@ func (sa *StakingAccount) Unmarshal(data []byte) error {
 	if buffer.Len() >= 8 {
 		sa.LastStakeHeight = common.GetInt64FromByte(buffer.Next(8))
 	}
+	if buffer.Len() >= common.HashLength+8 {
+		copy(sa.RandCommit[:], buffer.Next(common.HashLength))
+		sa.RandCommitHeight = common.GetInt64FromByte(buffer.Next(8))
+	}
+	return nil
+}
+
+// GetRandCommit returns the RANDAO commitment (and its height, 0 for none) of
+// address's staking entry in delegated account n.
+func GetRandCommit(n int, address [common.AddressLength]byte) ([common.HashLength]byte, int64) {
+	StakingRWMutex.RLock()
+	defer StakingRWMutex.RUnlock()
+	sa, ok := StakingAccounts[n].AllStakingAccounts[address]
+	if !ok {
+		return [common.HashLength]byte{}, 0
+	}
+	return sa.RandCommit, sa.RandCommitHeight
+}
+
+// SetRandCommit records the RANDAO commitment address made in the block at
+// height, replacing the one that block revealed.
+func SetRandCommit(n int, address [common.AddressLength]byte, commit [common.HashLength]byte, height int64) error {
+	StakingRWMutex.Lock()
+	defer StakingRWMutex.Unlock()
+	sa, ok := StakingAccounts[n].AllStakingAccounts[address]
+	if !ok {
+		return fmt.Errorf("no staking entry for the block operator in delegated account %d", n)
+	}
+	sa.RandCommit = commit
+	sa.RandCommitHeight = height
+	StakingAccounts[n].AllStakingAccounts[address] = sa
 	return nil
 }
 

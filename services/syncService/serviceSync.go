@@ -244,11 +244,60 @@ func sendGetHeadersRange(addr [4]byte, bHeight, eHeight int64) {
 	if !allowHeaderRequest(addr) {
 		return
 	}
+	sendHeaderRequest(addr, bHeight, eHeight, false)
+}
+
+// Fork-resolution header requests have a limiter of their own. They used to
+// share allowHeaderRequest with the routine sync request, which every round
+// sends first - so the request for the earlier headers that locate the fork
+// point was always the one refused, and a node left on a minority branch
+// asked forever and never rejoined the network (audit F3-01).
+//
+// A request that reaches deeper than the previous one to the same peer is a
+// step of the walk back to the fork point and is never throttled: each answer
+// either shows the fork point or asks for the next 21 headers below. The 1 s
+// interval used to refuse the second step, the next routine batch restarted
+// the walk from the top, and a fork deeper than two steps (42 blocks) was
+// never resolved (audit F3-06). Repeats and shallower requests stay limited.
+type forkRequestMark struct {
+	at   time.Time
+	from int64
+}
+
+var (
+	lastForkHeaderRequest      = map[[4]byte]forkRequestMark{}
+	lastForkHeaderRequestMutex sync.Mutex
+)
+
+func allowForkHeaderRequest(addr [4]byte, from int64) bool {
+	lastForkHeaderRequestMutex.Lock()
+	defer lastForkHeaderRequestMutex.Unlock()
+	now := time.Now()
+	if m, ok := lastForkHeaderRequest[addr]; ok && now.Sub(m.at) < headerRequestMinInterval && from >= m.from {
+		return false
+	}
+	lastForkHeaderRequest[addr] = forkRequestMark{at: now, from: from}
+	return true
+}
+
+// sendForkHeaderRequest asks addr for the headers that locate a fork point.
+func sendForkHeaderRequest(addr [4]byte, bHeight, eHeight int64) {
+	if !allowForkHeaderRequest(addr, bHeight) {
+		return
+	}
+	sendHeaderRequest(addr, bHeight, eHeight, true)
+}
+
+func sendHeaderRequest(addr [4]byte, bHeight, eHeight int64, fork bool) {
 	if !Send(addr, generateSyncMsgGetHeadersRange(bHeight, eHeight)) {
 		logger.GetLogger().Println("could not send get headers")
 		return
 	}
-	recordHeaderRequest(addr, bHeight, eHeight)
+	if fork {
+		recordForkHeaderRequest(addr, bHeight, eHeight)
+	} else {
+		recordHeaderRequest(addr, bHeight, eHeight)
+	}
 }
 
 // Outstanding header requests, per peer. An "sh" batch is acted on only as the
@@ -257,6 +306,10 @@ func sendGetHeadersRange(addr [4]byte, bHeight, eHeight int64) {
 type headerRequest struct {
 	from, to int64
 	at       time.Time
+	// fork marks a request for headers below our tip that locate a fork
+	// point. Its answer lies entirely at or below our height, so it must not
+	// meet the "shorter other chain" rejection a routine batch does.
+	fork bool
 }
 
 const (
@@ -272,9 +325,17 @@ var (
 )
 
 func recordHeaderRequest(addr [4]byte, from, to int64) {
+	addHeaderRequest(addr, headerRequest{from: from, to: to, at: time.Now()})
+}
+
+func recordForkHeaderRequest(addr [4]byte, from, to int64) {
+	addHeaderRequest(addr, headerRequest{from: from, to: to, at: time.Now(), fork: true})
+}
+
+func addHeaderRequest(addr [4]byte, r headerRequest) {
 	pendingHeaderRequestsMutex.Lock()
 	defer pendingHeaderRequestsMutex.Unlock()
-	reqs := append(pendingHeaderRequests[addr], headerRequest{from: from, to: to, at: time.Now()})
+	reqs := append(pendingHeaderRequests[addr], r)
 	if len(reqs) > maxOutstandingHeaderRequests {
 		reqs = reqs[len(reqs)-maxOutstandingHeaderRequests:]
 	}
@@ -282,19 +343,29 @@ func recordHeaderRequest(addr [4]byte, from, to int64) {
 }
 
 // takeHeaderRequest reports whether a batch spanning [first, last] from addr
-// answers a live request, and consumes that request if so.
-func takeHeaderRequest(addr [4]byte, first, last int64) bool {
+// answers a live request, and consumes that request if so. fork reports that
+// the request consumed was a fork-resolution one; when both kinds match, the
+// fork request is taken, since only it lets a batch below our tip through.
+func takeHeaderRequest(addr [4]byte, first, last int64) (matched, fork bool) {
 	pendingHeaderRequestsMutex.Lock()
 	defer pendingHeaderRequestsMutex.Unlock()
 	now := time.Now()
-	kept := pendingHeaderRequests[addr][:0]
-	matched := false
-	for _, r := range pendingHeaderRequests[addr] {
-		if now.Sub(r.at) > headerRequestTTL {
+	pick := -1
+	for i, r := range pendingHeaderRequests[addr] {
+		if now.Sub(r.at) > headerRequestTTL || first < r.from || last > r.to {
 			continue
 		}
-		if !matched && first >= r.from && last <= r.to {
-			matched = true
+		if pick < 0 || (r.fork && !pendingHeaderRequests[addr][pick].fork) {
+			pick = i
+		}
+	}
+	kept := make([]headerRequest, 0, len(pendingHeaderRequests[addr]))
+	for i, r := range pendingHeaderRequests[addr] {
+		if i == pick {
+			matched, fork = true, r.fork
+			continue
+		}
+		if now.Sub(r.at) > headerRequestTTL {
 			continue
 		}
 		kept = append(kept, r)
@@ -304,7 +375,7 @@ func takeHeaderRequest(addr [4]byte, first, last int64) bool {
 	} else {
 		pendingHeaderRequests[addr] = kept
 	}
-	return matched
+	return matched, fork
 }
 
 func Send(addr [4]byte, nb []byte) bool {

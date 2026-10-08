@@ -104,3 +104,33 @@ func TestBannedTimeSecondsLengthened(t *testing.T) {
 		t.Fatalf("BannedTimeSeconds = %d, want 60", common.BannedTimeSeconds)
 	}
 }
+
+// Audit 2026-10-07 F3-05: a burst over the limit - the backlog of 'hi'
+// broadcasts a peer delivers when a broken link comes back - must cost the
+// sender one violation per window, not one per excess message, or a single
+// burst bans an honest peer.
+func TestRateExcessPenalisedOncePerWindow(t *testing.T) {
+	ip := [4]byte{7, 0, 0, 3}
+	head := [2]byte{'h', 'i'}
+	refused, penalties := 0, 0
+	// Real clock: at most one window boundary can fall inside the loop, so
+	// at most two penalties are legitimate.
+	for i := 0; i < 2*common.MessageRateLimit+50; i++ {
+		allowed, penalise := CheckMessageRate(ip, head)
+		if !allowed {
+			refused++
+		}
+		if penalise {
+			if allowed {
+				t.Fatal("an allowed message was penalised")
+			}
+			penalties++
+		}
+	}
+	if refused == 0 {
+		t.Fatal("the burst was never throttled")
+	}
+	if penalties < 1 || penalties > 2 {
+		t.Fatalf("%d penalties for one burst, want 1 (2 across a window boundary)", penalties)
+	}
+}

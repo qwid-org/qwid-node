@@ -10,6 +10,7 @@ import (
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 	"github.com/qwid-org/qwid-node/wallet"
 )
 
@@ -135,6 +136,11 @@ func checkMainChain() (int64, error) {
 			logger.GetLogger().Println("local chain tip inconsistent - rewinding from", height, "to", good)
 			ResetAccountsAndBlocksSync(good)
 			good = common.GetHeight()
+		} else {
+			// A block cut short by a crash may have changed the escrow and
+			// multisig pools without being stored (F3-07); a rewind does
+			// this itself.
+			transactionsPool.UndoPendingPoolsAbove(good)
 		}
 		if err := blocks.SetEncryptionFromBlock(good); err != nil {
 			logger.GetLogger().Println("cannot set encryption from block", good, ":", err)

@@ -63,8 +63,11 @@ func (db *BlockchainDB) InitPermanent(dbPath string) (*BlockchainDB, error) {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
-	// Create the database directory if it doesn't exist
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
+	// Create the database directory if it doesn't exist. Owner-only, like the
+	// wallet directories (S9-06): besides public chain data it holds the
+	// transaction pool and local state snapshots. An existing directory keeps
+	// its mode; readers (explorer, website) run as the node's user.
+	if err := os.MkdirAll(dbPath, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
@@ -106,7 +109,7 @@ func (db *BlockchainDB) InitReadOnly(dbPath string, secondaryPath string) (*Bloc
 	applyBloomAndCache(opts, readerBlockCacheBytes)
 
 	if secondaryPath != "" {
-		if err := os.MkdirAll(secondaryPath, 0755); err == nil {
+		if err := os.MkdirAll(secondaryPath, 0700); err == nil {
 			sdb, serr := gorocksdb.OpenDbAsSecondary(opts, dbPath, secondaryPath)
 			if serr == nil {
 				db.db = sdb

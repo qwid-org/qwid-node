@@ -57,34 +57,21 @@ func TestLoadFromDBPoolTxReturnsMatchingBody(t *testing.T) {
 // all of them from the pool in one pass, as it already does for unpayable
 // ones - otherwise a flood of them stalls production one block at a time.
 func TestCheckBlockTransfersPurgesAllInvalidStakingTransactions(t *testing.T) {
-	withBalanceTestDB(t)
-	sender := testAddress(0x71)
+	k := registeredStageBKey(t)
 	account.Accounts = account.AccountsType{AllAccounts: map[[common.AddressLength]byte]account.Account{
-		sender.ByteValue: {Address: sender.ByteValue, Balance: 1_000_000},
+		k.addr.ByteValue: {Address: k.addr.ByteValue, Balance: 1_000_000},
 	}}
 	for i := 0; i < 256; i++ {
 		account.StakingAccounts[i] = account.StakingAccountsType{AllStakingAccounts: map[[common.AddressLength]byte]account.StakingAccount{}}
 	}
-	hashes := []common.Hash{}
-	for i := byte(1); i <= 3; i++ {
-		tx := transferTx(t, sender, common.GetDelegatedAccountAddress(5), 0, common.Hash{}, i) // zero-amount "stake": invalid
-		if err := tx.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
-			t.Fatal(err)
-		}
-		transactionsPool.PoolsTx.AddTransaction(tx, tx.Hash)
-		hashes = append(hashes, tx.Hash)
+	last := parentAt(t, 9)
+	txs := []transactionsDefinition.Transaction{}
+	for i := int64(1); i <= 3; i++ {
+		// Signed, so it reaches the staking check: a zero-amount "stake" is invalid.
+		txs = append(txs, signedTx(t, k, common.GetDelegatedAccountAddress(5), 0, 9, i))
 	}
-	t.Cleanup(func() {
-		for _, h := range hashes {
-			transactionsPool.PoolsTx.RemoveTransactionByHash(h.GetBytes())
-		}
-	})
-	last := Block{BaseBlock: BaseBlock{BaseHeader: BaseHeader{Height: 9}, Supply: 1_000_000_000_000}}
-	blk := Block{
-		BaseBlock:          BaseBlock{BaseHeader: BaseHeader{Height: 10}, Supply: last.GetBlockSupply() + account.GetReward(last.GetBlockSupply())},
-		TransactionsHashes: hashes,
-	}
-	if _, _, err := CheckBlockTransfers(blk, last, nil, true); err == nil {
+	hashes := pooled(t, txs...)
+	if _, _, err := CheckBlockTransfers(childOf(last, hashes...), last, nil, true); err == nil {
 		t.Fatal("a block of invalid staking transactions was accepted")
 	}
 	for i, h := range hashes {

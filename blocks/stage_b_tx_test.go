@@ -225,27 +225,13 @@ func TestEscrowDelayCountsFromInclusion(t *testing.T) {
 // S4-01: a block may only include transactions whose Height lies in the
 // recent window; anything else is a replay or a forged exemption.
 func TestBlockRejectsTransactionOutsideHeightWindow(t *testing.T) {
-	withBalanceTestDB(t)
-	sender := testAddress(0x73)
-	account.Accounts = account.AccountsType{AllAccounts: map[[common.AddressLength]byte]account.Account{
-		sender.ByteValue: {Address: sender.ByteValue, Balance: 1_000_000_000},
-	}}
+	k := registeredStageBKey(t)
+	fund(k.addr)
 	const blockHeight = 100_000
+	last := parentAt(t, blockHeight-1)
 	check := func(txHeight int64) error {
-		tx := transferTx(t, sender, testAddress(0x74), 5, common.Hash{}, byte(txHeight%250))
-		tx.Height = txHeight
-		if err := tx.CalcHashAndSet(); err != nil {
-			t.Fatal(err)
-		}
-		if err := tx.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
-			t.Fatal(err)
-		}
-		last := Block{BaseBlock: BaseBlock{BaseHeader: BaseHeader{Height: blockHeight - 1}, Supply: 1_000_000_000_000}}
-		blk := Block{
-			BaseBlock:          BaseBlock{BaseHeader: BaseHeader{Height: blockHeight}, Supply: last.GetBlockSupply() + account.GetReward(last.GetBlockSupply())},
-			TransactionsHashes: []common.Hash{tx.Hash},
-		}
-		_, _, err := CheckBlockTransfers(blk, last, nil, true)
+		tx := signedTx(t, k, testAddress(0x74), 5, txHeight, txHeight)
+		_, _, err := CheckBlockTransfers(childOf(last, pooled(t, tx)...), last, nil, true)
 		return err
 	}
 	if err := check(blockHeight - 1); err != nil {

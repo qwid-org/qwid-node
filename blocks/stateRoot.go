@@ -1,10 +1,15 @@
 package blocks
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"hash"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
@@ -22,11 +27,18 @@ import (
 // out: they are bookkeeping, and staking details carry time.Now() values that
 // differ between nodes by design.
 func ComputeStateRoot() (common.Hash, error) {
+	return computeStateRoot(nil)
+}
+
+// computeStateRoot is ComputeStateRoot that also writes every hashed field,
+// one per line, to dump when it is not nil - the same walk, so a dump always
+// shows exactly what the root covers.
+func computeStateRoot(dump io.Writer) (common.Hash, error) {
 	h, err := blake2b.New256(nil)
 	if err != nil {
 		return common.Hash{}, err
 	}
-	w := rootWriter{h: h}
+	w := rootWriter{h: h, dump: dump}
 
 	w.section("accounts")
 	account.AccountsRWMutex.RLock()
@@ -64,6 +76,8 @@ func ComputeStateRoot() (common.Hash, error) {
 			w.bool(sa.OperationalAccount)
 			w.i64(sa.OperationalSince)
 			w.i64(sa.LastStakeHeight)
+			w.bytes(sa.RandCommit[:])
+			w.i64(sa.RandCommitHeight)
 		}
 	}
 	account.StakingRWMutex.RUnlock()
@@ -135,23 +149,88 @@ func VerifyStateRoot(block Block) error {
 	if err != nil {
 		return err
 	}
+	dumpStateIfAsked(block.GetHeader().Height, false)
 	if !bytes.Equal(ours.GetBytes(), block.GetHeader().StateRoot.GetBytes()) {
+		dumpStateIfAsked(block.GetHeader().Height, true)
 		return fmt.Errorf("block %d state root %x does not match our state %x", block.GetHeader().Height,
 			block.GetHeader().StateRoot.GetBytes()[:8], ours.GetBytes()[:8])
 	}
 	return nil
 }
 
+// State dumps for diagnosing a state root mismatch. On a mismatch the state
+// the block was checked against is written to the log directory as
+// state-<height>-mismatch.txt (once per height); with QWID_STATE_DUMP_DIR set,
+// the state before every verified block is written there as state-<height>.txt,
+// so a diverged node can be diffed against a healthy one at the same height.
+var (
+	dumpedMismatch   = map[int64]bool{}
+	dumpedMismatchMu sync.Mutex
+)
+
+func dumpStateIfAsked(height int64, mismatch bool) {
+	dir := os.Getenv("QWID_STATE_DUMP_DIR")
+	name := fmt.Sprintf("state-%d.txt", height)
+	if mismatch {
+		dumpedMismatchMu.Lock()
+		done := dumpedMismatch[height]
+		dumpedMismatch[height] = true
+		dumpedMismatchMu.Unlock()
+		if done {
+			return
+		}
+		if dir == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return
+			}
+			dir = filepath.Join(home, ".qwid", "logs")
+		}
+		name = fmt.Sprintf("state-%d-mismatch.txt", height)
+	} else if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	bw := bufio.NewWriter(f)
+	root, _ := computeStateRoot(bw)
+	fmt.Fprintf(bw, "root %x\n", root.GetBytes())
+	_ = bw.Flush()
+}
+
 // rootWriter writes length-delimited fields, so concatenations of different
-// fields can never produce the same byte stream.
-type rootWriter struct{ h hash.Hash }
+// fields can never produce the same byte stream. With dump set it also writes
+// each field as a text line.
+type rootWriter struct {
+	h    hash.Hash
+	dump io.Writer
+}
 
 func (w rootWriter) bytes(b []byte) {
 	w.h.Write(common.GetByteInt64(int64(len(b))))
 	w.h.Write(b)
+	if w.dump != nil {
+		fmt.Fprintf(w.dump, "b %x\n", b)
+	}
 }
-func (w rootWriter) i64(v int64)      { w.h.Write(common.GetByteInt64(v)) }
-func (w rootWriter) section(s string) { w.bytes([]byte(s)) }
+func (w rootWriter) i64(v int64) {
+	w.h.Write(common.GetByteInt64(v))
+	if w.dump != nil {
+		fmt.Fprintf(w.dump, "i %d\n", v)
+	}
+}
+func (w rootWriter) section(s string) {
+	if w.dump != nil {
+		fmt.Fprintf(w.dump, "## %s\n", s)
+	}
+	w.bytes([]byte(s))
+}
 func (w rootWriter) bool(v bool) {
 	if v {
 		w.i64(1)

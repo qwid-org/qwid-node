@@ -97,6 +97,9 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 		Action               string  `json:"action"`
 		Amount               float64 `json:"amount"`
 		UsePrimaryEncryption bool    `json:"usePrimaryEncryption"`
+		// Limit (QWD, optional, S7-07): most to pay for a buy, least to
+		// receive for a sell. The order is not executed beyond it.
+		Limit float64 `json:"limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		JsonError(w, "Invalid request body", http.StatusBadRequest)
@@ -122,6 +125,10 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	am := common.CoinToBaseUnits(req.Amount)
+	if req.Limit < 0 {
+		JsonError(w, "Limit must not be negative", http.StatusBadRequest)
+		return
+	}
 
 	sender := common.Address{}
 	sender.Init(append([]byte{0}, wl.MainAddress.GetBytes()...))
@@ -130,7 +137,7 @@ func TradeDex(w http.ResponseWriter, r *http.Request) {
 	txd := transactionsDefinition.TxData{
 		Recipient:                  ar,
 		Amount:                     am,
-		OptData:                    common.GetByteInt64(am),
+		OptData:                    transactionsDefinition.DexOrderOptData(am, common.CoinToBaseUnits(req.Limit)),
 		Pubkey:                     common.PubKey{},
 		LockedAmount:               0,
 		ReleasePerBlock:            0,

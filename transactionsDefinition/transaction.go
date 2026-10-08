@@ -389,22 +389,30 @@ const (
 
 // Verify checks an ordinary transaction (pool admission, gossip, blocks).
 func (tx *Transaction) Verify(sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
-	return tx.verify(txKindRegular, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+	return tx.verify(txKindRegular, sigName, sigName2, isPausedTmp, isPaused2Tmp, pubkeys.NoHeightLimit)
+}
+
+// VerifyAsOf is Verify against the key registry as it was after block asOf
+// (S3-06). Block application passes the parent's height together with the
+// parent's scheme config, so the verdict is the same on every node and in
+// every mode - live, syncing, or re-applying after a rewind.
+func (tx *Transaction) VerifyAsOf(sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool, asOf int64) bool {
+	return tx.verify(txKindRegular, sigName, sigName2, isPausedTmp, isPaused2Tmp, asOf)
 }
 
 // VerifyNonce checks a validator nonce message (also embedded in blocks as an
 // oracle proof): a zero-amount transaction to a delegated account 1..255,
 // exempt from gas.
 func (tx *Transaction) VerifyNonce(sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
-	return tx.verify(txKindNonce, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+	return tx.verify(txKindNonce, sigName, sigName2, isPausedTmp, isPaused2Tmp, pubkeys.NoHeightLimit)
 }
 
 // VerifyGenesis checks a transaction of the genesis block, exempt from gas.
 func (tx *Transaction) VerifyGenesis(sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
-	return tx.verify(txKindGenesis, sigName, sigName2, isPausedTmp, isPaused2Tmp)
+	return tx.verify(txKindGenesis, sigName, sigName2, isPausedTmp, isPaused2Tmp, pubkeys.NoHeightLimit)
 }
 
-func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool) bool {
+func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp, isPaused2Tmp bool, asOf int64) bool {
 	recipientAddress := tx.TxData.Recipient
 	n, err := account.IntDelegatedAccountFromAddress(recipientAddress)
 	switch kind {
@@ -453,22 +461,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	}
 	// If operator staking transaction, verify both pubkeys are registered
 	if n > 0 && n < 256 && len(tx.TxData.OptData) > 0 && tx.GetData().Amount > 0 {
-		senderAddr := tx.GetSenderAddress()
-		addresses, addrErr := pubkeys.LoadAddresses(senderAddr)
-		if addrErr != nil {
-			logger.GetLogger().Println("operator must have registered pubkeys: Verify")
-			return false
-		}
-		hasPrimary := false
-		hasSecondary := false
-		for _, addr := range addresses {
-			if addr.Primary {
-				hasPrimary = true
-			} else {
-				hasSecondary = true
-			}
-		}
-		if !hasPrimary || !hasSecondary {
+		if !pubkeys.HasOperatorKeysAsOf(tx.GetSenderAddress(), asOf) {
 			logger.GetLogger().Println("operator must have both primary and secondary pubkeys registered: Verify")
 			return false
 		}
@@ -544,8 +537,8 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	// because admission rules can drift and the executor must never rely on
 	// them (QWID-2026-13).
 	if n, derr := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient); derr == nil && n > 512 {
-		if len(tx.TxData.OptData) != 8 {
-			logger.GetLogger().Printf("DEX transaction opt data must be exactly 8 bytes, got %d", len(tx.TxData.OptData))
+		if _, _, err := ParseDexOptData(tx.TxData.OptData, n-512); err != nil {
+			logger.GetLogger().Println(err)
 			return false
 		}
 	}
@@ -588,7 +581,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			// and no length-matched lookup is possible. Best effort: take the
 			// newest key registered in this slot.
 			var err error
-			pkp, err = pubkeys.LoadPubKeyWithPrimary(senderAddr, primary)
+			pkp, err = pubkeys.LoadPubKeyWithPrimaryAsOf(senderAddr, primary, asOf)
 			if err != nil {
 				logger.GetLogger().Println("Verify: cannot load sender pubkey from DB:", err)
 				logger.GetLogger().Println("  Sender address:", senderAddr.GetHex())
@@ -597,7 +590,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			}
 		} else {
 			var err error
-			pkp, err = pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen)
+			pkp, err = pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, primary, expLen, asOf)
 			if err != nil {
 				// Deliberately NOT falling back to "any key in this slot". Key
 				// length identifies the scheme here, so a key of a different
@@ -675,7 +668,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// transaction that carried a key.
 		bootstrapAttempt := false
 		bootstrapSpare := false
-		if stored, lerr := pubkeys.LoadPubKey(pkAddr.GetBytes()); lerr == nil {
+		if stored, lerr := pubkeys.LoadPubKeyAsOf(pkAddr.GetBytes(), asOf); lerr == nil {
 			addressMatch = bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes())
 			resolvedFromRegistry = true
 		}
@@ -699,7 +692,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			authorised := false
 			authorisedByDerivingKey := false
 			if expLen, lerr := oqs.PubKeyLength(signingScheme); lerr == nil {
-				if existing, aerr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen); aerr == nil {
+				if existing, aerr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, primary, expLen, asOf); aerr == nil {
 					// Verify the signature against the REGISTERED key, not the
 					// enclosed one.
 					pkb = existing.GetBytes()
@@ -725,7 +718,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			// pause (enforced for block producers by the pause gate in
 			// blocks.CheckBaseBlock) gain no new exposure.
 			if authorised && authorisedByDerivingKey && tx.isPureRegistration() {
-				if _, serr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, pkPrimary, len(tx.TxData.GetPubKey().GetBytes())); serr != nil {
+				if _, serr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, pkPrimary, len(tx.TxData.GetPubKey().GetBytes()), asOf); serr != nil {
 					if primary {
 						effPaused = false
 					} else {
@@ -823,7 +816,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// "LengthPublicKey: 66576 len(pubkey): 1793" — a signature made with the
 		// spare checked against the primary's key.
 		if expLen, lerr := oqs.PubKeyLength(signingSchemeName(primary, sigName, sigName2)); lerr == nil && len(pkb) != expLen {
-			signer, serr := pubkeys.LoadPubKeyWithPrimaryOfLength(senderAddr, primary, expLen)
+			signer, serr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, primary, expLen, asOf)
 			if serr != nil {
 				logger.GetLogger().Printf("  cannot verify: the transaction is signed with %s but sender %s has no registered %s key (%d bytes): %v",
 					signingSchemeName(primary, sigName, sigName2), senderAddr.GetHex(),

@@ -370,6 +370,18 @@ func (tp *TransactionPool) BanTransactionByHash(hash []byte) {
 	}
 }
 
+// BlockTransactionByHash bans hash outright: AddTransaction refuses it from
+// now on. BanTransactionByHash counts encounters and refuses only past
+// MaxNumberOfTxBans, which suits a transaction that may become valid later
+// (an unpayable one, say); one that made its block invalid never will.
+func (tp *TransactionPool) BlockTransactionByHash(hash []byte) {
+	h := [common.HashLength]byte{}
+	copy(h[:], hash)
+	tp.rwmutex.Lock()
+	defer tp.rwmutex.Unlock()
+	tp.bannedTransactions[h] = common.NumberWhenWillBan
+}
+
 func (tp *TransactionPool) TransactionExists(hash []byte) bool {
 	h := [common.HashLength]byte{}
 	copy(h[:], hash)

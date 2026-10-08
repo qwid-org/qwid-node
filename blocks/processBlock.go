@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"math/big"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/qwid-org/qwid-node/account"
@@ -54,8 +56,8 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 }
 
 // VerifyStakeDependent runs the block checks that depend on the staking snapshot
-// — the top-128 producer eligibility, the oracle 2/3-stake thresholds and the
-// signature-scheme vote (S4-05). It must
+// — the top-128 producer eligibility, the price oracle 2/3-stake threshold, the
+// RANDAO reveal (S4-06) and the signature-scheme vote (S4-05). It must
 // be called at block-application time, when the in-memory staking state reflects
 // height-1 (the block's parent). Running these inside CheckBaseBlock was wrong for
 // batched sync, where every batched block was verified against the same start-of-
@@ -75,11 +77,16 @@ func VerifyStakeDependent(newBlock, lastBlock Block) error {
 		return fmt.Errorf("scheme vote fails: %w", err)
 	}
 	totalStaked := account.GetStakedInAllDelegatedAccounts()
-	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData) {
+	// S4-06: a price that cannot be established carries the parent's forward,
+	// so a producer embedding too few proofs can at most freeze it, never
+	// publish 0.
+	if !oracles.VerifyPriceOracle(blockHeight, totalStaked, newBlock.BaseBlock.PriceOracle, newBlock.BaseBlock.PriceOracleData, lastBlock.BaseBlock.PriceOracle) {
 		return fmt.Errorf("price oracle check fails")
 	}
-	if !oracles.VerifyRandOracle(blockHeight, totalStaked, newBlock.BaseBlock.RandOracle, newBlock.BaseBlock.RandOracleData) {
-		return fmt.Errorf("rand oracle check fails")
+	// RAND comes from RANDAO (S4-06): the reveal must open the operator's
+	// commitment held in the parent state.
+	if err := verifyRandaoReveal(newBlock); err != nil {
+		return fmt.Errorf("rand oracle check fails: %w", err)
 	}
 	return nil
 }
@@ -158,6 +165,10 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 	}
 	if !bytes.Equal(bodyHash.GetBytes(), newBlock.GetHeader().BodyHash.GetBytes()) {
 		return nil, fmt.Errorf("block body does not match the signed body hash")
+	}
+	// S4-06: RAND is the RANDAO mix of this block, built on the parent's.
+	if err := verifyRandaoStateless(newBlock, lastBlock); err != nil {
+		return nil, err
 	}
 	rootMerkleTrie := newBlock.GetHeader().RootMerkleTree
 	txs := newBlock.TransactionsHashes
@@ -341,6 +352,8 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	}
 	logger.GetLogger().Printf("CheckBlockTransfers[%s]: block %d has %d transactions, lastSupply=%d",
 		pass, block.GetHeader().Height, len(txs), lastSupply)
+	// Phase 1: load every transaction of the block.
+	loaded := make([]transactionsDefinition.Transaction, 0, len(txs))
 	for i, tx := range txs {
 		hash := tx.GetBytes()
 		poolTx, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], hash)
@@ -365,15 +378,14 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 						return 0, 0, err
 					}
 				}
-				// Validate recovered bad transaction — but only on the LIVE
-				// path. During sync this verification runs under the CURRENT
-				// height's scheme config and key registry while the transaction
-				// is historical (e.g. a registration authorized by a key whose
-				// own registration this node has not applied yet), so it can
-				// reject transactions consensus already sealed; the block's
-				// signed merkle root is the integrity gate there
-				// (incident 2026-09-08).
-				if !common.IsSyncing.Load() && !poolTx.Verify(common.SigName(), common.SigName2(), common.IsPaused(), common.IsPaused2()) {
+				// Validate the recovered bad transaction against the scheme
+				// config and key registry in force for THIS block - the
+				// parent's (S3-06). This used to run under the node's current
+				// config and registry, which differ from the block's while
+				// syncing, so it was skipped then (incident 2026-09-08); since
+				// IsSyncing can be forced by a peer (S2-03), that also let a
+				// live node apply an unverified body.
+				if !verifyAgainstParent(&poolTx, lastBlock) {
 					logger.GetLogger().Printf("  tx[%d] %x from badTx FAILED validation", i, hash[:8])
 					return 0, 0, fmt.Errorf("bad transaction failed validation: %x", hash[:8])
 				}
@@ -399,6 +411,32 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 		err = transactionsPool.CheckTransactionInDBAndInMarkleTrie(hash, tree)
 		if err != nil {
 			return 0, 0, err
+		}
+		loaded = append(loaded, poolTx)
+	}
+
+	// Phase 2: verify every signature as of the parent block. Pool bodies are
+	// bound to their hashes (S3-01) but not authenticated: gossip verified
+	// them under the node's state at arrival, and while syncing bx stores them
+	// unverified because the keys of a historical transaction may not be
+	// registered yet. Without this pass a syncing node - a mode a peer can
+	// force (S2-03) - took the producer's word for every signature.
+	// Done before the checks below, so a forged transaction never enters the
+	// in-block balance accounting and gets a genuine one of the same sender
+	// banned as unpayable.
+	verified := verifyBlockTransactions(loaded, lastBlock)
+
+	// Phase 3: per-transaction checks.
+	for i := range loaded {
+		poolTx := loaded[i]
+		hash := poolTx.GetHash().GetBytes()
+		var err error
+		if !verified[i] {
+			transactionsPool.RemoveBadTransactionByHash(hash, block.GetHeader().Height, tree)
+			if badTxErr == nil {
+				badTxErr = fmt.Errorf("transaction %x fails signature verification as of block %d", hash[:8], lastBlock.GetHeader().Height)
+			}
+			continue
 		}
 		if !TransactionHeightInWindow(poolTx.GetHeight(), block.GetHeader().Height) {
 			transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
@@ -549,6 +587,11 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 	// a silent permanent balance divergence. Deferring it past every failable
 	// step means a settlement only happens when the block genuinely commits.
 
+	// Every escrow/multisig pool change below is journalled under this
+	// block's height, so a rewind can revert it (F3-07).
+	transactionsPool.BeginPendingPoolJournal(block.GetHeader().Height)
+	defer transactionsPool.EndPendingPoolJournal()
+
 	txs := block.TransactionsHashes
 	for _, tx := range txs {
 		hash := tx.GetBytes()
@@ -628,6 +671,10 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 		}
 	} else if rest < 0 {
 		return fmt.Errorf("this shouldn't happen anytime: ProcessBlockTransfers")
+	}
+	// The block's RANDAO commitment becomes its operator's live one (S4-06).
+	if err := applyRandaoCommit(block); err != nil {
+		return err
 	}
 
 	// Last, after every failable step above: settle matured escrows. If this is
@@ -782,6 +829,49 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	// Header signature already authenticated at the top of this function
 	// (QWID-2026-07).
 	return nil
+}
+
+// verifyAgainstParent verifies tx as of block lastBlock: under the signature
+// schemes lastBlock leaves in force and against the keys registered by
+// lastBlock or earlier (S3-06). Every input is chain state at a fixed height,
+// so the verdict does not depend on the node's mode or its current tip.
+func verifyAgainstParent(tx *transactionsDefinition.Transaction, lastBlock Block) bool {
+	sigName, sigName2, isPaused, isPaused2, err := lastBlock.GetSigNames()
+	if err != nil {
+		return false
+	}
+	return tx.VerifyAsOf(sigName, sigName2, isPaused, isPaused2, lastBlock.GetHeader().Height)
+}
+
+// verifyBlockTransactions runs verifyAgainstParent for every transaction of a
+// block, in parallel - signature checks dominate the cost, and a 5000-tx
+// block verified serially would slow sync to a crawl. Each worker owns the
+// slice elements it verifies (Verify recomputes the hash in place).
+func verifyBlockTransactions(txs []transactionsDefinition.Transaction, lastBlock Block) []bool {
+	ok := make([]bool, len(txs))
+	sigName, sigName2, isPaused, isPaused2, err := lastBlock.GetSigNames()
+	if err != nil {
+		return ok
+	}
+	asOf := lastBlock.GetHeader().Height
+	workers := min(runtime.NumCPU(), len(txs))
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				ok[i] = txs[i].VerifyAsOf(sigName, sigName2, isPaused, isPaused2, asOf)
+			}
+		}()
+	}
+	for i := range txs {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	return ok
 }
 
 // slowApplyThreshold is the per-block apply wall time above which the sub-phase

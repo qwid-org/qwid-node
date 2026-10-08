@@ -15,6 +15,7 @@ import (
 	"github.com/therecipe/qt/widgets"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -109,7 +110,7 @@ func ShowSmartContractPage() *widgets.QTabWidget {
 	})
 	UpdateCallTextButton := widgets.NewQPushButton2("Update ABI", nil)
 	UpdateCallTextButton.ConnectClicked(func(bool) {
-		js, _ := os.ReadFile("smartContracts/contract.abi")
+		js, _ := os.ReadFile(contractFile("contract.abi"))
 		var funcs []map[string]any
 		json.Unmarshal(js, &funcs)
 		logger.GetLogger().Printf("%+v", funcs)
@@ -207,7 +208,7 @@ func ShowSmartContractPage() *widgets.QTabWidget {
 
 		code := codeData.ToPlainText()
 
-		fo, err := os.Create("smartContracts/contract.sol")
+		fo, err := os.Create(contractFile("contract.sol"))
 		if err != nil {
 			v = fmt.Sprint("file open error: ", err)
 			info = &v
@@ -234,7 +235,7 @@ func ShowSmartContractPage() *widgets.QTabWidget {
 			info = &v
 			return
 		}
-		cmd := exec.Command("solc", "--evm-version", "paris", "--bin", "smartContracts/contract.sol") //
+		cmd := exec.Command("solc", "--evm-version", "paris", "--bin", contractFile("contract.sol")) //
 		var out bytes.Buffer
 		cmd.Stdout = &out
 		err = cmd.Run()
@@ -249,7 +250,7 @@ func ShowSmartContractPage() *widgets.QTabWidget {
 		SmartContractData.SetText(outputData.ToPlainText())
 		Recipient.SetText("0")
 		Amount.SetText("0")
-		cmd = exec.Command("solc", "--evm-version", "paris", "--abi", "smartContracts/contract.sol") //
+		cmd = exec.Command("solc", "--evm-version", "paris", "--abi", contractFile("contract.sol")) //
 		cmd.Stdout = &out
 		err = cmd.Run()
 		if err != nil {
@@ -257,7 +258,7 @@ func ShowSmartContractPage() *widgets.QTabWidget {
 			info = &v
 			return
 		}
-		fo, _ = os.Create("smartContracts/contract.abi")
+		fo, _ = os.Create(contractFile("contract.abi"))
 		defer fo.Close()
 		abi := strings.Split(out.String(), "\n")
 		fo.Write([]byte(abi[len(abi)-2]))
@@ -269,7 +270,19 @@ func ShowSmartContractPage() *widgets.QTabWidget {
 	outputData.SetPlaceholderText("Smart Contract Output Data")
 
 	widget.Layout().AddWidget(outputData)
-	codeTmp, _ := os.ReadFile("smartContracts/contract.sol")
+	codeTmp, _ := os.ReadFile(contractFile("contract.sol"))
 	codeData.SetText(string(codeTmp))
 	return widget
+}
+
+// contractFile is where the compiler panel keeps its working files: under the
+// QWID home rather than "smartContracts/" relative to wherever the GUI was
+// started (S10-05), which wrote into, and compiled from, any directory.
+func contractFile(name string) string {
+	dir := "smartContracts"
+	if home, err := os.UserHomeDir(); err == nil {
+		dir = filepath.Join(home, ".qwid", "smartContracts")
+	}
+	_ = os.MkdirAll(dir, 0700)
+	return filepath.Join(dir, name)
 }

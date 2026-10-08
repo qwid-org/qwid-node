@@ -346,6 +346,9 @@ func ShowWalletPage() *widgets.QTabWidget {
 
 	inputRestoreMnemonic := widgets.NewQLineEdit(nil)
 	inputRestoreMnemonic.SetPlaceholderText("24 recovery words separated by spaces")
+	// Hidden while typed, like the password fields (S10-05): the phrase is
+	// the wallet, and a screen is easier to read over a shoulder than a file.
+	inputRestoreMnemonic.SetEchoMode(widgets.QLineEdit__Password)
 	widget.Layout().AddWidget(inputRestoreMnemonic)
 	buttonRestoreMnemonic := widgets.NewQPushButton2("Restore keys from recovery phrase", nil)
 	buttonRestoreMnemonic.ConnectClicked(func(bool) {

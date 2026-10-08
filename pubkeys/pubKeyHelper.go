@@ -208,45 +208,9 @@ func LoadPubKey(a []byte) (common.PubKey, error) {
 // superseded scheme (e.g. an oracle proof verified against the config at its
 // own signing height) still find the key it was made with.
 func LoadPubKeyWithPrimaryOfLength(mainAddress common.Address, primary bool, length int) (common.PubKey, error) {
-	addresses, err := LoadAddresses(mainAddress)
-	if err != nil {
-		return common.PubKey{}, err
-	}
-	for i := len(addresses) - 1; i >= 0; i-- {
-		addr := addresses[i]
-		if addr.Primary != primary {
-			continue
-		}
-		pkm, err := LoadPubKey(addr.GetBytes())
-		if err != nil {
-			// A missing entry for one address must not hide an older key that
-			// is still present; keep scanning.
-			continue
-		}
-		if len(pkm.GetBytes()) == length {
-			return pkm, nil
-		}
-	}
-	return common.PubKey{}, fmt.Errorf("no pubkey of length %d found", length)
+	return LoadPubKeyWithPrimaryOfLengthAsOf(mainAddress, primary, length, NoHeightLimit)
 }
 
 func LoadPubKeyWithPrimary(mainAddress common.Address, primary bool) (common.PubKey, error) {
-	addresses, err := LoadAddresses(mainAddress)
-	if err != nil {
-		return common.PubKey{}, err
-	}
-	//logger.GetLogger().Println("addresses:", addresses)
-	if len(addresses) > 0 {
-		for i := len(addresses) - 1; i >= 0; i-- {
-			addr := addresses[i]
-			if addr.Primary == primary {
-				pkm, err := LoadPubKey(addr.GetBytes())
-				if err != nil {
-					return common.PubKey{}, err
-				}
-				return pkm, nil
-			}
-		}
-	}
-	return common.PubKey{}, fmt.Errorf("no pubkey found")
+	return LoadPubKeyWithPrimaryAsOf(mainAddress, primary, NoHeightLimit)
 }

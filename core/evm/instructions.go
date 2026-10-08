@@ -849,8 +849,13 @@ func opSelfdestruct(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext
 	}
 	beneficiary := scope.Stack.pop()
 	balance := interpreter.evm.StateDB.GetBalance(scope.Contract.Address())
-	interpreter.evm.StateDB.AddBalance(common.SetByteAddress(beneficiary.Bytes20()), balance)
-	interpreter.evm.StateDB.SubBalance(scope.Contract.Address(), interpreter.evm.StateDB.GetBalance(scope.Contract.Address())) // supply-neutral (DB-C1)
+	beneficiaryAddr := common.SetByteAddress(beneficiary.Bytes20())
+	// A contract naming itself keeps its balance: credit-then-debit-all
+	// would destroy it, which breaks the block supply invariant.
+	if beneficiaryAddr.ByteValue != scope.Contract.Address().ByteValue {
+		interpreter.evm.StateDB.AddBalance(beneficiaryAddr, balance)
+		interpreter.evm.StateDB.SubBalance(scope.Contract.Address(), interpreter.evm.StateDB.GetBalance(scope.Contract.Address())) // supply-neutral (DB-C1)
+	}
 	interpreter.evm.StateDB.Suicide(scope.Contract.Address())
 	if interpreter.cfg.Debug {
 		interpreter.cfg.Tracer.CaptureEnter(SELFDESTRUCT, scope.Contract.Address(), common.SetByteAddress(beneficiary.Bytes20()), []byte{}, 0, balance)

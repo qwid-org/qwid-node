@@ -239,6 +239,9 @@ func ResetAccountsAndBlocksSyncLocked(height int64) {
 	// annex; sync-perf optimization).
 	top := max(hb, ha, hsa, common.GetHeight())
 	blocks.UnregisterPubKeysAboveHeight(height, top)
+	// The escrow and multisig pools come back to the target with the rest of
+	// the state (F3-07).
+	transactionsPool.UndoPendingPoolsAbove(height)
 	for i := ha; i > height; i-- {
 		err := account.RemoveAccountsFromDB(i)
 		if err != nil {

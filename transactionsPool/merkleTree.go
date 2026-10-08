@@ -50,6 +50,17 @@ func GetGlobalMerkleTree() *MerkleTree {
 	return GlobalMerkleTree
 }
 
+// Domain tags (S4-10): a leaf hashes 0x00 || data and an inner node
+// 0x01 || left || right, so a leaf can never pass for an inner node. An odd
+// node is promoted to the next level unchanged instead of being paired with a
+// copy of itself, so [a,b,c] and [a,b,c,c] no longer share a root. (The
+// duplicate-hash check of QWID-2026-35 blocked that collision; the
+// construction no longer depends on it.)
+const (
+	merkleLeafTag  byte = 0x00
+	merkleInnerTag byte = 0x01
+)
+
 func NewMerkleTree(data [][]byte) ([]MerkleNode, error) {
 	var nodes []MerkleNode
 	for _, d := range data {
@@ -61,16 +72,16 @@ func NewMerkleTree(data [][]byte) ([]MerkleNode, error) {
 	}
 
 	for len(nodes) > 1 {
-		if len(nodes)%2 != 0 {
-			nodes = append(nodes, nodes[len(nodes)-1])
-		}
-		var level []MerkleNode
-		for i := 0; i < len(nodes); i += 2 {
+		level := make([]MerkleNode, 0, (len(nodes)+1)/2)
+		for i := 0; i+1 < len(nodes); i += 2 {
 			node, err := NewMerkleNode(&nodes[i], &nodes[i+1], nil)
 			if err != nil {
 				return nil, err
 			}
 			level = append(level, *node)
+		}
+		if len(nodes)%2 != 0 {
+			level = append(level, nodes[len(nodes)-1])
 		}
 		nodes = level
 	}
@@ -82,22 +93,22 @@ func NewMerkleNode(left, right *MerkleNode, data []byte) (*MerkleNode, error) {
 
 	// No lock needed: this creates a new local node from local data.
 	// The caller (BuildMerkleTree) acquires globalMutex after tree construction.
+	var input []byte
 	if left == nil && right == nil {
-		hash, err := common.CalcHashToByte(data)
-		if err != nil {
-			logger.GetLogger().Println("hash calculation fails")
-			return nil, err
-		}
-		node.Data = hash[:]
+		input = append([]byte{merkleLeafTag}, data...)
 	} else {
-		prevHashes := append(left.Data, right.Data...)
-		hash, err := common.CalcHashToByte(prevHashes)
-		if err != nil {
-			logger.GetLogger().Println("hash calculation fails")
-			return nil, err
-		}
-		node.Data = hash[:]
+		// A fresh buffer: appending to left.Data wrote into its backing array.
+		input = make([]byte, 0, 1+len(left.Data)+len(right.Data))
+		input = append(input, merkleInnerTag)
+		input = append(input, left.Data...)
+		input = append(input, right.Data...)
 	}
+	hash, err := common.CalcHashToByte(input)
+	if err != nil {
+		logger.GetLogger().Println("hash calculation fails")
+		return nil, err
+	}
+	node.Data = hash[:]
 	node.Left = left
 	node.Right = right
 	return &node, nil

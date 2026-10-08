@@ -11,13 +11,8 @@ import (
 	"sync"
 )
 
-var VoteChannel chan []byte
-var VoteChannelMutex sync.Mutex
-
-func init() {
-	VoteChannel = make(chan []byte, 0)
-	VoteChannelMutex = sync.Mutex{}
-}
+// voteEncryptionMutex serializes scheme changes.
+var voteEncryptionMutex sync.Mutex
 
 // ProcessBlockEncryption : store encryption
 //
@@ -81,14 +76,17 @@ func ProcessBlockEncryption(block Block, lastBlock Block) error {
 }
 
 func SetVoteEncryption(enc []byte, primary bool) {
-	enc1 := append([]byte{1}, enc...)
-	if primary {
-		enc1 = append([]byte{0}, enc...)
+	// Applied directly (S3-09). It used to go through an unbuffered channel to
+	// a goroutine started by the nonce service, which ran exactly this call:
+	// wherever that goroutine was not running (tools, tests, early start) the
+	// block application blocked forever.
+	voteEncryptionMutex.Lock()
+	defer voteEncryptionMutex.Unlock()
+	if err := SetEncryptionFromBytes(enc, primary); err != nil {
+		logger.GetLogger().Println(err)
+		return
 	}
-	VoteChannelMutex.Lock()
-	defer VoteChannelMutex.Unlock()
-	VoteChannel <- enc1
-	logger.GetLogger().Println(string(<-VoteChannel))
+	logger.GetLogger().Println("Set new encryption was successful")
 }
 
 func (bl *Block) GetSigNames() (string, string, bool, bool, error) {
