@@ -587,6 +587,11 @@ func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.Mer
 	// a silent permanent balance divergence. Deferring it past every failable
 	// step means a settlement only happens when the block genuinely commits.
 
+	// Every escrow/multisig pool change below is journalled under this
+	// block's height, so a rewind can revert it (F3-07).
+	transactionsPool.BeginPendingPoolJournal(block.GetHeader().Height)
+	defer transactionsPool.EndPendingPoolJournal()
+
 	txs := block.TransactionsHashes
 	for _, tx := range txs {
 		hash := tx.GetBytes()

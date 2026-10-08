@@ -231,6 +231,10 @@ var (
 	// restart made any later block carrying a confirmation unappliable -
 	// "no main transaction in multi signature pool" - forever.
 	MultiSignPoolDBPrefix = [2]byte{'M', 'P'}
+	// PendingPoolJournalDBPrefix + height(8, big-endian) + sequence(4)
+	// journals every escrow/multisig pool change made by a block, so a rewind
+	// can revert them (transactionsPool/pendingJournal.go, audit F3-07).
+	PendingPoolJournalDBPrefix = [2]byte{'E', 'J'}
 	// Per-account transaction-history index (account/txHistory.go):
 	// prefix | address | sequence -> tx hash. Kept OUTSIDE the account state
 	// snapshot so the snapshot stops growing with transaction history.
