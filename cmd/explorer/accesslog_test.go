@@ -88,3 +88,30 @@ func TestAccessLogRotatesAndPrunes(t *testing.T) {
 		t.Fatal("a recent file was removed")
 	}
 }
+
+// Audit 2026-10-07 F1-04: a day's file stops at its size cap, and a long
+// client-supplied field is cut, so a flood cannot fill the disk.
+func TestAccessLogIsBounded(t *testing.T) {
+	l := testAccessLog(t, time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC))
+	l.maxDayBytes = 2000
+	serve(l, "203.0.113.9:1", "/"+strings.Repeat("a", 5000), map[string]string{"User-Agent": strings.Repeat("u", 5000)})
+	got := readLog(t, l, "2026-10-07")
+	if got != "" {
+		t.Fatalf("a %d-byte line over a 2000-byte cap was written", len(got))
+	}
+
+	l.maxDayBytes = 1 << 20
+	serve(l, "203.0.113.9:1", "/"+strings.Repeat("a", 5000), map[string]string{"User-Agent": strings.Repeat("u", 5000)})
+	got = readLog(t, l, "2026-10-07")
+	if len(got) > maxURILen+maxHeaderFieldLen+300 || !strings.Contains(got, "a...") || !strings.Contains(got, "u...") {
+		t.Fatalf("long fields were not cut: %d bytes", len(got))
+	}
+
+	l.maxDayBytes = int64(len(got)) * 3
+	for i := 0; i < 10; i++ {
+		serve(l, "203.0.113.9:1", "/x", nil)
+	}
+	if size := int64(len(readLog(t, l, "2026-10-07"))); size > l.maxDayBytes {
+		t.Fatalf("file grew to %d bytes past its %d-byte cap", size, l.maxDayBytes)
+	}
+}

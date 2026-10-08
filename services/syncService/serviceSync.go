@@ -252,24 +252,37 @@ func sendGetHeadersRange(addr [4]byte, bHeight, eHeight int64) {
 // sends first - so the request for the earlier headers that locate the fork
 // point was always the one refused, and a node left on a minority branch
 // asked forever and never rejoined the network (audit F3-01).
+//
+// A request that reaches deeper than the previous one to the same peer is a
+// step of the walk back to the fork point and is never throttled: each answer
+// either shows the fork point or asks for the next 21 headers below. The 1 s
+// interval used to refuse the second step, the next routine batch restarted
+// the walk from the top, and a fork deeper than two steps (42 blocks) was
+// never resolved (audit F3-06). Repeats and shallower requests stay limited.
+type forkRequestMark struct {
+	at   time.Time
+	from int64
+}
+
 var (
-	lastForkHeaderRequest      = map[[4]byte]time.Time{}
+	lastForkHeaderRequest      = map[[4]byte]forkRequestMark{}
 	lastForkHeaderRequestMutex sync.Mutex
 )
 
-func allowForkHeaderRequest(addr [4]byte) bool {
+func allowForkHeaderRequest(addr [4]byte, from int64) bool {
 	lastForkHeaderRequestMutex.Lock()
 	defer lastForkHeaderRequestMutex.Unlock()
-	if t, ok := lastForkHeaderRequest[addr]; ok && time.Since(t) < headerRequestMinInterval {
+	now := time.Now()
+	if m, ok := lastForkHeaderRequest[addr]; ok && now.Sub(m.at) < headerRequestMinInterval && from >= m.from {
 		return false
 	}
-	lastForkHeaderRequest[addr] = time.Now()
+	lastForkHeaderRequest[addr] = forkRequestMark{at: now, from: from}
 	return true
 }
 
 // sendForkHeaderRequest asks addr for the headers that locate a fork point.
 func sendForkHeaderRequest(addr [4]byte, bHeight, eHeight int64) {
-	if !allowForkHeaderRequest(addr) {
+	if !allowForkHeaderRequest(addr, bHeight) {
 		return
 	}
 	sendHeaderRequest(addr, bHeight, eHeight, true)

@@ -9,10 +9,10 @@ func TestForkHeaderRequestHasItsOwnLimiter(t *testing.T) {
 	if !allowHeaderRequest(addr) {
 		t.Fatal("first routine request refused")
 	}
-	if !allowForkHeaderRequest(addr) {
+	if !allowForkHeaderRequest(addr, 100) {
 		t.Fatal("the fork request was refused because a routine request was just sent")
 	}
-	if allowForkHeaderRequest(addr) {
+	if allowForkHeaderRequest(addr, 100) {
 		t.Fatal("fork requests are not rate-limited at all")
 	}
 }
@@ -45,5 +45,24 @@ func TestTakeHeaderRequestReportsForkRequests(t *testing.T) {
 	}
 	if ok, _ := takeHeaderRequest(addr, 40, 60); ok {
 		t.Fatal("a consumed request answered a second batch")
+	}
+}
+
+// Audit 2026-10-07 F3-06: each step of the walk back to the fork point asks
+// for headers further down and must not wait out the interval - the next
+// routine batch would restart the walk from the top. Repeats and shallower
+// requests are still limited.
+func TestForkWalkBackIsNotThrottled(t *testing.T) {
+	addr := [4]byte{198, 51, 100, 79}
+	for _, from := range []int64{99, 78, 57, 36} {
+		if !allowForkHeaderRequest(addr, from) {
+			t.Fatalf("walk-back step from %d refused", from)
+		}
+	}
+	if allowForkHeaderRequest(addr, 36) {
+		t.Fatal("a repeated request was not limited")
+	}
+	if allowForkHeaderRequest(addr, 99) {
+		t.Fatal("a shallower request was not limited")
 	}
 }

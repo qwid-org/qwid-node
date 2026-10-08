@@ -437,7 +437,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
-	contract := NewContract(caller, AccountRef(address), new(big.Int), gas)
+	// The constructor sees the value it was sent, as in Ethereum. It used to
+	// get 0 while the value was transferred (audit F2-01), so CALLVALUE lied
+	// and a non-payable constructor accepted coins it is meant to refuse.
+	contract := NewContract(caller, AccountRef(address), value, gas)
 	contract.SetCodeOptionalHash(&address, codeAndHash)
 
 	if evm.Config.Debug {

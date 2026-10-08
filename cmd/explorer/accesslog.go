@@ -26,18 +26,34 @@ import (
 // EXPLORER_ACCESS_LOG_DIR (default ~/.qwid/logs/explorer); files older than
 // EXPLORER_ACCESS_LOG_DAYS (default 90) are removed when a new day starts.
 // EXPLORER_ACCESS_LOG=off disables it.
+//
+// A request flood from many addresses must not fill the disk (audit
+// 2026-10-07 F1-04): a day's file stops growing at EXPLORER_ACCESS_LOG_MAX_MB
+// (default 256) - later requests that day are served but not logged, with one
+// warning on stdout - and client-supplied fields are cut to a fixed length, so
+// one request cannot write an 8 KB line.
 
-const accessLogPrefix = "explorer-access-"
+const (
+	accessLogPrefix = "explorer-access-"
+	// maxURILen and maxHeaderFieldLen bound the client-supplied fields of a
+	// line; a cut field ends in "...".
+	maxURILen         = 2048
+	maxHeaderFieldLen = 512
+	defaultMaxDayMB   = 256
+)
 
 type accessLog struct {
-	dir      string
-	keepDays int
-	now      func() time.Time
+	dir         string
+	keepDays    int
+	maxDayBytes int64
+	now         func() time.Time
 
-	mu   sync.Mutex
-	day  string
-	file *os.File
-	warn sync.Once
+	mu      sync.Mutex
+	day     string
+	file    *os.File
+	written int64 // size of the current day's file
+	full    bool  // the day's cap was reached and reported
+	warn    sync.Once
 }
 
 func newAccessLogFromEnv() *accessLog {
@@ -59,7 +75,13 @@ func newAccessLogFromEnv() *accessLog {
 			keep = n
 		}
 	}
-	return &accessLog{dir: dir, keepDays: keep, now: time.Now}
+	maxMB := int64(defaultMaxDayMB)
+	if v := os.Getenv("EXPLORER_ACCESS_LOG_MAX_MB"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxMB = n
+		}
+	}
+	return &accessLog{dir: dir, keepDays: keep, maxDayBytes: maxMB << 20, now: time.Now}
 }
 
 // middleware logs each direct request after it is served.
@@ -86,8 +108,8 @@ func (l *accessLog) write(ip string, r *http.Request, status int, size int64) {
 	t := l.now()
 	line := fmt.Sprintf("%s - - [%s] \"%s %s %s\" %d %d \"%s\" \"%s\"\n",
 		ip, t.Format("02/Jan/2006:15:04:05 -0700"),
-		logField(r.Method), logField(r.RequestURI), logField(r.Proto),
-		status, size, logField(r.Referer()), logField(r.UserAgent()))
+		logField(r.Method, maxHeaderFieldLen), logField(r.RequestURI, maxURILen), logField(r.Proto, maxHeaderFieldLen),
+		status, size, logField(r.Referer(), maxHeaderFieldLen), logField(r.UserAgent(), maxHeaderFieldLen))
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -95,7 +117,15 @@ func (l *accessLog) write(ip string, r *http.Request, status int, size int64) {
 		l.warn.Do(func() { fmt.Println("explorer access log not written:", err) })
 		return
 	}
-	_, _ = l.file.WriteString(line)
+	if l.maxDayBytes > 0 && l.written+int64(len(line)) > l.maxDayBytes {
+		if !l.full {
+			l.full = true
+			fmt.Printf("explorer access log for %s reached %d MB - not logging more requests today\n", l.day, l.maxDayBytes>>20)
+		}
+		return
+	}
+	n, _ := l.file.WriteString(line)
+	l.written += int64(n)
 }
 
 // openFor makes l.file the file of t's day, pruning old days on a change.
@@ -111,10 +141,14 @@ func (l *accessLog) openFor(t time.Time) error {
 	if err != nil {
 		return err
 	}
+	var size int64
+	if st, err := f.Stat(); err == nil {
+		size = st.Size() // a restart continues today's file and its budget
+	}
 	if l.file != nil {
 		_ = l.file.Close()
 	}
-	l.file, l.day = f, day
+	l.file, l.day, l.written, l.full = f, day, size, false
 	l.prune(t)
 	return nil
 }
@@ -139,10 +173,15 @@ func (l *accessLog) prune(t time.Time) {
 
 // logField makes a client-supplied value safe inside a quoted log field: it
 // escapes quotes and backslashes and replaces control characters, so a
-// request cannot end the field or forge a log line.
-func logField(s string) string {
+// request cannot end the field or forge a log line. Values longer than max
+// bytes are cut and end in "...".
+func logField(s string, max int) string {
 	if s == "" {
 		return "-"
+	}
+	cut := false
+	if len(s) > max {
+		s, cut = s[:max], true
 	}
 	var b strings.Builder
 	for _, c := range s {
@@ -155,6 +194,9 @@ func logField(s string) string {
 		default:
 			b.WriteRune(c)
 		}
+	}
+	if cut {
+		b.WriteString("...")
 	}
 	return b.String()
 }

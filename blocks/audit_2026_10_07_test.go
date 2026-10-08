@@ -128,3 +128,25 @@ func TestBadTransactionLeavesThePool(t *testing.T) {
 		t.Fatalf("the dropped transaction is not kept for sync: %v", err)
 	}
 }
+
+// Audit 2026-10-07 F2-01: a constructor sees the value it was sent
+// (CALLVALUE), not 0.
+func TestConstructorSeesCallValue(t *testing.T) {
+	sender := evmTestSender(t)
+	bl := Block{BaseBlock: BaseBlock{BaseHeader: BaseHeader{Height: 10}}}
+	deploy := evmDeployTx(sender, []byte{0x34, 0x60, 0x00, 0x55, 0x00}, 100000, 1) // CALLVALUE PUSH1 0 SSTORE STOP
+	deploy.TxData.Amount = 12345
+	_, _, addr, _, err := EvaluateSC(deploy, bl)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	StateMutex.Lock()
+	got := State.GetState(addr, common.Hash{}).Big().Int64()
+	StateMutex.Unlock()
+	if got != 12345 {
+		t.Fatalf("constructor saw CALLVALUE %d, want 12345", got)
+	}
+	if b := account.GetBalance(addr.ByteValue); b != 12345 {
+		t.Fatalf("contract balance %d, want 12345", b)
+	}
+}
