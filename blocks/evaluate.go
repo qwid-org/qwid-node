@@ -13,6 +13,7 @@ import (
 	"github.com/qwid-org/qwid-node/core/types"
 	loggerMain "github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 	"math"
 	"math/big"
 	"sync"
@@ -64,6 +65,40 @@ func isContractCallTx(tx transactionsDefinition.Transaction, senderAcc account.A
 	return true
 }
 
+// ErrNativeSupplyChanged marks an execution that created or destroyed native
+// coins. The EVM may only move coins between accounts; an execution that does
+// otherwise - a VM bug like F1-01 (SELFDESTRUCT to itself) - is reverted and
+// fails like any other, instead of breaking the block's supply check. A
+// supply break used to invalidate every block carrying the transaction, while
+// the transaction stayed in the pool to poison the next one.
+var ErrNativeSupplyChanged = errors.New("execution changed the native coin supply")
+
+// finishExecution ends a successful top-level execution: one that moved the
+// native supply is reverted and reported as ErrNativeSupplyChanged, anything
+// else is finalised. The caller holds StateMutex.
+func finishExecution() error {
+	if delta := State.NativeBalanceDelta(); delta != 0 {
+		State.RevertToSnapshot(0)
+		return fmt.Errorf("%w by %d", ErrNativeSupplyChanged, delta)
+	}
+	State.FinaliseTx()
+	return nil
+}
+
+// dropBadTransaction removes from the pool a transaction whose execution
+// makes its block invalid, so that the next block does not carry it again
+// (pool hygiene). CheckBlockTransfers does the same for the transactions it
+// rejects; without this, a block failing here or in the supply check left
+// the transaction in the pool and every next block repeated the failure until
+// the transaction aged out of the height window (about a day). Only failures
+// caused by the transaction itself come here - a database error says nothing
+// about it.
+func dropBadTransaction(t transactionsDefinition.Transaction, bl Block, err error) {
+	loggerMain.GetLogger().Printf("transaction %x makes block %d invalid (%v) - removing it from the pool",
+		t.Hash.GetBytes()[:8], bl.GetHeader().Height, err)
+	transactionsPool.RemoveBlockBreakingTransactionByHash(t.Hash.GetBytes(), bl.GetHeader().Height)
+}
+
 // isEVMExecutionError reports whether err is an EVM execution failure — a
 // contract-caused failure the sender pays for and the block includes — as
 // opposed to a node/processing error, which must stay block-fatal. Anything
@@ -83,7 +118,8 @@ func isEVMExecutionError(err error) bool {
 		errors.Is(err, vm.ErrGasUintOverflow),
 		errors.Is(err, vm.ErrInvalidCode),
 		errors.Is(err, vm.ErrNonceUintOverflow),
-		errors.Is(err, vm.ErrPrecompileFailed):
+		errors.Is(err, vm.ErrPrecompileFailed),
+		errors.Is(err, ErrNativeSupplyChanged):
 		return true
 	}
 	var opErr *vm.ErrInvalidOpCode
@@ -487,6 +523,7 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 					// no coins have moved. Skip the order like above.
 					continue
 				}
+				dropBadTransaction(t, bl, err)
 				return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
 			}
 			t.OutputLogs = []byte(l)
@@ -505,11 +542,13 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			err = AddBalance(aa, coinAmount)
 			if err != nil {
 				loggerMain.GetLogger().Println(err)
+				dropBadTransaction(t, bl, err)
 				return false, nil, nil, nil, nil
 			}
 			err = AddBalance(da, -coinAmount)
 			if err != nil {
 				loggerMain.GetLogger().Println(err)
+				dropBadTransaction(t, bl, err)
 				return false, nil, nil, nil, nil
 			}
 
@@ -520,6 +559,7 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			StateMutex.RUnlock()
 			if !ok {
 				loggerMain.GetLogger().Println("no token with a given address")
+				dropBadTransaction(t, bl, fmt.Errorf("no token with address %x", ba[:]))
 				return false, nil, nil, nil, nil
 			}
 
@@ -631,7 +671,10 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 				}
 				continue
 			}
-			// Non-execution (node/processing) error: block-fatal, as before.
+			// Non-execution (node/processing) error: block-fatal, as before,
+			// and the transaction leaves the pool so the next block does not
+			// carry it again.
+			dropBadTransaction(t, bl, err)
 			return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
 		}
 		//TODO we should refund left gas
@@ -783,7 +826,10 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 			return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, err
 		}
 	}
-	State.FinaliseTx()
+	if err = finishExecution(); err != nil {
+		loggerMain.GetLogger().Println(err)
+		return logger.ToString(), nil, address, 0, err
+	}
 
 	return logger.ToString() + formatEVMLogs(State.GetLogs()), ret, address, leftOverGas, nil
 }
@@ -880,7 +926,9 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	if err != nil {
 		return logger.ToString(), ret, tokenAddress, leftOverGas, err
 	}
-	State.FinaliseTx()
+	if err = finishExecution(); err != nil {
+		return logger.ToString(), nil, tokenAddress, 0, err
+	}
 
 	return logger.ToString(), ret, tokenAddress, leftOverGas, nil
 }

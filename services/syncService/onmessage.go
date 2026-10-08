@@ -688,13 +688,16 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 		}
 		hmax := common.GetHeightMax()
+		forkAnswer := false
 		if len(indices) > 0 && len(indices) == len(blcks) {
 			first, last := indices[0], indices[0]
 			for _, i := range indices {
 				first, last = min(first, i), max(last, i)
 			}
 			// S2-01: act only on the answer to a request we sent this peer.
-			if !takeHeaderRequest(addr, first, last) {
+			var ok bool
+			ok, forkAnswer = takeHeaderRequest(addr, first, last)
+			if !ok {
 				logger.GetLogger().Printf("ignoring unsolicited sh from %s (heights %d..%d)", tcpip.PeerLabel(addr), first, last)
 				return
 			}
@@ -708,7 +711,11 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 			return
 		}
-		if indices[len(indices)-1] <= h {
+		// The answer to a fork-resolution request lies below our tip by design:
+		// it is how the fork point is located (audit F3-03). Such a request is
+		// sent only after this peer served blocks above our height, so letting
+		// it through does not trade our chain for a shorter one.
+		if indices[len(indices)-1] <= h && !forkAnswer {
 			logger.GetLogger().Println("shorter other chain")
 			// Peer claimed higher but sent lower blocks - suspicious
 			if !common.IsBehindNetwork() {

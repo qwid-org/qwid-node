@@ -39,11 +39,11 @@ import (
 // evicted.
 var (
 	handleMutex    sync.Mutex
-	handleByNodeID        = map[[common.AddressLength]byte][4]byte{}
-	realIPByHandle        = map[[4]byte][4]byte{}
-	nodeIDByHandle        = map[[4]byte]common.Address{}
-	handleLastUse         = map[[4]byte]int64{}
-	handlesByIP           = map[[4]byte]map[[4]byte]struct{}{}
+	handleByNodeID = map[[common.AddressLength]byte][4]byte{}
+	realIPByHandle = map[[4]byte][4]byte{}
+	nodeIDByHandle = map[[4]byte]common.Address{}
+	handleLastUse  = map[[4]byte]int64{}
+	handlesByIP    = map[[4]byte]map[[4]byte]struct{}{}
 	handleUseClock int64
 	nextHandle     uint16 = 1
 	// handleSpace is the number of usable handles: 240.254.0.1 - 240.254.255.254.
@@ -403,7 +403,11 @@ func acceptedReceiveLoop(topic [2]byte, key [4]byte, realIP [4]byte, conn net.Co
 			}
 			// Rate limiting stays per transport source - that is what the
 			// limiter defends against - while dispatch is tagged per node.
-			if !AllowMessageFromIPForHead(realIP, head) {
+			if allowed, penalise := CheckMessageRate(realIP, head); !allowed {
+				// Excess past the first in this window is dropped quietly.
+				if !penalise {
+					continue
+				}
 				logger.GetLogger().Printf("message rate limit exceeded for %v (head %q)", realIP, string(head[:]))
 				PeersMutex.Lock()
 				ban := ReduceTrustRegisterPeer(realIP)

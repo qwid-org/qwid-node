@@ -380,3 +380,42 @@ func TestAuthenticHeaderFeedsMissingTx(t *testing.T) {
 		t.Fatalf("missing-tx bookkeeping holds %d hashes, want the block's 3", n)
 	}
 }
+
+// Audit 2026-10-07 F3-03: the answer to a fork request lies at or below our
+// height. It used to be dropped as "shorter other chain" before the fork point
+// was looked for, so no fork was ever resolved. As the answer to a fork
+// request it must reach the fork point; the same batch answering a routine
+// request is still a shorter chain and changes nothing.
+func TestForkAnswerBelowTipRewindsToAncestor(t *testing.T) {
+	chain := withChainAt30(t)
+	withPubKeyTrie(t)
+	fork := signedForkBlock(t, 29, chain[28])
+	clearHeaderRequests(requestedPeer)
+	recordForkHeaderRequest(requestedPeer, 27, 30)
+
+	OnMessage(requestedPeer, shMessage([]int64{27, 28, 29}, []blocks.Block{chain[27], chain[28], fork}))
+
+	if h := common.GetHeight(); h > 28 || h < 20 {
+		t.Fatalf("height after a fork answer with a verified fork at 29 = %d, want the ancestor 28 (or the nearest snapshot below)", h)
+	}
+}
+
+func TestRoutineAnswerBelowTipIsAShorterChain(t *testing.T) {
+	chain := withChainAt30(t)
+	withPubKeyTrie(t)
+	fork := signedForkBlock(t, 29, chain[28])
+	clearHeaderRequests(requestedPeer)
+	recordHeaderRequest(requestedPeer, 27, 30)
+
+	OnMessage(requestedPeer, shMessage([]int64{27, 28, 29}, []blocks.Block{chain[27], chain[28], fork}))
+
+	assertChainIntact(t, 30)
+}
+
+// clearHeaderRequests drops what earlier tests left outstanding for addr, so
+// a test sees only the requests it records itself.
+func clearHeaderRequests(addr [4]byte) {
+	pendingHeaderRequestsMutex.Lock()
+	delete(pendingHeaderRequests, addr)
+	pendingHeaderRequestsMutex.Unlock()
+}

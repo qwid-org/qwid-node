@@ -125,3 +125,25 @@ func (c codeChange) revert(sa *StateAccount) {
 	delete(sa.Codes, c.addr)
 	delete(sa.CodeHashes, c.addr)
 }
+
+// NativeBalanceDelta is the net change this transaction's journal made to
+// native coin balances: for every account it touched, the balance now minus
+// the balance before its first change. EVM execution only moves coins between
+// accounts, so anything but zero means it created or destroyed supply. The
+// journal is reset per transaction (ResetTransient) and truncated on revert,
+// so the answer covers exactly the effects that are still applied.
+func (sa *StateAccount) NativeBalanceDelta() int64 {
+	before := map[[common.AddressLength]byte]int64{}
+	for _, e := range sa.journal {
+		if c, ok := e.(balanceChange); ok {
+			if _, seen := before[c.addr]; !seen {
+				before[c.addr] = c.prev
+			}
+		}
+	}
+	delta := int64(0)
+	for addr, prev := range before {
+		delta += account.GetBalance(addr) - prev
+	}
+	return delta
+}

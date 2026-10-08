@@ -44,6 +44,17 @@ func RemoveBadTransactionByHash(hash []byte, height int64, tree *MerkleTree) err
 	return nil
 }
 
+// RemoveBlockBreakingTransactionByHash removes a transaction whose execution
+// made its block invalid and bans it outright, so neither gossip nor its
+// sender can put it back into a block (pool hygiene). It stays in the bad
+// transaction DB for sync, like any removed one.
+func RemoveBlockBreakingTransactionByHash(hash []byte, height int64) {
+	RemoveBadTransactionByHash(hash, height, nil)
+	PoolsTx.BlockTransactionByHash(hash)
+	PoolTxEscrow.BlockTransactionByHash(hash)
+	PoolTxMultiSign.BlockTransactionByHash(hash)
+}
+
 // RemoveDuplicateTransactionByHash removes a confirmed transaction from all
 // pending pools and bans it so it cannot be re-included in future blocks.
 // The confirmed-DB record (TransactionDBPrefix) is preserved for sync.

@@ -70,6 +70,13 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	// Derive difficulty from the block's own committed timestamp relative to the
 	// parent so validators can recompute and verify it (see blocks.ValidDifficulty).
 	blockTimeStamp := common.GetCurrentTimeStampInSecond()
+	// Validators reject a block not strictly later than its parent
+	// (validateBlockTimestamp) and penalise its sender, so a block built in
+	// the same second as its parent got honest producers banned (audit
+	// F3-04). Wait for the next round instead.
+	if lastBlock.GetHeader().Height >= 1 && blockTimeStamp <= lastBlock.GetBlockTimeStamp() {
+		return blocks.Block{}, fmt.Errorf("parent block %d is not older than this second - not producing yet", lastBlock.GetHeader().Height)
+	}
 	ti := blockTimeStamp - lastBlock.GetBlockTimeStamp()
 	bblock := lastBlock.GetBaseBlock()
 	diff := blocks.AdjustDifficulty(bblock.BaseHeader.Difficulty, ti)
