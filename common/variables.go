@@ -3,10 +3,18 @@ package common
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var height int64
 var heightMax int64
+
+// heightMaxAt is when heightMax was last refreshed from peer claims. The sync
+// service refreshes it on every peer "hi"; a value nobody has confirmed for
+// heightMaxTTL (no peers, or none reachable) is stale and is no longer shown.
+var heightMaxAt time.Time
+
+const heightMaxTTL = 3 * time.Minute
 
 // syncTarget is the height the network is believed to be at, derived from live
 // peer height claims by the sync service. Unlike heightMax it is the raw
@@ -39,16 +47,26 @@ func SetHeight(h int64) {
 	height = h
 }
 
+// GetHeightMax is the network height last observed from live peer claims,
+// never below this node's own height, and only while fresh: a value no peer
+// has confirmed for heightMaxTTL falls back to the own height, so a wrong
+// claim cannot stay on display (or steer the rewind depth) indefinitely.
 func GetHeightMax() int64 {
 	heightMutex.RLock()
 	defer heightMutex.RUnlock()
-	return heightMax
+	if heightMaxAt.IsZero() || time.Since(heightMaxAt) > heightMaxTTL {
+		return height
+	}
+	return max(heightMax, height)
 }
 
+// SetHeightMax records the current network height view (not a running
+// maximum: it may go down when a claim expires).
 func SetHeightMax(hmax int64) {
 	heightMutex.Lock()
 	defer heightMutex.Unlock()
 	heightMax = hmax
+	heightMaxAt = time.Now()
 }
 
 // GetSyncTarget returns the height this node must reach to be considered synced.
