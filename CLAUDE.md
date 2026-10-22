@@ -94,7 +94,12 @@ of accounts, staking, DEX and EVM state **after the parent block**), both
 covered by the producer's signature. Validators recompute `BlockHeaderHash`,
 `BodyHash` and `StateRoot` before applying a block. Signature-scheme votes are
 counted from the signed nonces embedded in the block (`OracleProofs`) against
-the parent's stake (`blocks/encryptionVote.go`); oracle data must be exactly
+the parent's stake (`blocks/encryptionVote.go`). Un-pausing a scheme (which
+makes it active and pauses the other) additionally needs two thirds of the
+stake held by operators with a key of it registered by the parent block
+(`checkUnpauseKeyQuorum`), and the producer must hold one too
+(`checkPauseLeavesRegisteredKey`); producers apply the same rules before
+proposing (`EncryptionChangeAuthorised`). Oracle data must be exactly
 the values of the embedded proofs. A price that cannot be established (proofs
 carry at most 2/3 of the stake) is the parent's carried forward, never 0.
 
@@ -229,6 +234,10 @@ Recovery phrases — exactly which flows produce one:
 - Wallets created before this feature have no phrase and never can, since a post-quantum secret key cannot be encoded as one (CW-M2) — back up their encrypted wallet file instead.
 - Public-key registration has exactly ONE channel: a transaction carrying the pubkey (`TxData.Pubkey`), signed with that key and sent **manually** by the operator; `ProcessBlockPubKey` registers it on every node when its block is applied. Nothing self-registers and nonce transactions never carry keys. After a voted scheme change the node derives its new key, logs an operator instruction, and signs nonces and block headers with the primary key until the registration transaction is in a block (an on-chain-unregistered key is never used for signing, so the node never emits material peers cannot verify).
 - **Dual-key rule (consensus, from height 0):** until an identity holds both a primary and a secondary key, the only transaction it may send is a pure registration carrying a key (`Transaction.IsKeyRegistration`: amount 0, to itself, no data). Onboarding is therefore two pure registrations, the second (spare) signed by the first, in a later block. **A paused scheme authorises no new key**: a scheme is paused because it is presumed broken, and a registered key is published, so its signature is what a forger makes. The former stranded-identity escape hatch (a paused-scheme signature registering a key in a slot the sender lacked) let a forger attach its own spare to a victim and was removed. The only pause exemption left is an UNPUBLISHED key registering itself (forging needs a preimage of the address). Wallets mirror both rules in `wallet.SendRefusal`. In genesis, the operator's spare comes from `operator_pub_key_2` (optional, `omitempty`, so configs without it keep their digest and signature) and/or `pub_key_2` of its staking entry; both register under the owner's identity (`storeGenesisSecondaryKey`).
+- **Recovery commitment (hash-only key recovery):** a key registration whose `Recipient` is not the sender sets the identity's recovery commitment `C = H160(S_n)`, where `S_n = H(seed ‖ main address ‖ n)` comes from the BIP39 phrase (`wallet.RecoverySecret`; never from secret keys, never stored). The latest commitment wins but matures only after `RecoveryCommitMaturityBlocks`, and any signature-scheme change voids unmatured ones. A paused scheme can never set one. Recovery runs in two phases, neither of which needs a working signature scheme of the identity:
+  1. **bind** to `common.RecoveryBindAddress` from any funded account: `identity ‖ tag(S) ‖ H(identity ‖ newKey ‖ nextC ‖ S)`. The first bind per (identity, tag) wins.
+  2. **reveal** to `common.RecoveryRevealAddress` from the identity, signed by the new key (pause-exempt): `S ‖ nextC` plus the new pubkey. It is valid once the bind is at least `RecoveryBindDelayBlocks` old.
+  The reveal registers the key and installs `nextC` immediately. Commitments and binds live in `account.Accounts` (snapshotted, in the state root). CLI: `cmd/recoverKey prepare|bind|reveal`.
 - A phrase-less wallet meeting a chain-voted signature-scheme change **refuses** to generate a replacement key, on both the load path (`loadWalletFromStruct`) and the live path (`AddNewEncryptionToActiveWallet`), rather than silently replacing its staked identity with a random one. Block processing continues; the node just cannot sign under the new scheme until the operator restores the wallet.
 - The CLI generator refuses to overwrite an occupied wallet number in either mode unless the operator types a confirmation naming that wallet number.
 

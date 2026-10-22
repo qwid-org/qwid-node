@@ -43,3 +43,15 @@ func TestSendRefusal(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePUBAReadsCommitments(t *testing.T) {
+	k, err := ParsePUBA([]byte(`{"hasPrimary":true,"hasSecondary":true,
+		"recoveryCommit":"0101010101010101010101010101010101010101",
+		"recoveryPending":"0202020202020202020202020202020202020202"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.RecoveryCommit.ByteValue[0] != 1 || k.RecoveryPending.ByteValue[19] != 2 {
+		t.Fatalf("commitments not parsed: %+v", k)
+	}
+}

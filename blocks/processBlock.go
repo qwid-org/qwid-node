@@ -248,6 +248,10 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 // rejected too, a permanent deadlock in which the new key can never even be
 // registered (incident 2026-09-08). Register the spare while the current
 // scheme is live, then pause.
+//
+// Un-pausing is the mirror image: the un-paused scheme becomes the active one,
+// so this block's operator must already hold a key of it (and two thirds of
+// the stake must, checkUnpauseKeyQuorum).
 func checkPauseLeavesRegisteredKey(newBlock, lastBlock Block, slot []byte, primary bool) error {
 	next, err := oqs.FromBytesToEncryptionConfig(slot)
 	if err != nil {
@@ -257,6 +261,15 @@ func checkPauseLeavesRegisteredKey(newBlock, lastBlock Block, slot []byte, prima
 	if err != nil {
 		return err
 	}
+	op := newBlock.GetHeader().OperatorAccount
+	if isUnpause(cur, next) {
+		// The un-paused scheme signs this producer's next blocks.
+		if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(op, primary, next.PubKeyLength, lastBlock.GetHeader().Height); kerr != nil {
+			return fmt.Errorf("refusing to un-pause %q: operator %s has no registered key of it - register it first, then un-pause",
+				next.SigName, op.GetHex())
+		}
+		return nil
+	}
 	if !(next.IsPaused && !cur.IsPaused && next.SigName == cur.SigName) {
 		return nil
 	}
@@ -264,7 +277,6 @@ func checkPauseLeavesRegisteredKey(newBlock, lastBlock Block, slot []byte, prima
 	if err != nil {
 		return err
 	}
-	op := newBlock.GetHeader().OperatorAccount
 	if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, !primary, becomesActive.PubKeyLength); kerr != nil {
 		return fmt.Errorf("refusing to pause %q: the scheme %q that becomes active has no registered key for operator %s - register it first, then pause",
 			cur.SigName, becomesActive.SigName, op.GetHex())
@@ -995,6 +1007,7 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	if err != nil {
 		return err
 	}
+	applyRecoveryMaintenance(*newBlock, lastBlock)
 	tProcess = time.Since(phase)
 	phase = time.Now()
 	// Batch every transaction's three DB writes — confirmed-store, included-mark

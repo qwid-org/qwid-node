@@ -131,10 +131,10 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	// S4-05: our vote goes into the header only if the proofs in this very
 	// block carry enough stake for it; otherwise repeat the parent's config.
 	// Validators run the same tally, so a block is never built to be rejected.
-	if len(encryption1) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption1, true, heightTransaction) {
+	if len(encryption1) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption1, true, heightTransaction, myWallet.MainAddress) {
 		encryption1 = lastBlock.GetHeader().Encryption1
 	}
-	if len(encryption2) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption2, false, heightTransaction) {
+	if len(encryption2) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption2, false, heightTransaction, myWallet.MainAddress) {
 		encryption2 = lastBlock.GetHeader().Encryption2
 	}
 	common.BlockMutex.Unlock()

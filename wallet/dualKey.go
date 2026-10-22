@@ -1,8 +1,11 @@
 package wallet
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/qwid-org/qwid-node/common"
 )
 
 // RegisteredKeys is the node's PUBA answer about one identity.
@@ -11,10 +14,12 @@ import (
 // registered in each slot (what can sign right now); AnyPrimary/AnySecondary
 // whether any key at all is, which is what the consensus dual-key rule counts.
 type RegisteredKeys struct {
-	HasPrimary   bool
-	HasSecondary bool
-	AnyPrimary   bool
-	AnySecondary bool
+	HasPrimary      bool
+	HasSecondary    bool
+	AnyPrimary      bool
+	AnySecondary    bool
+	RecoveryCommit  common.Address // effective recovery commitment, zero if none
+	RecoveryPending common.Address // commitment still maturing, zero if none
 }
 
 // ParsePUBA reads the node's PUBA reply.
@@ -25,6 +30,8 @@ func ParsePUBA(reply []byte) (RegisteredKeys, error) {
 		Addresses    []struct {
 			Primary bool `json:"primary"`
 		} `json:"addresses"`
+		RecoveryCommit  string `json:"recoveryCommit"`
+		RecoveryPending string `json:"recoveryPending"`
 	}
 	if err := json.Unmarshal(reply, &resp); err != nil {
 		return RegisteredKeys{}, err
@@ -40,6 +47,21 @@ func ParsePUBA(reply []byte) (RegisteredKeys, error) {
 	// A current-scheme key is a key; never report fewer than that.
 	k.AnyPrimary = k.AnyPrimary || k.HasPrimary
 	k.AnySecondary = k.AnySecondary || k.HasSecondary
+	for _, f := range []struct {
+		hexv string
+		dst  *common.Address
+	}{{resp.RecoveryCommit, &k.RecoveryCommit}, {resp.RecoveryPending, &k.RecoveryPending}} {
+		if f.hexv == "" {
+			continue
+		}
+		b, err := hex.DecodeString(f.hexv)
+		if err != nil {
+			return RegisteredKeys{}, err
+		}
+		if err := f.dst.Init(b); err != nil {
+			return RegisteredKeys{}, err
+		}
+	}
 	return k, nil
 }
 

@@ -697,6 +697,12 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "Registering a key while its signing scheme is paused must be a pure registration: set the amount to 0 and send again (funds can be moved after the key is registered).", http.StatusBadRequest)
 			return
 		}
+		// A paused scheme may not set a commitment (a forger of it could plant
+		// its own), so only a live-signed registration carries one.
+		signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
+		if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused {
+			ar = registrationRecipient(ar)
+		}
 	}
 
 	// Build transaction
@@ -1431,6 +1437,26 @@ func registrationSignPrimary(registerPrimary, defaultPrimary bool) bool {
 			map[bool]string{true: "primary", false: "secondary"}[defaultPrimary])
 	}
 	return chosen
+}
+
+// registrationRecipient: a pure registration to oneself carries the
+// identity's first recovery commitment when it has none yet (CLAUDE.md
+// "Recovery commitment"). Any failure keeps the plain self-registration:
+// the commitment can be set by any later registration.
+func registrationRecipient(recipient common.Address) common.Address {
+	if !bytes.Equal(recipient.GetBytes(), MainWallet.MainAddress.GetBytes()) {
+		return recipient
+	}
+	keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))))
+	if err != nil {
+		return recipient
+	}
+	c, err := MainWallet.CommitmentForRegistration(keys)
+	if err != nil {
+		logger.GetLogger().Println("no recovery commitment set:", err)
+		return recipient
+	}
+	return c
 }
 
 // sendRefusal reports why consensus would refuse tx because of the sender's

@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 	"sync/atomic"
+	"time"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
@@ -1240,9 +1240,11 @@ func handlePUBA(line []byte, reply *[]byte) {
 		Primary bool   `json:"primary"`
 	}
 	type PubKeyResponse struct {
-		HasPrimary   bool             `json:"hasPrimary"`
-		HasSecondary bool             `json:"hasSecondary"`
-		Addresses    []PubKeyAddrInfo `json:"addresses"`
+		HasPrimary      bool             `json:"hasPrimary"`
+		HasSecondary    bool             `json:"hasSecondary"`
+		Addresses       []PubKeyAddrInfo `json:"addresses"`
+		RecoveryCommit  string           `json:"recoveryCommit,omitempty"`
+		RecoveryPending string           `json:"recoveryPending,omitempty"`
 	}
 
 	resp := PubKeyResponse{}
@@ -1267,6 +1269,17 @@ func handlePUBA(line []byte, reply *[]byte) {
 	}
 	if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(addr, false, common.PubKeyLength2(false)); err == nil {
 		resp.HasSecondary = true
+	}
+
+	if acc, ok := account.GetAccountByAddressBytes(addr.GetBytes()); ok {
+		var zero [common.AddressLength]byte
+		eff := acc.EffectiveRecoveryCommit(common.GetHeight() + 1)
+		if eff != zero {
+			resp.RecoveryCommit = hex.EncodeToString(eff[:])
+		}
+		if acc.RecoveryPendingCommit != zero && acc.RecoveryPendingCommit != eff {
+			resp.RecoveryPending = hex.EncodeToString(acc.RecoveryPendingCommit[:])
+		}
 	}
 
 	result, err := json.Marshal(resp)

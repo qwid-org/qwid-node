@@ -53,6 +53,18 @@ func computeStateRoot(dump io.Writer) (common.Hash, error) {
 		for _, m := range a.MultiSignAddresses {
 			w.bytes(m[:])
 		}
+		w.bytes(a.RecoveryCommit[:])
+		w.bytes(a.RecoveryPendingCommit[:])
+		w.i64(a.RecoveryPendingHeight)
+	}
+	w.section("recovery-binds")
+	binds := account.Accounts.RecoveryBinds
+	for _, k := range account.SortRecoveryBindKeys(binds) {
+		b := binds[k]
+		w.bytes(k[:])
+		w.bytes(b.Identity[:])
+		w.bytes(b.Payload[:])
+		w.i64(b.Height)
 	}
 	account.AccountsRWMutex.RUnlock()
 

@@ -192,7 +192,15 @@ func ValidateContractDeployment(tx transactionsDefinition.Transaction) error {
 // transaction is still invalid. This only stops the node from proposing one.
 func FilterUnbuildableTransactions(txs []transactionsDefinition.Transaction, height int64) []transactionsDefinition.Transaction {
 	kept := txs[:0]
+	reveals := map[[common.AddressLength]byte]bool{}
 	for _, tx := range txs {
+		if tx.IsRecoveryReveal() {
+			s := tx.GetSenderAddress().ByteValue
+			if reveals[s] {
+				continue // a second reveal would fail against the consumed commitment
+			}
+			reveals[s] = true
+		}
 		// Outside the height window (S4-01) the block would be rejected; a
 		// transaction that has aged out can never become valid again.
 		if !TransactionHeightInWindow(tx.GetHeight(), height) {
@@ -403,6 +411,9 @@ func ProcessMultiSignAndEscrow(tx transactionsDefinition.Transaction) error {
 func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blockTime int64) error {
 	fee, err := tx.CalcFee()
 	if err != nil {
+		return err
+	}
+	if handled, err := processRecoveryTransaction(tx, height, fee); handled {
 		return err
 	}
 	amount := tx.TxData.Amount

@@ -12,7 +12,9 @@ import (
 
 type AccountsType struct {
 	AllAccounts map[[common.AddressLength]byte]Account `json:"all_accounts"`
-	Height      int64                                  `json:"height"`
+	// Phase-1 recovery binds keyed by common.RecoveryBindKey(identity, tag).
+	RecoveryBinds map[[32]byte]RecoveryBind `json:"recovery_binds,omitempty"`
+	Height        int64                     `json:"height"`
 }
 
 var Accounts AccountsType
@@ -93,6 +95,15 @@ func (at AccountsType) Marshal() []byte {
 		buffer.Write(address[:])                               // Write address
 		buffer.Write(common.BytesToLenAndBytes(acc.Marshal())) // Marshal and write account
 	}
+	keys := sortedBindKeys(at.RecoveryBinds)
+	buffer.Write(common.GetByteInt64(int64(len(keys))))
+	for _, k := range keys {
+		b := at.RecoveryBinds[k]
+		buffer.Write(k[:])
+		buffer.Write(b.Identity[:])
+		buffer.Write(b.Payload[:])
+		buffer.Write(common.GetByteInt64(b.Height))
+	}
 	buffer.Write(common.GetByteInt64(at.Height))
 	return buffer.Bytes()
 }
@@ -135,6 +146,28 @@ func (at *AccountsType) Unmarshal(data []byte) error {
 		}
 
 		at.AllAccounts[address] = acc
+	}
+	at.RecoveryBinds = map[[32]byte]RecoveryBind{}
+	if len(data) > 8 {
+		if len(data) < 16 {
+			return fmt.Errorf("error with unmarshal recovery binds")
+		}
+		n := common.GetInt64FromByte(data[:8])
+		data = data[8:]
+		const entry = 32 + common.AddressLength + 32 + 8
+		if n < 0 || n > int64((len(data)-8)/entry) {
+			return fmt.Errorf("invalid recovery bind count %d", n)
+		}
+		for i := int64(0); i < n; i++ {
+			var k [32]byte
+			var b RecoveryBind
+			copy(k[:], data[:32])
+			copy(b.Identity[:], data[32:32+common.AddressLength])
+			copy(b.Payload[:], data[32+common.AddressLength:64+common.AddressLength])
+			b.Height = common.GetInt64FromByte(data[64+common.AddressLength : entry])
+			at.RecoveryBinds[k] = b
+			data = data[entry:]
+		}
 	}
 	if len(data) != 8 {
 		return fmt.Errorf("error with unmarshal account")

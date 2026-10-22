@@ -246,6 +246,10 @@ func ShowSendPage() *widgets.QTabWidget {
 				info = &v
 				return
 			}
+			signingPaused := (primary && common.IsPaused()) || (!primary && common.IsPaused2())
+			if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused {
+				ar = registrationRecipientGUI(ar)
+			}
 		} else {
 			if primaryChb.IsChecked() {
 				primary = true
