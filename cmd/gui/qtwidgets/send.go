@@ -300,6 +300,11 @@ func ShowSendPage() *widgets.QTabWidget {
 			info = &v
 			return
 		}
+		if refusal := sendRefusalGUI(&tx, primary); refusal != "" {
+			v = refusal
+			info = &v
+			return
+		}
 		err = tx.Sign(MainWallet, primary)
 		if err != nil {
 			v = fmt.Sprint(err)

@@ -11,7 +11,6 @@ import (
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
-	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
 	"github.com/qwid-org/qwid-node/wallet"
@@ -46,34 +45,41 @@ type GenesisTransactions struct {
 
 // Genesis represents the genesis file.
 type Genesis struct {
-	Timestamp                    int64                 `json:"date"`
-	ChainID                      int16                 `json:"chain_id"`   // The chain id represents an unique id for this running instance.
-	Difficulty                   int32                 `json:"difficulty"` // How difficult it needs to be to solve the work problem.
-	RewardRatio                  float64               `json:"reward_ratio"`
-	BlockTimeInterval            float32               `json:"block_time_interval"`
-	MaxTotalSupply               int64                 `json:"max_total_supply"`
-	InitSupply                   int64                 `json:"init_supply"`
-	DifficultyMultiplier         int32                 `json:"difficulty_multiplier"`
-	DifficultyChange             float32               `json:"difficulty_change"`
-	MaxGasUsage                  int64                 `json:"max_gas_usage"`
-	MaxGasPrice                  int64                 `json:"max_gas_price"`
-	MaxTransactionsPerBlock      int16                 `json:"max_transactions_per_block"`
-	MaxTransactionInPool         int                   `json:"max_transaction_in_pool"`
-	MaxPeersConnected            int                   `json:"max_peers_connected"`
-	NumberOfHashesInBucket       int64                 `json:"number_of_hashes_in_bucket"`
-	NumberOfBlocksInBucket       int64                 `json:"number_of_blocks_in_bucket"`
-	MinStakingForNode            int64                 `json:"min_staking_for_node"`
-	MinStakingUser               int64                 `json:"min_staking_user"`
-	OraclesHeightDistance        int64                 `json:"oracles_height_distance"`
-	VotingHeightDistance         int64                 `json:"voting_height_distance"`
-	StakedBalances               []GenesisStaking      `json:"staked_balances"`
-	Transactions                 []GenesisTransactions `json:"transactions"`
-	Signature                    string                `json:"signature"`
-	OperatorPubKey               string                `json:"operator_pub_key"`
-	MaxTransactionDelay          int64                 `json:"max_transaction_delay"`
-	MaxTransactionInMultiSigPool int64                 `json:"max_transaction_in_multi_sig_pool"`
-	MessageInitialization        []byte                `json:"message_initialization"`
-	MaxMessageSizeBytes          int32                 `json:"max_message_size_bytes"`
+	Timestamp               int64                 `json:"date"`
+	ChainID                 int16                 `json:"chain_id"`   // The chain id represents an unique id for this running instance.
+	Difficulty              int32                 `json:"difficulty"` // How difficult it needs to be to solve the work problem.
+	RewardRatio             float64               `json:"reward_ratio"`
+	BlockTimeInterval       float32               `json:"block_time_interval"`
+	MaxTotalSupply          int64                 `json:"max_total_supply"`
+	InitSupply              int64                 `json:"init_supply"`
+	DifficultyMultiplier    int32                 `json:"difficulty_multiplier"`
+	DifficultyChange        float32               `json:"difficulty_change"`
+	MaxGasUsage             int64                 `json:"max_gas_usage"`
+	MaxGasPrice             int64                 `json:"max_gas_price"`
+	MaxTransactionsPerBlock int16                 `json:"max_transactions_per_block"`
+	MaxTransactionInPool    int                   `json:"max_transaction_in_pool"`
+	MaxPeersConnected       int                   `json:"max_peers_connected"`
+	NumberOfHashesInBucket  int64                 `json:"number_of_hashes_in_bucket"`
+	NumberOfBlocksInBucket  int64                 `json:"number_of_blocks_in_bucket"`
+	MinStakingForNode       int64                 `json:"min_staking_for_node"`
+	MinStakingUser          int64                 `json:"min_staking_user"`
+	OraclesHeightDistance   int64                 `json:"oracles_height_distance"`
+	VotingHeightDistance    int64                 `json:"voting_height_distance"`
+	StakedBalances          []GenesisStaking      `json:"staked_balances"`
+	Transactions            []GenesisTransactions `json:"transactions"`
+	Signature               string                `json:"signature"`
+	OperatorPubKey          string                `json:"operator_pub_key"`
+	// The operator's secondary key, registered under the operator identity.
+	// Optional (omitempty keeps the digest of configs without it unchanged),
+	// but the dual-key rule lets an identity send nothing but key
+	// registrations until it holds both keys, so without it - or a pub_key_2
+	// on the operator's own staking entry - the operator's first act must be
+	// registering its spare.
+	OperatorPubKey2              string `json:"operator_pub_key_2,omitempty"`
+	MaxTransactionDelay          int64  `json:"max_transaction_delay"`
+	MaxTransactionInMultiSigPool int64  `json:"max_transaction_in_multi_sig_pool"`
+	MessageInitialization        []byte `json:"message_initialization"`
+	MaxMessageSizeBytes          int32  `json:"max_message_size_bytes"`
 }
 
 // GenesisConfigDigest hashes the whole genesis configuration - consensus
@@ -129,6 +135,39 @@ func storeGenesisPubKey(pubkeystr string, primary bool) common.PubKey {
 	return pubKeyOp1
 }
 
+// storeGenesisSecondaryKey registers a secondary key under owner's identity,
+// exactly as a block does for a registration authorised by owner's primary
+// key: the key record names owner, and its derived address joins owner's list.
+//
+// storeGenesisPubKey must not be used for this. It names the key's OWN derived
+// address as its identity, which for a spare opens a separate identity nobody
+// owns and leaves owner's list pointing at a record that names somebody else.
+func storeGenesisSecondaryKey(pubkeystr string, owner common.Address) (common.PubKey, error) {
+	b, err := hex.DecodeString(pubkeystr)
+	if err != nil {
+		return common.PubKey{}, fmt.Errorf("cannot decode secondary pub key in genesis config: expected hex: %w", err)
+	}
+	if !common.IsValidPubKeyLength(len(b), false) {
+		return common.PubKey{}, fmt.Errorf("secondary pub key in genesis config is %d bytes, which matches no secondary scheme", len(b))
+	}
+	pk := common.PubKey{}
+	if err := pk.Init(b, owner); err != nil {
+		return common.PubKey{}, err
+	}
+	pk.Primary = false
+	if pk.Address, err = common.PubKeyToAddress(b, false); err != nil {
+		return common.PubKey{}, err
+	}
+	pk.MainAddress = owner
+	if err := blocks.StorePubKey(pk); err != nil {
+		return common.PubKey{}, err
+	}
+	if err := blocks.StorePubKeyInPatriciaTrie(pk); err != nil {
+		return common.PubKey{}, err
+	}
+	return pk, nil
+}
+
 func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	//myWallet := wallet.GetActiveWallet()
 	//logger.GetLogger().Println(myWallet.PublicKey.GetHex())
@@ -138,6 +177,11 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 	}
 	pkOp1 := storeGenesisPubKey(genesis.OperatorPubKey, true)
 	addressOp1 := pkOp1.Address
+	if genesis.OperatorPubKey2 != "" {
+		if _, err := storeGenesisSecondaryKey(genesis.OperatorPubKey2, addressOp1); err != nil {
+			logger.GetLogger().Fatalf("cannot register operator_pub_key_2: %v", err)
+		}
+	}
 	accDel1 := account.Accounts.AllAccounts[addressOp1.ByteValue]
 	accDel1.Balance = initSupplyWithoutStaked
 	accDel1.Address = addressOp1.ByteValue
@@ -203,10 +247,8 @@ func CreateBlockFromGenesis(genesis Genesis) blocks.Block {
 		}
 		pk1 := storeGenesisPubKey(stkTx.PubKey, true)
 		if stkTx.PubKey2 != "" {
-			pk2 := storeGenesisPubKey(stkTx.PubKey2, false)
-			err := pubkeys.AddPubKeyToAddress(pk2, pk1.Address)
-			if err != nil {
-				logger.GetLogger().Fatal("cannot add secondary address")
+			if _, err := storeGenesisSecondaryKey(stkTx.PubKey2, pk1.Address); err != nil {
+				logger.GetLogger().Fatalf("cannot register pub_key_2 of staking account %s: %v", stkTx.Account, err)
 			}
 		}
 		if err != nil {

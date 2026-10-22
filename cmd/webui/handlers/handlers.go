@@ -730,6 +730,11 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		GasUsage:  0,
 	}
 
+	if refusal := sendRefusal(&tx, signPrimary); refusal != "" {
+		jsonError(w, refusal, http.StatusBadRequest)
+		return
+	}
+
 	// Get current height from stats
 	reply := clientrpc.Call(SignMessage([]byte("STAT")))
 	sm := statistics.GetStatsManager()
@@ -1426,6 +1431,18 @@ func registrationSignPrimary(registerPrimary, defaultPrimary bool) bool {
 			map[bool]string{true: "primary", false: "secondary"}[defaultPrimary])
 	}
 	return chosen
+}
+
+// sendRefusal reports why consensus would refuse tx because of the sender's
+// keys (dual-key rule, paused-scheme rule; wallet.SendRefusal), or "" — also
+// when the node cannot say which keys are registered, leaving it to consensus.
+func sendRefusal(tx *transactionsDefinition.Transaction, signPrimary bool) string {
+	keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))))
+	if err != nil {
+		return ""
+	}
+	signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
+	return wallet.SendRefusal(keys, len(tx.TxData.Pubkey.GetBytes()) > 0, tx.IsKeyRegistration(), signingPaused)
 }
 
 func identityHasRegisteredKey() bool {

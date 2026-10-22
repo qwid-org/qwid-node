@@ -466,6 +466,22 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			return false
 		}
 	}
+	// Dual-key rule: an identity may send nothing but registrations of its
+	// keys until it holds BOTH a primary and a secondary key. When one scheme
+	// breaks, its signatures prove nothing about a published key, so the
+	// replacement key must be vouched for by the OTHER, independent key; an
+	// identity holding only the broken one could never be told apart from
+	// whoever forges it. Requiring both before any value moves means every
+	// identity that can lose something has that second key.
+	if sender := tx.GetSenderAddress(); kind == txKindRegular && !tx.IsKeyRegistration() &&
+		!pubkeys.HasOperatorKeysAsOf(sender, asOf) {
+		if ok, skipped := shouldLogVerifyFailure(sender); ok {
+			logger.GetLogger().Printf("Verify: sender %s must register both its primary and its secondary key "+
+				"(each by a pure registration: amount 0, to itself) before sending anything else%s",
+				sender.GetHex(), suppressedNote(skipped))
+		}
+		return false
+	}
 	if tx.GetLockedAmount() > 0 {
 		n, err := account.IntDelegatedAccountFromAddress(tx.GetDelegatedAccountForLocking())
 
@@ -690,7 +706,6 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 				signingScheme = sigName2
 			}
 			authorised := false
-			authorisedByDerivingKey := false
 			if expLen, lerr := oqs.PubKeyLength(signingScheme); lerr == nil {
 				if existing, aerr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, primary, expLen, asOf); aerr == nil {
 					// Verify the signature against the REGISTERED key, not the
@@ -698,34 +713,18 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 					pkb = existing.GetBytes()
 					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
 					authorised = true
-					// Does the authorizing key DERIVE the sender identity? Used
-					// by the stranded-identity pause exemption below: only the
-					// identity-deriving key may authorize under a pause.
-					if da, derr := common.PubKeyToAddress(existing.GetBytes(), primary); derr == nil {
-						authorisedByDerivingKey = bytes.Equal(da.GetBytes(), senderAddr.GetBytes())
-					}
 				}
 			}
-			// Stranded-identity escape hatch (incident 2026-09-08): a PURE
-			// REGISTRATION (Amount==0) of a key the sender does not yet hold in
-			// the enclosed key's slot, authorized by the REGISTERED key that
-			// DERIVES the sender identity, verifies even while the signing
-			// scheme is paused. Without this, an identity whose only registered
-			// key belongs to the paused scheme can never register a key of the
-			// active scheme — permanently frozen. Scope: identities that already
-			// hold a key of the enclosed key's scheme are NOT exempt (nothing to
-			// rescue), so operators who registered the new scheme before the
-			// pause (enforced for block producers by the pause gate in
-			// blocks.CheckBaseBlock) gain no new exposure.
-			if authorised && authorisedByDerivingKey && tx.isPureRegistration() {
-				if _, serr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, pkPrimary, len(tx.TxData.GetPubKey().GetBytes()), asOf); serr != nil {
-					if primary {
-						effPaused = false
-					} else {
-						effPaused2 = false
-					}
-				}
-			}
+			// No pause exemption on this path. The stranded-identity escape
+			// hatch (incident 2026-09-08) admitted a registration signed with
+			// the PAUSED scheme when the sender held no key in the enclosed
+			// key's slot. But a scheme is paused because it is presumed
+			// broken, and the authorising key here is registered, i.e.
+			// published: its signature is exactly what a forger produces. The
+			// forger enclosed its own spare, named the victim, and then signed
+			// as the victim with the live spare. A new key is therefore
+			// authorised only by a key of a LIVE scheme; the dual-key rule
+			// guarantees every identity that can send anything holds one.
 			if !authorised {
 				// Nothing is registered for this sender yet, so there is no
 				// identity to authorise anything: the very first key can only
@@ -796,7 +795,12 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// a signature forgery. Without it, no identity derived from the paused
 		// scheme can ever be bootstrapped, freezing every participant who did
 		// not register before the pause.
-		if tx.isPureRegistration() && primary == pkPrimary &&
+		//
+		// Only while the key is still UNPUBLISHED (not in the registry as of
+		// asOf): once registered, the preimage argument is gone and a forger
+		// of the paused scheme could re-sign this registration at will, each
+		// copy burning the victim's gas.
+		if !resolvedFromRegistry && tx.isPureRegistration() && primary == pkPrimary &&
 			bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes()) {
 			if primary {
 				effPaused = false
@@ -853,6 +857,13 @@ func (tx *Transaction) isPureRegistration() bool {
 		d.EscrowTransactionsDelay == 0 && d.MultiSignNumber == 0 && len(d.MultiSignAddresses) == 0 &&
 		bytes.Equal(d.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes()) &&
 		bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength))
+}
+
+// IsKeyRegistration reports whether the transaction is a pure registration
+// that actually carries a key - the only kind an identity without both keys
+// may send. Exported so wallets apply the same definition before sending.
+func (tx *Transaction) IsKeyRegistration() bool {
+	return tx.isPureRegistration() && len(tx.TxData.Pubkey.GetBytes()) > 0
 }
 
 func bootstrapBindsKey(pkAddr, senderAddr common.Address) bool {
