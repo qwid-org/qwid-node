@@ -445,6 +445,44 @@ Run the generator with your node reachable and choose "restore":
 It finds the account your phrase already owns on chain, whichever scheme its
 address came from, and creates keys for the schemes currently in force.
 
+### Who can attach a key to your account
+
+**Your recovery commitment.** The commitment is `C = H(S)`, where the
+one-time secret `S` is derived from your phrase and your address. `S` is never
+stored anywhere: it is recomputed from the phrase when needed, and only the
+hash `C` is on chain. A recovery reveals `S` once, and the same transaction
+sets your next commitment, made from the next secret.
+
+There are exactly three ways a key can be attached to an account:
+
+1. **A normal registration**, signed by a key already registered to the
+   account in a scheme that is **not paused**. A paused scheme approves
+   nothing.
+2. **The first key of an empty account**: only the key whose hash is the
+   account's address, and only while nothing is registered for it yet.
+3. **Recovery** (`recoverKey`), which needs all four of these:
+   - a secret `S` whose hash equals your matured commitment;
+   - a bind for exactly that `S`, at least 360 blocks old (only the first bind
+     for a given `S` counts);
+   - that bind naming exactly this new key and the next commitment;
+   - the reveal signed by the new key itself.
+
+What an attacker can and cannot do:
+
+| Attacker | Can they attach their own key? |
+|---|---|
+| Broke a signature scheme that validators have since **paused** | **No.** A paused scheme approves no keys and sets no commitments, and the pause voids commitments that had not matured, including any an attacker set with forged signatures. |
+| Does not know your phrase | **No.** They would have to find `S` from its hash `C`. |
+| Saw your `S` on the network during your recovery | **No.** Their bind would come after yours, and yours names your key; your reveal must also be signed with your new key. |
+| Broke a scheme **before** it was noticed and paused | **Yes**, but within that window they could take your funds directly anyway. A commitment they set needs a week to mature and is voided if the pause comes first. |
+| Stole your **private key** of a working scheme (not the phrase) | **Partly**: they can add a key and, after a week, replace your commitment. On an escrow account you see it during the delay and can cancel it; on a multi-signature account it needs approvals. |
+| Has your **phrase** | **Yes, everything.** The phrase is the master key of the account. |
+
+In short: your phrase and your keys of working schemes protect the account.
+A broken, paused scheme gives an attacker nothing. No recovery mechanism can
+protect against theft of the phrase, or against a key stolen before anyone
+noticed.
+
 ### Limits
 
 - A wallet without a recovery phrase cannot be recovered this way: back up
