@@ -6,7 +6,9 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 )
 
 func rootNow(t *testing.T) common.Hash {
@@ -320,25 +322,157 @@ func TestFilterKeepsOneRevealPerIdentity(t *testing.T) {
 	}
 }
 
-func TestMaintenanceVoidsPendingOnSchemeChange(t *testing.T) {
+// A pending commitment is voided only when a block marks a scheme as broken:
+// the primary paused, or the spare replaced. Replacing an already-paused
+// primary or un-pausing changes nothing about which key could have been
+// forged, so those must keep it - otherwise the commitments users set with
+// the live spare right after a break would be voided again by the very
+// changes that follow it (replace, un-pause), which can come blocks apart.
+func TestMaintenanceVoidsPendingOnlyOnBreakage(t *testing.T) {
+	logger.InitLogger()
 	withBalanceTestDB(t)
-	a := testAddress(0x51)
-	account.Accounts = account.AccountsType{AllAccounts: map[[common.AddressLength]byte]account.Account{
-		a.ByteValue: {Address: a.ByteValue, RecoveryPendingCommit: [common.AddressLength]byte{1}, RecoveryPendingHeight: 100},
-	}}
-	last := parentAt(t, 100)
-	same := childOf(last)
-	same.BaseBlock.BaseHeader.Encryption1 = last.GetHeader().Encryption1
-	same.BaseBlock.BaseHeader.Encryption2 = last.GetHeader().Encryption2
-	applyRecoveryMaintenance(same, last)
-	if account.Accounts.AllAccounts[a.ByteValue].RecoveryPendingCommit == ([common.AddressLength]byte{}) {
-		t.Fatal("pending commitment voided without a scheme change")
+	mlDSA44 := encCfg(t, "ML-DSA-44", 1312, 2560, 2420, true)
+	cases := []struct {
+		name         string
+		parent, next [2][]byte
+		voids        bool
+	}{
+		{"no change", [2][]byte{falcon512(t, false), mayo5(t)}, [2][]byte{falcon512(t, false), mayo5(t)}, false},
+		{"primary paused", [2][]byte{falcon512(t, false), mayo5(t)}, [2][]byte{falcon512(t, true), mayo5(t)}, true},
+		{"paused primary replaced", [2][]byte{falcon512(t, true), mayo5(t)}, [2][]byte{falcon1024(t, true), mayo5(t)}, false},
+		{"primary un-paused", [2][]byte{falcon1024(t, true), mayo5(t)}, [2][]byte{falcon1024(t, false), mayo5(t)}, false},
+		{"spare replaced", [2][]byte{falcon512(t, false), mayo5(t)}, [2][]byte{falcon512(t, false), mlDSA44}, true},
 	}
-	changed := same
-	changed.BaseBlock.BaseHeader.Encryption1 = append([]byte{}, last.GetHeader().Encryption1...)
-	changed.BaseBlock.BaseHeader.Encryption1[len(changed.BaseBlock.BaseHeader.Encryption1)-1] ^= 1
-	applyRecoveryMaintenance(changed, last)
-	if account.Accounts.AllAccounts[a.ByteValue].RecoveryPendingCommit != ([common.AddressLength]byte{}) {
-		t.Fatal("unmatured pending commitment survived a scheme change")
+	for _, c := range cases {
+		a := testAddress(0x51)
+		account.Accounts = account.AccountsType{AllAccounts: map[[common.AddressLength]byte]account.Account{
+			a.ByteValue: {Address: a.ByteValue, RecoveryPendingCommit: [common.AddressLength]byte{1}, RecoveryPendingHeight: 100},
+		}}
+		applyRecoveryMaintenance(blockWithEnc(101, c.next[0], c.next[1]), blockWithEnc(100, c.parent[0], c.parent[1]))
+		voided := account.Accounts.AllAccounts[a.ByteValue].RecoveryPendingCommit == ([common.AddressLength]byte{})
+		if voided != c.voids {
+			t.Errorf("%s: voided=%v, want %v", c.name, voided, c.voids)
+		}
+	}
+}
+
+// A commitment change hands over control of the account after a scheme break,
+// so it is exactly as important as a transfer: an escrow account must get its
+// delay and the chance to cancel, a multisig account its approvals. It used to
+// be set at inclusion for every account, its maturity counted from there.
+
+func commitmentRegistration(t *testing.T, owner stageBKey, c common.Address, nonce int64) transactionsDefinition.Transaction {
+	t.Helper()
+	reg := pureRegistration(t, owner.addr, enclosed(t, owner, owner.addr, true), owner, true)
+	reg.TxParam.Nonce = nonce
+	reg.TxData.Recipient = c
+	signIn(t, &reg, owner, true)
+	return reg
+}
+
+func withAccountPolicy(t *testing.T, a common.Address, delay int64, signers ...common.Address) {
+	t.Helper()
+	acc := account.Accounts.AllAccounts[a.ByteValue]
+	acc.TransactionDelay = delay
+	for _, s := range signers {
+		acc.MultiSignAddresses = append(acc.MultiSignAddresses, s.ByteValue)
+	}
+	acc.MultiSignNumber = uint8(len(signers))
+	account.Accounts.AllAccounts[a.ByteValue] = acc
+}
+
+func freshPolicyPools(t *testing.T) {
+	t.Helper()
+	savedE, savedM := transactionsPool.PoolTxEscrow, transactionsPool.PoolTxMultiSign
+	transactionsPool.PoolTxEscrow = transactionsPool.NewTransactionPool(common.MaxTransactionInPool, 1)
+	transactionsPool.PoolTxMultiSign = transactionsPool.NewTransactionPool(common.MaxTransactionInPool, 2)
+	t.Cleanup(func() { transactionsPool.PoolTxEscrow, transactionsPool.PoolTxMultiSign = savedE, savedM })
+}
+
+func pendingCommit(a common.Address) ([common.AddressLength]byte, int64) {
+	acc, _ := account.GetAccountByAddressBytes(a.GetBytes())
+	return acc.RecoveryPendingCommit, acc.RecoveryPendingHeight
+}
+
+func TestEscrowCommitmentAppliesWhenTheDelayEnds(t *testing.T) {
+	owner := registeredStageBKey(t)
+	fund(owner.addr)
+	freshPolicyPools(t)
+	withAccountPolicy(t, owner.addr, 10)
+	c, _ := common.RecoveryCommitment(recoverySecret(5))
+	reg := commitmentRegistration(t, owner, c, 21)
+
+	if err := ProcessTransaction(reg, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+		t.Fatal("an escrow account's commitment was set at inclusion, before its delay")
+	}
+	if !transactionsPool.PoolTxEscrow.HasTransaction(reg.Hash.GetBytes()) {
+		t.Fatal("the commitment change is not held in escrow")
+	}
+	_ = ProcessTransactionsEscrow(109, nil)
+	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+		t.Fatal("the commitment applied before the escrow delay ended")
+	}
+	_ = ProcessTransactionsEscrow(110, nil)
+	if p, h := pendingCommit(owner.addr); p != c.ByteValue || h != 110 {
+		t.Fatalf("after the delay: pending %x at %d, want the commitment maturing from 110", p, h)
+	}
+	if _, exists := account.GetAccountByAddressBytes(c.GetBytes()); exists {
+		t.Fatal("settlement created an account for the commitment address")
+	}
+}
+
+// Cancelling the escrow entry (what validateEscrowCancellation authorises
+// removes it from the pool) must leave the commitment unchanged.
+func TestCancelledEscrowCommitmentNeverApplies(t *testing.T) {
+	owner := registeredStageBKey(t)
+	fund(owner.addr)
+	freshPolicyPools(t)
+	withAccountPolicy(t, owner.addr, 10)
+	c, _ := common.RecoveryCommitment(recoverySecret(6))
+	reg := commitmentRegistration(t, owner, c, 22)
+	if err := ProcessTransaction(reg, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	transactionsPool.RemoveEscrowTransaction(reg.Hash.GetBytes())
+	_ = ProcessTransactionsEscrow(200, nil)
+	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+		t.Fatal("a cancelled commitment change applied")
+	}
+}
+
+func TestMultiSignCommitmentNeedsItsApprovals(t *testing.T) {
+	owner := registeredStageBKey(t)
+	signer := testAddress(0x61)
+	fund(owner.addr, signer)
+	freshPolicyPools(t)
+	withAccountPolicy(t, owner.addr, 0, signer)
+	c, _ := common.RecoveryCommitment(recoverySecret(7))
+	reg := commitmentRegistration(t, owner, c, 23)
+
+	if err := ProcessTransaction(reg, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+		t.Fatal("a multisig account's commitment was set without approvals")
+	}
+	approval := transactionsDefinition.Transaction{
+		TxParam: transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: signer, SendingTime: 1, Nonce: 24, MultiSignTx: reg.Hash},
+		TxData:  transactionsDefinition.TxData{Recipient: c},
+		Height:  101, GasPrice: 1, GasUsage: 1,
+	}
+	if err := approval.CalcHashAndSet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProcessTransaction(approval, 101, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProcessTransactionsMultiSign(approval, 101, nil); err != nil {
+		t.Fatal(err)
+	}
+	if p, h := pendingCommit(owner.addr); p != c.ByteValue || h != 101 {
+		t.Fatalf("after the approval: pending %x at %d, want the commitment maturing from 101", p, h)
 	}
 }

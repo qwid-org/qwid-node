@@ -703,6 +703,11 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 			return fmt.Errorf("transaction should not be executed, should be delayed %v", mainTx.Hash.GetHex())
 		} else {
 			transactionsPool.RemoveMultiSignTransaction(mainTx.Hash.GetBytes())
+			if mainTx.IsCommitmentRegistration() {
+				// Approved: the commitment change takes effect, its maturity
+				// counting from here.
+				return settleCommitment(mainTx, height)
+			}
 			err = AddBalance(address.ByteValue, -amount)
 			if err != nil {
 				// this can happen very rare. Only when escrow is multisign account
@@ -785,6 +790,14 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 				if transactionsPool.AddMultiSignTransaction(tx) {
 					transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				}
+			} else if tx.IsCommitmentRegistration() {
+				// The escrow delay is over: the commitment change now takes
+				// effect, its maturity counting from here.
+				if err := settleCommitment(tx, height); err != nil {
+					return err
+				}
+				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
+				settled++
 			} else {
 				if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 					transactionsPool.AddMultiSignTransaction(tx)

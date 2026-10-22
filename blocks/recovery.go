@@ -6,8 +6,10 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/transactionsPool"
 )
 
 // processRecoveryTransaction applies the three recovery transaction kinds
@@ -55,26 +57,80 @@ func processRecoveryTransaction(tx transactionsDefinition.Transaction, height, f
 		return true, AddBalance(sender.ByteValue, -fee)
 
 	case tx.IsCommitmentRegistration():
+		// A commitment change hands control of the account over after a
+		// scheme break, so it is held exactly like a transfer: an escrow
+		// account's waits out its delay (and can be cancelled meanwhile), a
+		// multisig account's needs its approvals. Its maturity then counts
+		// from settlement (settleCommitment), not from inclusion. The fee is
+		// paid up front, as for every escrow and multisig transaction.
+		acc, ok := account.GetAccountByAddressBytes(sender.GetBytes())
+		if !ok {
+			return true, fmt.Errorf("no account %s for a recovery commitment", sender.GetHex())
+		}
 		account.AddTransactionsSender(sender.ByteValue, tx.GetHash())
-		if err := account.SetAccountPendingRecoveryCommit(sender.ByteValue, tx.TxData.Recipient.ByteValue, height); err != nil {
-			return true, err
+		switch {
+		case acc.TransactionDelay > 0:
+			tx.Height = height
+			transactionsPool.AddEscrowTransaction(tx)
+		case acc.MultiSignNumber > 0:
+			tx.Height = height
+			transactionsPool.AddMultiSignTransaction(tx)
+		default:
+			if err := settleCommitment(tx, height); err != nil {
+				return true, err
+			}
 		}
 		return true, AddBalance(sender.ByteValue, -fee)
 	}
 	return false, nil
 }
 
+// settleCommitment makes a commitment registration take effect: its
+// Recipient becomes the sender's pending commitment, maturing from height.
+func settleCommitment(tx transactionsDefinition.Transaction, height int64) error {
+	return account.SetAccountPendingRecoveryCommit(tx.GetSenderAddress().ByteValue, tx.TxData.Recipient.ByteValue, height)
+}
+
 // applyRecoveryMaintenance runs after a block's transfers: expired binds go,
-// and a change of signature schemes voids every commitment that had not
-// matured - it may have been written with the key of a scheme now paused as
-// broken.
+// and a block that marks a scheme as broken voids every commitment that had
+// not matured - it may have been written with a key of that scheme.
 func applyRecoveryMaintenance(newBlock, lastBlock Block) {
 	h := newBlock.GetHeader().Height
 	account.PruneRecoveryBinds(h)
-	nh, lh := newBlock.GetHeader(), lastBlock.GetHeader()
-	if !bytes.Equal(nh.Encryption1, lh.Encryption1) || !bytes.Equal(nh.Encryption2, lh.Encryption2) {
+	if schemeBroken(newBlock, lastBlock) {
 		if n := account.VoidPendingRecoveryCommits(h); n > 0 {
-			logger.GetLogger().Printf("signature schemes changed at block %d: voided %d unmatured recovery commitment(s)", h, n)
+			logger.GetLogger().Printf("signature scheme marked broken at block %d: voided %d unmatured recovery commitment(s)", h, n)
 		}
 	}
+}
+
+// schemeBroken reports whether newBlock marks a scheme as broken: it pauses
+// the live primary, or replaces the spare. Those are the only changes after
+// which a recent signature may be a forgery. Replacing an already-paused
+// primary, or un-pausing one, breaks nothing new - voiding there would
+// destroy the commitments users set with the live spare right after the
+// break, since those changes can follow it within blocks.
+func schemeBroken(newBlock, lastBlock Block) bool {
+	nh, lh := newBlock.GetHeader(), lastBlock.GetHeader()
+	if !bytes.Equal(nh.Encryption1, lh.Encryption1) {
+		cur, cerr := oqs.FromBytesToEncryptionConfig(lh.Encryption1)
+		next, nerr := oqs.FromBytesToEncryptionConfig(nh.Encryption1)
+		if cerr != nil || nerr != nil {
+			return true // unreadable: assume the worst
+		}
+		if next.SigName == cur.SigName && next.IsPaused && !cur.IsPaused {
+			return true
+		}
+	}
+	if !bytes.Equal(nh.Encryption2, lh.Encryption2) {
+		cur, cerr := oqs.FromBytesToEncryptionConfig(lh.Encryption2)
+		next, nerr := oqs.FromBytesToEncryptionConfig(nh.Encryption2)
+		if cerr != nil || nerr != nil {
+			return true
+		}
+		if next.SigName != cur.SigName {
+			return true
+		}
+	}
+	return false
 }

@@ -58,10 +58,10 @@ func ConsumeAccountRecoveryCommit(addr, next [common.AddressLength]byte) error {
 	return nil
 }
 
-// VoidPendingRecoveryCommits runs when a block changes the signature schemes.
-// A pending commitment may have been written with a key of the scheme that is
-// being paused because it is broken, so only those that matured before the
-// change survive (promoted); the rest are dropped. Returns how many dropped.
+// VoidPendingRecoveryCommits runs when a block marks a signature scheme as
+// broken (blocks.schemeBroken). A pending commitment may have been written
+// with a key of that scheme, so only those that matured before the break
+// survive (promoted); the rest are dropped. Returns how many dropped.
 func VoidPendingRecoveryCommits(height int64) int {
 	AccountsRWMutex.Lock()
 	defer AccountsRWMutex.Unlock()
