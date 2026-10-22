@@ -462,7 +462,7 @@
                 </div>
                 <div class="form-group" style="display:flex;gap:20px;">
                     <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="includePubKey" style="width:auto;margin-right:8px;">
+                        <input type="checkbox" id="includePubKey" style="width:auto;margin-right:8px;" onchange="onIncludePubKeyChange()">
                         Include Public Key
                     </label>
                     <label style="display:flex;align-items:center;cursor:pointer;">
@@ -470,6 +470,7 @@
                         Register Paused public key
                     </label>
                 </div>
+                <p id="registrationHint" style="display:none;color:#00d4ff;font-size:0.85em;margin:0 0 12px;"></p>
                 <button class="btn-primary" onclick="sendTransaction()">Send Transaction</button>
             </div>
 
@@ -1339,6 +1340,30 @@ contract Coin {
             } catch (e) {
                 console.error('Failed to update peers:', e);
             }
+        }
+
+        // A key registration goes to the wallet's own address with amount 0;
+        // the node attaches the first recovery commitment itself when the
+        // identity has none, and the hint says so.
+        async function onIncludePubKeyChange() {
+            const hint = document.getElementById('registrationHint');
+            if (!document.getElementById('includePubKey').checked) {
+                hint.style.display = 'none';
+                return;
+            }
+            try {
+                const res = await api('/api/registration-recipient');
+                if (res.error) {
+                    hint.textContent = res.error;
+                } else {
+                    document.getElementById('recipientAddress').value = res.recipient;
+                    document.getElementById('sendAmount').value = '0';
+                    hint.textContent = res.note;
+                }
+            } catch (e) {
+                hint.textContent = 'Could not prepare the registration: ' + e.message;
+            }
+            hint.style.display = 'block';
         }
 
         // Send transaction

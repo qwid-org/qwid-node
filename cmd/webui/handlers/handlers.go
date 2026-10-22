@@ -1459,6 +1459,29 @@ func registrationRecipient(recipient common.Address) common.Address {
 	return c
 }
 
+// RegistrationRecipient tells the send form what to put in Recipient when
+// the operator ticks "Include Public Key": the wallet's own address, which
+// SendTransaction swaps for the first recovery commitment when the identity
+// has none yet (registrationRecipient) - one rule, applied at send time, so
+// the form never needs to know commitments exist. The note says which it is.
+func RegistrationRecipient(w http.ResponseWriter, r *http.Request) {
+	if !walletReady() {
+		jsonError(w, "Load wallet first", http.StatusBadRequest)
+		return
+	}
+	own := MainWallet.MainAddress
+	resp := map[string]interface{}{"recipient": own.GetHex(), "commitment": false}
+	if c := registrationRecipient(own); !bytes.Equal(c.GetBytes(), own.GetBytes()) {
+		resp["commitment"] = true
+		resp["note"] = "Registration to your own address. This identity has no recovery commitment yet, so the first one (" +
+			c.GetHex() + ") is attached automatically when you send - amount 0."
+	} else {
+		resp["note"] = "Registration to your own address, amount 0. No new recovery commitment is attached: " +
+			"the identity already has one, or this wallet has no recovery phrase."
+	}
+	jsonResponse(w, resp)
+}
+
 // sendRefusal reports why consensus would refuse tx because of the sender's
 // keys (dual-key rule, paused-scheme rule; wallet.SendRefusal), or "" — also
 // when the node cannot say which keys are registered, leaving it to consensus.
