@@ -34,6 +34,13 @@ type Account struct {
 	// scanning the index.
 	SentCount     int64 `json:"sentCount,omitempty"`
 	ReceivedCount int64 `json:"receivedCount,omitempty"`
+	// Recovery commitment (CLAUDE.md "Recovery commitment"): C = H160(S) of
+	// a phrase-derived secret. RecoveryCommit is active; a newer commitment
+	// waits in RecoveryPending* for RecoveryCommitMaturityBlocks, and is
+	// dropped if the signature schemes change before then.
+	RecoveryCommit        [common.AddressLength]byte `json:"recoveryCommit,omitempty"`
+	RecoveryPendingCommit [common.AddressLength]byte `json:"recoveryPendingCommit,omitempty"`
+	RecoveryPendingHeight int64                      `json:"recoveryPendingHeight,omitempty"`
 }
 
 func GetAccountByAddressBytes(address []byte) (Account, bool) {
@@ -155,6 +162,9 @@ func (a Account) Marshal() []byte {
 	// list lengths instead.
 	b = append(b, common.GetByteInt64(a.SentCount)...)
 	b = append(b, common.GetByteInt64(a.ReceivedCount)...)
+	b = append(b, a.RecoveryCommit[:]...)
+	b = append(b, a.RecoveryPendingCommit[:]...)
+	b = append(b, common.GetByteInt64(a.RecoveryPendingHeight)...)
 	return b
 }
 
@@ -227,9 +237,15 @@ func (a *Account) Unmarshal(data []byte) error {
 	if len(data) >= 16 {
 		a.SentCount = common.GetInt64FromByte(data[:8])
 		a.ReceivedCount = common.GetInt64FromByte(data[8:16])
+		data = data[16:]
 	} else {
 		a.SentCount = int64(len(a.TransactionsSender))
 		a.ReceivedCount = int64(len(a.TransactionsRecipient))
+	}
+	if len(data) >= 2*common.AddressLength+8 {
+		copy(a.RecoveryCommit[:], data[:common.AddressLength])
+		copy(a.RecoveryPendingCommit[:], data[common.AddressLength:2*common.AddressLength])
+		a.RecoveryPendingHeight = common.GetInt64FromByte(data[2*common.AddressLength : 2*common.AddressLength+8])
 	}
 	return nil
 }

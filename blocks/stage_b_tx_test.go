@@ -13,12 +13,26 @@ import (
 )
 
 type stageBKey struct {
-	s    oqs.Signature
-	pub  []byte
-	addr common.Address
+	s     oqs.Signature
+	pub   []byte
+	addr  common.Address
+	spare *stageBKey // the identity's registered secondary key, if any
 }
 
+// registeredStageBKey is an identity with BOTH keys registered, as every
+// identity must hold before it can send anything but a key registration.
 func registeredStageBKey(t *testing.T) stageBKey {
+	t.Helper()
+	k := primaryOnlyStageBKey(t)
+	spare := secondaryKey(t)
+	registerKey(t, enclosed(t, spare, k.addr, false))
+	k.spare = &spare
+	return k
+}
+
+// primaryOnlyStageBKey is an identity that has registered only the key its
+// address derives from.
+func primaryOnlyStageBKey(t *testing.T) stageBKey {
 	t.Helper()
 	withBalanceTestDB(t)
 	saved := pubkeys.GlobalMerkleTree
@@ -188,7 +202,20 @@ func TestPauseExemptionCoversOnlyPureRegistration(t *testing.T) {
 		return tx
 	}
 	const paused = true
-	registration := mk(k.addr, nil)
+	// The registration exemption covers only a key not yet published: an
+	// already registered key's paused-scheme signature is what a forger makes.
+	var fresh stageBKey
+	if err := fresh.s.Init(common.SigName(), nil); err != nil {
+		t.Skipf("liboqs unavailable: %v", err)
+	}
+	var err error
+	if fresh.pub, err = fresh.s.GenerateKeyPair(); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.addr, err = common.PubKeyToAddress(fresh.pub, true); err != nil {
+		t.Fatal(err)
+	}
+	registration := pureRegistration(t, fresh.addr, enclosed(t, fresh, fresh.addr, true), fresh, true)
 	dex := mk(common.GetDelegatedAccountAddress(512+3), common.GetByteInt64(1_000_000))
 	call := mk(testAddress(0x99), []byte{0xa9, 0x05, 0x9c, 0xbb})
 	if !registration.Verify(common.SigName(), common.SigName2(), paused, !paused) {

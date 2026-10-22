@@ -192,7 +192,15 @@ func ValidateContractDeployment(tx transactionsDefinition.Transaction) error {
 // transaction is still invalid. This only stops the node from proposing one.
 func FilterUnbuildableTransactions(txs []transactionsDefinition.Transaction, height int64) []transactionsDefinition.Transaction {
 	kept := txs[:0]
+	reveals := map[[common.AddressLength]byte]bool{}
 	for _, tx := range txs {
+		if tx.IsRecoveryReveal() {
+			s := tx.GetSenderAddress().ByteValue
+			if reveals[s] {
+				continue // a second reveal would fail against the consumed commitment
+			}
+			reveals[s] = true
+		}
 		// Outside the height window (S4-01) the block would be rejected; a
 		// transaction that has aged out can never become valid again.
 		if !TransactionHeightInWindow(tx.GetHeight(), height) {
@@ -403,6 +411,9 @@ func ProcessMultiSignAndEscrow(tx transactionsDefinition.Transaction) error {
 func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blockTime int64) error {
 	fee, err := tx.CalcFee()
 	if err != nil {
+		return err
+	}
+	if handled, err := processRecoveryTransaction(tx, height, fee); handled {
 		return err
 	}
 	amount := tx.TxData.Amount
@@ -692,6 +703,11 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 			return fmt.Errorf("transaction should not be executed, should be delayed %v", mainTx.Hash.GetHex())
 		} else {
 			transactionsPool.RemoveMultiSignTransaction(mainTx.Hash.GetBytes())
+			if mainTx.IsCommitmentRegistration() {
+				// Approved: the commitment change takes effect, its maturity
+				// counting from here.
+				return settleCommitment(mainTx, height)
+			}
 			err = AddBalance(address.ByteValue, -amount)
 			if err != nil {
 				// this can happen very rare. Only when escrow is multisign account
@@ -774,6 +790,14 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 				if transactionsPool.AddMultiSignTransaction(tx) {
 					transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
 				}
+			} else if tx.IsCommitmentRegistration() {
+				// The escrow delay is over: the commitment change now takes
+				// effect, its maturity counting from here.
+				if err := settleCommitment(tx, height); err != nil {
+					return err
+				}
+				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())
+				settled++
 			} else {
 				if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
 					transactionsPool.AddMultiSignTransaction(tx)

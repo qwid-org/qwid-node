@@ -307,6 +307,11 @@ func CreateWallet(w http.ResponseWriter, r *http.Request) {
 		copy(wl.Account2.EncryptedSecretKey, acc.EncryptedSecretKey)
 	}
 
+	// The identity is the address of the LIVE scheme's key: while the primary
+	// is paused, an address from the primary key could never add its spare
+	// (SetMainAddressFromLiveScheme).
+	wl.SetMainAddressFromLiveScheme(common.IsPaused())
+
 	err = os.MkdirAll(wl.HomePath, 0700) // CW-H3: owner-only; matches StoreJSON's 0700 (MkdirAll won't chmod an existing dir)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("Failed to create wallet directory: %v", err), http.StatusInternalServerError)
@@ -626,69 +631,17 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 
 	pk := common.PubKey{}
 	if req.IncludePubKey {
-		// "Register Paused public key" means the key of whichever scheme is
-		// currently PAUSED — not Account1. Which slot that is follows from the
-		// pause state: while the primary is live the spare is the paused one,
-		// and after the primary is paused it becomes the paused one itself.
-		//
-		// Tying this to Account1 registered the live scheme's key, which is
-		// already registered and never the one that needs it. The key that
-		// needs registering is always the paused one: a scheme arrives paused
-		// and cannot sign for itself, which is why the live scheme signs for it.
-		registerPrimary := !signPrimary
-		if !req.UsePrimaryEncryption {
-			// Unchecked: register the live scheme's key instead.
-			registerPrimary = signPrimary
-		}
-		if registerPrimary {
-			pk = MainWallet.Account1.PublicKey
-		} else {
-			pk = MainWallet.Account2.PublicKey
-		}
-
-		// Bootstrap overrides that choice, because for an identity with NOTHING
-		// registered on-chain the choice does not exist.
-		//
-		// The reasoning above concerns a scheme REPLACEMENT: the incoming key
-		// arrives paused and the already-registered live key vouches for it. An
-		// identity with no registered key has nothing to vouch for anything, so
-		// consensus accepts exactly one key from it — the one that DERIVES its
-		// address. The address is a hash of that key, so holding it is the only
-		// self-evident proof a first key can offer.
-		//
-		// Without this, a new node could not register through this form at all:
-		// with the box ticked it offered the spare, which cannot open an
-		// account, and the transaction died at the far end reporting only that
-		// the sender had no registered key.
-		if !identityHasRegisteredKey() {
-			switch {
-			case bytes.Equal(MainWallet.Account1.Address.GetBytes(), MainWallet.MainAddress.GetBytes()):
-				pk = MainWallet.Account1.PublicKey
-				registerPrimary = true
-			case bytes.Equal(MainWallet.Account2.Address.GetBytes(), MainWallet.MainAddress.GetBytes()):
-				pk = MainWallet.Account2.PublicKey
-				registerPrimary = false
-			default:
-				jsonError(w, "Nothing is registered on-chain for this wallet yet, and neither of its keys derives "+
-					"its own address ("+MainWallet.MainAddress.GetHex()+"). An identity's first key must be the one "+
-					"its address comes from, so no key here can open this account — restore the wallet that owns it.",
-					http.StatusBadRequest)
-				return
-			}
-			logger.GetLogger().Printf("nothing registered for %s yet: sending the key that derives it, "+
-				"the only key consensus accepts as an identity's first",
-				MainWallet.MainAddress.GetHex())
+		var perr error
+		var registerPrimary bool
+		pk, registerPrimary, signPrimary, perr = planRegistration(req.UsePrimaryEncryption)
+		if perr != nil {
+			jsonError(w, perr.Error(), http.StatusBadRequest)
+			return
 		}
 		logger.GetLogger().Printf("including pubkey for registration: %s slot (%s), %d bytes",
 			map[bool]string{true: "primary", false: "secondary"}[registerPrimary],
 			map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary],
 			len(pk.GetBytes()))
-		// A registration must be signed by a key Verify can check: the enclosed
-		// key itself for a bootstrap, a REGISTERED key otherwise. Signing with
-		// the active scheme's key while it is not yet registered produced the
-		// unverifiable "signed with MAYO-2 but sender has no registered MAYO-2
-		// key" rejection (incident 2026-09-08).
-		signPrimary = registrationSignPrimary(registerPrimary, signPrimary)
 		// When the signing slot's scheme is PAUSED, consensus admits the
 		// registration only as a PURE one (Amount==0) — the pause exemptions
 		// in Transaction.Verify are scoped to that. Reject loudly here instead
@@ -696,6 +649,12 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		if am != 0 && ((signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())) {
 			jsonError(w, "Registering a key while its signing scheme is paused must be a pure registration: set the amount to 0 and send again (funds can be moved after the key is registered).", http.StatusBadRequest)
 			return
+		}
+		// A paused scheme may not set a commitment (a forger of it could plant
+		// its own), so only a live-signed registration carries one.
+		signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
+		if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused {
+			ar = registrationRecipient(ar)
 		}
 	}
 
@@ -728,6 +687,11 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		Height:    0,
 		GasPrice:  int64(rand.Intn(0x0000000f)) + 1,
 		GasUsage:  0,
+	}
+
+	if refusal := sendRefusal(&tx, signPrimary); refusal != "" {
+		jsonError(w, refusal, http.StatusBadRequest)
+		return
 	}
 
 	// Get current height from stats
@@ -1426,6 +1390,130 @@ func registrationSignPrimary(registerPrimary, defaultPrimary bool) bool {
 			map[bool]string{true: "primary", false: "secondary"}[defaultPrimary])
 	}
 	return chosen
+}
+
+// registrationRecipient: a pure registration to oneself carries the
+// identity's first recovery commitment when it has none yet (CLAUDE.md
+// "Recovery commitment"). Any failure keeps the plain self-registration:
+// the commitment can be set by any later registration.
+func registrationRecipient(recipient common.Address) common.Address {
+	if !bytes.Equal(recipient.GetBytes(), MainWallet.MainAddress.GetBytes()) {
+		return recipient
+	}
+	keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))))
+	if err != nil {
+		return recipient
+	}
+	c, err := MainWallet.CommitmentForRegistration(keys)
+	if err != nil {
+		logger.GetLogger().Println("no recovery commitment set:", err)
+		return recipient
+	}
+	return c
+}
+
+// planRegistration decides, for a key-carrying registration, which key travels
+// (pk, in slot registerPrimary) and which slot signs (signPrimary) - or why no
+// registration can work now. Shared by SendTransaction and the form's preview
+// (RegistrationRecipient), so the preview shows exactly what sending does.
+//
+// WHICH KEY TO REGISTER is the operator's choice: usePrimaryEncryption ("Register
+// Paused public key") means the key of whichever scheme is currently PAUSED -
+// the one that needs registering, because a scheme arrives paused and cannot
+// sign for itself; unchecked, the live scheme's key. WHICH KEY SIGNS is not a
+// choice: a key Verify can check (wallet.RegistrationSigningPrimary).
+//
+// Bootstrap overrides the choice: an identity with NOTHING registered can only
+// open with the key its address comes from - the address is a hash of that
+// key, the only self-evident proof a first key can offer.
+func planRegistration(usePrimaryEncryption bool) (pk common.PubKey, registerPrimary, signPrimary bool, err error) {
+	SetCurrentEncryptions()
+	signPrimary = !common.IsPaused()
+	registerPrimary = !signPrimary
+	if !usePrimaryEncryption {
+		registerPrimary = signPrimary
+	}
+	if !identityHasRegisteredKey() {
+		switch {
+		case bytes.Equal(MainWallet.Account1.Address.GetBytes(), MainWallet.MainAddress.GetBytes()):
+			registerPrimary = true
+		case bytes.Equal(MainWallet.Account2.Address.GetBytes(), MainWallet.MainAddress.GetBytes()):
+			registerPrimary = false
+		default:
+			return pk, false, false, fmt.Errorf("nothing is registered on-chain for this wallet yet, and neither of its "+
+				"keys derives its own address (%s). The address was made from a key of a signature scheme this "+
+				"chain no longer verifies - typically a wallet generated with default schemes after the chain "+
+				"changed them. An identity's first key must be the one its address comes from, so this account "+
+				"cannot be opened under the current schemes; create a new wallet here (it uses the chain's current "+
+				"schemes) and use that address instead", MainWallet.MainAddress.GetHex())
+		}
+		// The first key signs for itself, and while its scheme is paused it can
+		// still open the account (an unpublished key cannot be forged) - but then
+		// nothing can ever add the second key: a paused scheme vouches for
+		// nothing, and the live one has no registered key yet. The dual-key rule
+		// would leave the account frozen until the scheme is un-paused, so do not
+		// let it walk into that.
+		if (registerPrimary && common.IsPaused()) || (!registerPrimary && common.IsPaused2()) {
+			scheme := map[bool]string{true: common.SigName(), false: common.SigName2()}[registerPrimary]
+			return pk, false, false, fmt.Errorf("this wallet's address comes from its %s key, and %s is paused. "+
+				"Registering it now would leave the account unable to add its second key until %s is un-paused "+
+				"(a paused scheme cannot vouch for a new key). Wait for the un-pause, or create a new wallet: "+
+				"wallets created now take their address from the live scheme's key", scheme, scheme, scheme)
+		}
+	}
+	if registerPrimary {
+		pk = MainWallet.Account1.PublicKey
+	} else {
+		pk = MainWallet.Account2.PublicKey
+	}
+	// A registration must be signed by a key Verify can check: the enclosed
+	// key itself for a bootstrap, a REGISTERED key otherwise (incident
+	// 2026-09-08).
+	signPrimary = registrationSignPrimary(registerPrimary, signPrimary)
+	return pk, registerPrimary, signPrimary, nil
+}
+
+// RegistrationRecipient tells the send form what to put in Recipient when
+// the operator ticks "Include Public Key": the wallet's own address, which
+// SendTransaction swaps for the first recovery commitment when the identity
+// has none yet (registrationRecipient) - one rule, applied at send time, so
+// the form never needs to know commitments exist. The note says which it is.
+func RegistrationRecipient(w http.ResponseWriter, r *http.Request) {
+	if !walletReady() {
+		jsonError(w, "Load wallet first", http.StatusBadRequest)
+		return
+	}
+	own := MainWallet.MainAddress
+	resp := map[string]interface{}{"recipient": own.GetHex(), "commitment": false}
+	_, _, signPrimary, err := planRegistration(r.URL.Query().Get("usePrimaryEncryption") != "false")
+	if err != nil {
+		resp["error"] = err.Error()
+		jsonResponse(w, resp)
+		return
+	}
+	signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
+	if c := registrationRecipient(own); !signingPaused && !bytes.Equal(c.GetBytes(), own.GetBytes()) {
+		resp["commitment"] = true
+		resp["note"] = "Registration to your own address. This identity has no recovery commitment yet, so the first one (" +
+			c.GetHex() + ") is attached automatically when you send - amount 0."
+	} else {
+		resp["note"] = "Registration to your own address, amount 0. No new recovery commitment is attached: " +
+			"the identity already has one, this wallet has no recovery phrase, or this registration is signed " +
+			"by a paused scheme (which may not set one)."
+	}
+	jsonResponse(w, resp)
+}
+
+// sendRefusal reports why consensus would refuse tx because of the sender's
+// keys (dual-key rule, paused-scheme rule; wallet.SendRefusal), or "" — also
+// when the node cannot say which keys are registered, leaving it to consensus.
+func sendRefusal(tx *transactionsDefinition.Transaction, signPrimary bool) string {
+	keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))))
+	if err != nil {
+		return ""
+	}
+	signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
+	return wallet.SendRefusal(keys, len(tx.TxData.Pubkey.GetBytes()) > 0, tx.IsKeyRegistration(), signingPaused)
 }
 
 func identityHasRegisteredKey() bool {

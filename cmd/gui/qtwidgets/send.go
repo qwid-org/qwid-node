@@ -246,6 +246,10 @@ func ShowSendPage() *widgets.QTabWidget {
 				info = &v
 				return
 			}
+			signingPaused := (primary && common.IsPaused()) || (!primary && common.IsPaused2())
+			if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused {
+				ar = registrationRecipientGUI(ar)
+			}
 		} else {
 			if primaryChb.IsChecked() {
 				primary = true
@@ -297,6 +301,11 @@ func ShowSendPage() *widgets.QTabWidget {
 		err = tx.CalcHashAndSet()
 		if err != nil {
 			v = fmt.Sprint("can not generate hash transaction: ", err)
+			info = &v
+			return
+		}
+		if refusal := sendRefusalGUI(&tx, primary); refusal != "" {
+			v = refusal
 			info = &v
 			return
 		}

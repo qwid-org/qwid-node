@@ -466,6 +466,22 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			return false
 		}
 	}
+	// Dual-key rule: an identity may send nothing but registrations of its
+	// keys until it holds BOTH a primary and a secondary key. When one scheme
+	// breaks, its signatures prove nothing about a published key, so the
+	// replacement key must be vouched for by the OTHER, independent key; an
+	// identity holding only the broken one could never be told apart from
+	// whoever forges it. Requiring both before any value moves means every
+	// identity that can lose something has that second key.
+	if sender := tx.GetSenderAddress(); kind == txKindRegular && !tx.IsKeyRegistration() && !tx.IsRecoveryReveal() &&
+		!pubkeys.HasOperatorKeysAsOf(sender, asOf) {
+		if ok, skipped := shouldLogVerifyFailure(sender); ok {
+			logger.GetLogger().Printf("Verify: sender %s must register both its primary and its secondary key "+
+				"(each by a pure registration: amount 0, to itself) before sending anything else%s",
+				sender.GetHex(), suppressedNote(skipped))
+		}
+		return false
+	}
 	if tx.GetLockedAmount() > 0 {
 		n, err := account.IntDelegatedAccountFromAddress(tx.GetDelegatedAccountForLocking())
 
@@ -542,6 +558,12 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			return false
 		}
 	}
+	if tx.IsRecoveryBind() {
+		if err := tx.verifyRecoveryBindShape(); err != nil {
+			logger.GetLogger().Println("Verify:", err)
+			return false
+		}
+	}
 	b := tx.GetHash().GetBytes()
 	err = tx.CalcHashAndSet()
 	if err != nil {
@@ -551,6 +573,18 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	if !bytes.Equal(b, tx.GetHash().GetBytes()) {
 		logger.GetLogger().Println("check transaction hash fails")
 		return false
+	}
+	if tx.IsRecoveryReveal() {
+		if kind != txKindRegular {
+			return false
+		}
+		if err := tx.verifyRecoveryReveal(b, sigName, sigName2, asOf); err != nil {
+			if ok, skipped := shouldLogVerifyFailure(tx.GetSenderAddress()); ok {
+				logger.GetLogger().Printf("Verify: recovery reveal refused: %v%s", err, suppressedNote(skipped))
+			}
+			return false
+		}
+		return true
 	}
 	signature := tx.GetSignature()
 	primary := signature.GetBytes()[0] == 0
@@ -690,7 +724,6 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 				signingScheme = sigName2
 			}
 			authorised := false
-			authorisedByDerivingKey := false
 			if expLen, lerr := oqs.PubKeyLength(signingScheme); lerr == nil {
 				if existing, aerr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, primary, expLen, asOf); aerr == nil {
 					// Verify the signature against the REGISTERED key, not the
@@ -698,34 +731,18 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 					pkb = existing.GetBytes()
 					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
 					authorised = true
-					// Does the authorizing key DERIVE the sender identity? Used
-					// by the stranded-identity pause exemption below: only the
-					// identity-deriving key may authorize under a pause.
-					if da, derr := common.PubKeyToAddress(existing.GetBytes(), primary); derr == nil {
-						authorisedByDerivingKey = bytes.Equal(da.GetBytes(), senderAddr.GetBytes())
-					}
 				}
 			}
-			// Stranded-identity escape hatch (incident 2026-09-08): a PURE
-			// REGISTRATION (Amount==0) of a key the sender does not yet hold in
-			// the enclosed key's slot, authorized by the REGISTERED key that
-			// DERIVES the sender identity, verifies even while the signing
-			// scheme is paused. Without this, an identity whose only registered
-			// key belongs to the paused scheme can never register a key of the
-			// active scheme — permanently frozen. Scope: identities that already
-			// hold a key of the enclosed key's scheme are NOT exempt (nothing to
-			// rescue), so operators who registered the new scheme before the
-			// pause (enforced for block producers by the pause gate in
-			// blocks.CheckBaseBlock) gain no new exposure.
-			if authorised && authorisedByDerivingKey && tx.isPureRegistration() {
-				if _, serr := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(senderAddr, pkPrimary, len(tx.TxData.GetPubKey().GetBytes()), asOf); serr != nil {
-					if primary {
-						effPaused = false
-					} else {
-						effPaused2 = false
-					}
-				}
-			}
+			// No pause exemption on this path. The stranded-identity escape
+			// hatch (incident 2026-09-08) admitted a registration signed with
+			// the PAUSED scheme when the sender held no key in the enclosed
+			// key's slot. But a scheme is paused because it is presumed
+			// broken, and the authorising key here is registered, i.e.
+			// published: its signature is exactly what a forger produces. The
+			// forger enclosed its own spare, named the victim, and then signed
+			// as the victim with the live spare. A new key is therefore
+			// authorised only by a key of a LIVE scheme; the dual-key rule
+			// guarantees every identity that can send anything holds one.
 			if !authorised {
 				// Nothing is registered for this sender yet, so there is no
 				// identity to authorise anything: the very first key can only
@@ -796,7 +813,12 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// a signature forgery. Without it, no identity derived from the paused
 		// scheme can ever be bootstrapped, freezing every participant who did
 		// not register before the pause.
-		if tx.isPureRegistration() && primary == pkPrimary &&
+		//
+		// Only while the key is still UNPUBLISHED (not in the registry as of
+		// asOf): once registered, the preimage argument is gone and a forger
+		// of the paused scheme could re-sign this registration at will, each
+		// copy burning the victim's gas.
+		if !resolvedFromRegistry && tx.isPureRegistration() && primary == pkPrimary &&
 			bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes()) {
 			if primary {
 				effPaused = false
@@ -834,6 +856,32 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	return wallet.Verify(b, signature.GetBytes(), pkb, sigName, sigName2, effPaused, effPaused2)
 }
 
+// pureShape: no amount, no data, no escrow, multisig or locking settings -
+// a transaction whose only possible effect is registering the key it carries.
+func (tx *Transaction) pureShape() bool {
+	d := tx.TxData
+	return d.Amount == 0 && len(d.OptData) == 0 && d.LockedAmount == 0 &&
+		d.EscrowTransactionsDelay == 0 && d.MultiSignNumber == 0 && len(d.MultiSignAddresses) == 0 &&
+		bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength))
+}
+
+// isPureRegistration reports whether the transaction's only effect is to
+// register the key it carries: pure shape, addressed to the sender. Only such
+// a transaction may still be signed with a paused scheme (S4-03) - and a
+// commitment registration never may: its Recipient would let a forger of the
+// paused scheme plant its own recovery commitment.
+func (tx *Transaction) isPureRegistration() bool {
+	return tx.pureShape() && bytes.Equal(tx.TxData.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes())
+}
+
+// IsKeyRegistration reports whether the transaction is a pure registration
+// that actually carries a key - with or without a recovery commitment - the
+// only kind an identity without both keys may send. Exported so wallets
+// apply the same definition before sending.
+func (tx *Transaction) IsKeyRegistration() bool {
+	return len(tx.TxData.Pubkey.GetBytes()) > 0 && (tx.isPureRegistration() || tx.IsCommitmentRegistration())
+}
+
 // bootstrapBindsKey reports whether a key with no on-chain history may open the
 // identity that sent it. Only a key that DERIVES that address can: the address
 // is a hash of the key, so holding the key is itself the proof, and no other
@@ -842,19 +890,6 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 // In particular a spare key cannot open an account. Its address differs from
 // the identity by construction, so accepting it would mean believing the
 // transaction's own assertion about whose key it is.
-// isPureRegistration reports whether the transaction's only effect is to
-// register the key it carries: no amount, no data, addressed to the sender,
-// no escrow, multisig or locking settings. Only such a transaction may still
-// be signed with a paused scheme (S4-03) - "Amount == 0" alone also covered
-// DEX orders, contract calls and account conversions, which move value.
-func (tx *Transaction) isPureRegistration() bool {
-	d := tx.TxData
-	return d.Amount == 0 && len(d.OptData) == 0 && d.LockedAmount == 0 &&
-		d.EscrowTransactionsDelay == 0 && d.MultiSignNumber == 0 && len(d.MultiSignAddresses) == 0 &&
-		bytes.Equal(d.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes()) &&
-		bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength))
-}
-
 func bootstrapBindsKey(pkAddr, senderAddr common.Address) bool {
 	return bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes())
 }

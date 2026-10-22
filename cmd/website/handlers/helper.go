@@ -9,6 +9,7 @@ import (
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/wallet"
 )
 
@@ -89,4 +90,16 @@ func registrationSignPrimaryFor(mainAddress common.Address, registerPrimary, def
 			map[bool]string{true: "primary", false: "secondary"}[chosen], resp.HasPrimary, resp.HasSecondary)
 	}
 	return chosen
+}
+
+// sendRefusalFor reports why consensus would refuse tx because of the sender's
+// keys (dual-key rule, paused-scheme rule; wallet.SendRefusal), or "" — also
+// when the node cannot say which keys are registered, leaving it to consensus.
+func sendRefusalFor(mainAddress common.Address, tx *transactionsDefinition.Transaction, signPrimary bool) string {
+	keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), mainAddress.GetBytes()...))))
+	if err != nil {
+		return ""
+	}
+	signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
+	return wallet.SendRefusal(keys, len(tx.TxData.Pubkey.GetBytes()) > 0, tx.IsKeyRegistration(), signingPaused)
 }

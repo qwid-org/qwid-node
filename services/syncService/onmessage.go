@@ -447,9 +447,11 @@ func updateSyncTarget() {
 	// rewind-step heuristic. Feed it the consensus-filtered peer height, not the
 	// throttled per-round sync target: the latter is only ever a batch ahead of
 	// us, which made a node 100k blocks behind look all but synced.
-	if nh > common.GetHeightMax() {
-		common.SetHeightMax(nh)
-	}
+	//
+	// The CURRENT view, not a running maximum: claims expire after
+	// ClaimExpiryDuration, and a maximum kept one wrong claim (a forked or
+	// misconfigured peer) on display until the node restarted.
+	common.SetHeightMax(max(nh, common.GetHeight()))
 }
 
 // cleanupExpiredClaims removes old height claims

@@ -7,6 +7,7 @@ import (
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/crypto/oqs"
+	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
@@ -179,6 +180,65 @@ func decodeProof(pb []byte) (*transactionsDefinition.Transaction, error) {
 	return &decoded, nil
 }
 
+// isUnpause reports whether next makes this slot's paused scheme active.
+func isUnpause(cur, next oqs.ConfigEnc) bool {
+	return next.SigName == cur.SigName && cur.IsPaused && !next.IsPaused
+}
+
+// checkUnpauseKeyQuorum: un-pausing a scheme makes it the one every following
+// block and transaction must be signed with, and pauses the other. If the
+// operators holding most of the stake have no key of it yet, nobody can sign
+// the next blocks - and, the other scheme now being paused, nobody can
+// register those keys either: the chain halts for good. So an un-pause needs
+// two thirds of the stake to sit with operators that registered a key of the
+// scheme by the parent block - the same share that must vote for it.
+func checkUnpauseKeyQuorum(want []byte, parent Block, primary bool, total int64,
+	stakeAndOperator func(id int) (int64, common.Address),
+	hasKey func(op common.Address, primary bool, keyLen int) bool) error {
+	next, err := oqs.FromBytesToEncryptionConfig(want)
+	if err != nil {
+		return err
+	}
+	cur, err := parentSlotConfig(parent, primary)
+	if err != nil {
+		return err
+	}
+	if !isUnpause(cur, next) {
+		return nil
+	}
+	if total <= 0 {
+		return fmt.Errorf("refusing to un-pause %q: nothing is staked", next.SigName)
+	}
+	withKeys := int64(0)
+	for id := 1; id < 256; id++ {
+		staked, op := stakeAndOperator(id)
+		if staked > 0 && hasKey(op, primary, next.PubKeyLength) {
+			withKeys += staked
+		}
+	}
+	if withKeys*3 < total*2 {
+		return fmt.Errorf("refusing to un-pause %q: operators holding only %d of %d staked have registered a key of it, two thirds are needed - register the keys first, then un-pause",
+			next.SigName, withKeys, total)
+	}
+	return nil
+}
+
+func stakeAndOperatorOfDelegated(id int) (int64, common.Address) {
+	_, staked, op := account.GetStakedInDelegatedAccount(id)
+	var a common.Address
+	_ = a.Init(op.Address[:])
+	return staked, a
+}
+
+// operatorHasKeyAsOf answers from the key registry as of the parent block, so
+// every node judges an un-pause alike whatever it has applied since.
+func operatorHasKeyAsOf(asOf int64) func(common.Address, bool, int) bool {
+	return func(op common.Address, primary bool, keyLen int) bool {
+		_, err := pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(op, primary, keyLen, asOf)
+		return err == nil
+	}
+}
+
 func stakeOfDelegated(id int) int64 {
 	_, staked, _ := account.GetStakedInDelegatedAccount(id)
 	return staked
@@ -204,18 +264,47 @@ func VerifyEncryptionVotes(newBlock, lastBlock Block) error {
 			newBlock.GetHeader().Height, account.GetStakedInAllDelegatedAccounts(), decodeProof, stakeOfDelegated); err != nil {
 			return err
 		}
+		if err := checkUnpauseKeyQuorum(want, lastBlock, primary, account.GetStakedInAllDelegatedAccounts(),
+			stakeAndOperatorOfDelegated, operatorHasKeyAsOf(lastBlock.GetHeader().Height)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // EncryptionChangeAuthorised lets a producer check its own vote before
 // putting it in a header, so it never builds a block validators must reject.
-// The staking state must be the parent's.
-func EncryptionChangeAuthorised(proofs [][]byte, lastBlock Block, want []byte, primary bool, height int64) bool {
-	changed, err := checkEncryptionChangeShape(want, lastBlock, primary)
-	if err != nil || !changed {
-		return false
-	}
-	return encryptionChangeAuthorised(proofs, lastBlock, want, primary, height,
-		account.GetStakedInAllDelegatedAccounts(), decodeProof, stakeOfDelegated) == nil
+func EncryptionChangeAuthorised(proofs [][]byte, lastBlock Block, want []byte, primary bool, height int64, operator common.Address) bool {
+	return EncryptionChangeRefusal(proofs, lastBlock, want, primary, height, operator) == nil
 }
+
+// errNoChange marks a vote equal to the parent's config: nothing to authorise.
+var errNoChange = fmt.Errorf("no change from the parent's config")
+
+// EncryptionChangeRefusal says why a producer may not put want into its
+// header, or nil if it may. It runs every rule validators apply to a scheme
+// change - shape, votes, the un-pause stake quorum and the producer's own key
+// (operator) - and the staking state must be the parent's.
+func EncryptionChangeRefusal(proofs [][]byte, lastBlock Block, want []byte, primary bool, height int64, operator common.Address) error {
+	changed, err := checkEncryptionChangeShape(want, lastBlock, primary)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return errNoChange
+	}
+	asBuilt := Block{BaseBlock: BaseBlock{BaseHeader: BaseHeader{Height: height, OperatorAccount: operator}}}
+	if err := checkPauseLeavesRegisteredKey(asBuilt, lastBlock, want, primary); err != nil {
+		return err
+	}
+	total := account.GetStakedInAllDelegatedAccounts()
+	if err := encryptionChangeAuthorised(proofs, lastBlock, want, primary, height,
+		total, decodeProof, stakeOfDelegated); err != nil {
+		return err
+	}
+	return checkUnpauseKeyQuorum(want, lastBlock, primary, total,
+		stakeAndOperatorOfDelegated, operatorHasKeyAsOf(lastBlock.GetHeader().Height))
+}
+
+// IsNoChange reports whether a refusal only means the vote equals the parent.
+func IsNoChange(err error) bool { return err == errNoChange }

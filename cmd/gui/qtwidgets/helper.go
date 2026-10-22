@@ -8,6 +8,7 @@ import (
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
+	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/wallet"
 	"os"
 )
@@ -101,4 +102,35 @@ func registrationSignPrimaryGUI(registerPrimary, defaultPrimary bool) bool {
 			map[bool]string{true: "primary", false: "secondary"}[chosen], resp.HasPrimary, resp.HasSecondary)
 	}
 	return chosen
+}
+
+// registrationRecipientGUI mirrors the webui's registrationRecipient.
+func registrationRecipientGUI(recipient common.Address) common.Address {
+	if !bytes.Equal(recipient.GetBytes(), MainWallet.MainAddress.GetBytes()) {
+		return recipient
+	}
+	clientrpc.InRPC <- SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))
+	keys, err := wallet.ParsePUBA(<-clientrpc.OutRPC)
+	if err != nil {
+		return recipient
+	}
+	c, err := MainWallet.CommitmentForRegistration(keys)
+	if err != nil {
+		logger.GetLogger().Println("no recovery commitment set:", err)
+		return recipient
+	}
+	return c
+}
+
+// sendRefusalGUI reports why consensus would refuse tx because of the sender's
+// keys (dual-key rule, paused-scheme rule; wallet.SendRefusal), or "" — also
+// when the node cannot say which keys are registered, leaving it to consensus.
+func sendRefusalGUI(tx *transactionsDefinition.Transaction, signPrimary bool) string {
+	clientrpc.InRPC <- SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))
+	keys, err := wallet.ParsePUBA(<-clientrpc.OutRPC)
+	if err != nil {
+		return ""
+	}
+	signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
+	return wallet.SendRefusal(keys, len(tx.TxData.Pubkey.GetBytes()) > 0, tx.IsKeyRegistration(), signingPaused)
 }

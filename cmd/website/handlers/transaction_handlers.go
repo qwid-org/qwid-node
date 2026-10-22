@@ -325,6 +325,11 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refusal := sendRefusalFor(wl.MainAddress, &tx, primary); refusal != "" {
+		JsonError(w, refusal, http.StatusBadRequest)
+		return
+	}
+
 	if err := tx.Sign(wl, primary); err != nil {
 		JsonError(w, "Failed to sign transaction", http.StatusInternalServerError)
 		return

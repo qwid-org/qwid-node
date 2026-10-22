@@ -24,7 +24,8 @@ package wallet
 //   - nothing registered  → sign with the enclosed key itself (bootstrap;
 //     admitted by Verify's self-registration path even under a pause);
 //   - one slot registered → sign with that registered key (it authorizes the
-//     new key; admitted under a pause by the stranded-identity path);
+//     new key; NOT admitted while its scheme is paused — a paused scheme is
+//     presumed broken and vouches for nothing, see SendRefusal);
 //   - both registered     → the default is verifiable; keep it.
 func RegistrationSigningPrimary(hasPrimary, hasSecondary, registerPrimary, defaultPrimary bool) bool {
 	if !hasPrimary && !hasSecondary {

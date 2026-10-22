@@ -133,102 +133,11 @@ func OnMessage(addr [4]byte, m []byte) {
 				//if len(pk.GetBytes()) > 0 {
 				//	logger.GetLogger().Println("  Transaction has pubkey, length:", len(pk.GetBytes()))
 				//}
-				if !admissibleTxHeight(t.GetHeight()) {
-					unpayable++ // counted with the other admission refusals
-					continue
-				}
-				if transactionsPool.PoolsTx.TransactionExists(t.Hash.GetBytes()) {
-					//logger.GetLogger().Println("  Transaction already exists in Pool, skipping")
-					// Even if already in pool, store the pubkey if present
-					// if len(pk.GetBytes()) > 0 {
-					// 	//logger.GetLogger().Println("  Storing pubkey from existing transaction")
-					// 	storePubKeyFromTransaction(pk, t.GetSenderAddress())
-					// }
-					continue
-				}
-				if transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
-					//logger.GetLogger().Println("  Transaction already exists in DB, skipping")
-					// Even if already in DB, store the pubkey if present
-					// if len(pk.GetBytes()) > 0 {
-					// 	//logger.GetLogger().Println("  Storing pubkey from existing transaction in DB")
-					// 	storePubKeyFromTransaction(pk, t.GetSenderAddress())
-					// }
-					continue
-				}
-
-				// Route to appropriate pool based on sender's account settings
-				// senderAddr := t.GetSenderAddress()
-				// senderAcc, senderExist := account.GetAccountByAddressBytes(senderAddr.GetBytes())
-				// var isAdded bool
-				// if senderExist && senderAcc.TransactionDelay > 0 {
-				// 	t.TxData.EscrowTransactionsDelay = senderAcc.TransactionDelay
-				// 	isAdded = transactionsPool.PoolTxEscrow.AddTransaction(t, t.Hash)
-				// } else if senderExist && senderAcc.MultiSignNumber > 0 {
-				// 	isAdded = transactionsPool.PoolTxMultiSign.AddTransaction(t, t.Hash)
-				// } else {
-				// Reject non-staking transactions to delegated accounts
-				if n, err := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); err == nil && n > 0 && n < 256 {
-					if t.TxData.Amount > 0 && t.TxData.Amount < common.MinStakingUser && t.GetLockedAmount() == 0 {
-						// Counted, not logged: this sat in the per-transaction
-						// loop, so a sender emitting these at 500 TPS produced
-						// 500 synchronous log writes per second in the receive
-						// path. One line per message carries the same
-						// information.
-						belowMinStaking++
-						continue
-					}
-				}
-				// DDoS defense: reject an unpayable transaction at pool ADMISSION
-				// so a flood of insufficient-funds txs from one address can never
-				// fill the pool and starve good transactions. Balance is checked
-				// against confirmed state (fee+amount, matching CheckBlockTransfers'
-				// per-tx debit); cumulative overspend across a sender's own pending
-				// txs is still caught at block build. Counted, not logged per-tx —
-				// a 1000 TPS flood must not turn into 1000 log lines/s in the
-				// receive loop (which is also block production).
-				fee, ferr := t.CalcFee()
-				if ferr != nil {
-					unpayable++
-					continue
-				}
-				senderAddr := t.GetSenderAddress()
-				sacc, sok := account.GetAccountByAddressBytes(senderAddr.GetBytes())
-				// CUMULATIVE affordability: the sender's already-pooled spend plus
-				// this transaction's fee+amount must fit its confirmed balance.
-				// Checking a single tx against the balance is not enough — a
-				// sender with 11 QWD could otherwise pool thousands of
-				// individually-affordable txs that together need ~25k QWD, none of
-				// which the block can include, stalling production (incident
-				// 2026-09-08).
-				cost := fee + t.TxData.Amount
-				if !sok || transactionsPool.PoolsTx.PendingSpend(senderAddr.GetBytes())+cost > sacc.Balance {
-					unpayable++
-					continue
-				}
-				isAdded := transactionsPool.PoolsTx.AddTransaction(t, t.Hash)
-				// }
-				if isAdded {
-					err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:])
-					if err != nil {
-						transactionsPool.PoolsTx.RemoveTransactionByHash(t.Hash.GetBytes())
-						err := transactionsDefinition.RemoveTransactionFromDBbyHash(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes())
-						if err != nil {
-							logger.GetLogger().Println(err)
-						}
-						logger.GetLogger().Println(err)
-						continue
-					}
-					// Deliberately NOT broadcast here. Locally submitted
-					// transactions used to be forwarded immediately — one
-					// outbound message PER TRANSACTION — while the delta loop
-					// (broadcastTransactionsMsgInLoop) re-sent the same
-					// transactions batched a second later. At 100 TPS that was a
-					// hundred redundant messages a second into a 100-slot send
-					// channel, which is what the "could not broadcast
-					// transaction" noise was: the channel full with duplicates
-					// of what the next delta batch carried anyway. The delta
-					// loop propagates a new transaction within a second, which
-					// against a 10-second block interval costs nothing.
+				switch admitToPool(t) {
+				case refusedHeight, refusedUnpayable:
+					unpayable++ // counted together, as before the refactor
+				case refusedBelowMinStaking:
+					belowMinStaking++
 				}
 			}
 		}
@@ -518,6 +427,110 @@ func OnMessage(addr [4]byte, m []byte) {
 // admissibleTxHeight reports whether a transaction stamped txHeight could go
 // into the next block (S4-01): blocks reject transactions above their height
 // or older than MaxTransactionAgeBlocks, so the pool need not hold them.
+// admission is the pool's verdict on one verified transaction.
+type admission int
+
+const (
+	admitted admission = iota
+	alreadyKnown
+	refusedHeight
+	refusedBelowMinStaking
+	refusedUnpayable
+	refusedStore
+)
+
+func (a admission) String() string {
+	switch a {
+	case refusedHeight:
+		return "transaction height is outside the admission window (stamp it with the node's current height)"
+	case refusedBelowMinStaking:
+		return "transfer to a delegated account below the minimum staking amount"
+	case refusedUnpayable:
+		return "sender has insufficient funds (fee+amount, including its transactions already pooled)"
+	case refusedStore:
+		return "the node could not store the transaction"
+	}
+	return "admitted"
+}
+
+// admitToPool applies the pool admission rules to one verified transaction
+// and adds it if they pass. Gossip and local submission (AdmitLocalTransactions)
+// share it, so a wallet is told exactly what gossip would have done.
+func admitToPool(t transactionsDefinition.Transaction) admission {
+	if !admissibleTxHeight(t.GetHeight()) {
+		return refusedHeight
+	}
+	if transactionsPool.PoolsTx.TransactionExists(t.Hash.GetBytes()) ||
+		transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], t.Hash.GetBytes()) {
+		return alreadyKnown
+	}
+	// Reject non-staking transactions to delegated accounts.
+	if n, err := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); err == nil && n > 0 && n < 256 {
+		if t.TxData.Amount > 0 && t.TxData.Amount < common.MinStakingUser && t.GetLockedAmount() == 0 {
+			return refusedBelowMinStaking
+		}
+	}
+	// DDoS defense: reject an unpayable transaction at pool ADMISSION so a
+	// flood of insufficient-funds txs from one address can never fill the pool
+	// and starve good transactions. CUMULATIVE affordability: the sender's
+	// already-pooled spend plus this transaction's fee+amount must fit its
+	// confirmed balance - a sender with 11 QWD could otherwise pool thousands
+	// of individually-affordable txs that together need ~25k QWD, none of
+	// which the block can include, stalling production (incident 2026-09-08).
+	fee, ferr := t.CalcFee()
+	if ferr != nil {
+		return refusedUnpayable
+	}
+	senderAddr := t.GetSenderAddress()
+	sacc, sok := account.GetAccountByAddressBytes(senderAddr.GetBytes())
+	cost := fee + t.TxData.Amount
+	if !sok || transactionsPool.PoolsTx.PendingSpend(senderAddr.GetBytes())+cost > sacc.Balance {
+		return refusedUnpayable
+	}
+	if !transactionsPool.PoolsTx.AddTransaction(t, t.Hash) {
+		return alreadyKnown
+	}
+	if err := t.StoreToDBPoolTx(common.TransactionPoolHashesDBPrefix[:]); err != nil {
+		transactionsPool.PoolsTx.RemoveTransactionByHash(t.Hash.GetBytes())
+		if rerr := transactionsDefinition.RemoveTransactionFromDBbyHash(common.TransactionPoolHashesDBPrefix[:], t.Hash.GetBytes()); rerr != nil {
+			logger.GetLogger().Println(rerr)
+		}
+		logger.GetLogger().Println(err)
+		return refusedStore
+	}
+	// Deliberately NOT broadcast here: the delta loop
+	// (broadcastTransactionsMsgInLoop) propagates new pool entries within a
+	// second, batched; forwarding each one immediately flooded the send
+	// channel with duplicates of the next delta batch.
+	return admitted
+}
+
+// AdmitLocalTransactions admits transactions submitted by the local wallet
+// (RPC TRAN) synchronously, so the reply can name what the pool refused
+// instead of claiming success for a transaction it then dropped. Pooled or
+// confirmed duplicates count as accepted: resubmitting is harmless.
+func AdmitLocalTransactions(txs []transactionsDefinition.Transaction) error {
+	if transactionsPool.PoolsTx.NumberOfTransactions() > common.MaxTransactionInPool {
+		return fmt.Errorf("the transaction pool is full, try again later")
+	}
+	refused := 0
+	var first admission
+	for _, t := range txs {
+		switch a := admitToPool(t); a {
+		case admitted, alreadyKnown:
+		default:
+			if refused == 0 {
+				first = a
+			}
+			refused++
+		}
+	}
+	if refused > 0 {
+		return fmt.Errorf("%d of %d transaction(s) refused by the pool: %v", refused, len(txs), first)
+	}
+	return nil
+}
+
 func admissibleTxHeight(txHeight int64) bool {
 	next := common.GetHeight() + 1
 	return txHeight <= next && next-txHeight <= common.MaxTransactionAgeBlocks
