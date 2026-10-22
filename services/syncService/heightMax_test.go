@@ -39,20 +39,28 @@ func TestHeightMaxForgetsAnExpiredClaim(t *testing.T) {
 	})
 }
 
-// Below the node's own height there is no "network height" to report.
-func TestHeightMaxNeverBelowOwnHeight(t *testing.T) {
+// HeightMax is the PEERS' height: the node's own height never enters it, even
+// when the peers are behind, and neither does the HEIGHT_OF_NETWORK setting.
+func TestHeightMaxIsPeersOnly(t *testing.T) {
 	savedHint, savedHeight, savedMax := common.CurrentHeightOfNetwork, common.GetHeight(), common.GetHeightMax()
 	defer func() {
 		common.CurrentHeightOfNetwork = savedHint
 		common.SetHeight(savedHeight)
 		common.SetHeightMax(savedMax)
 	}()
-	common.CurrentHeightOfNetwork = 0
 	common.SetHeight(700)
 	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(650, time.Second)}, func() {
 		updateSyncTarget()
-		if got := common.GetHeightMax(); got != 700 {
-			t.Fatalf("HeightMax = %d, want the node's own 700", got)
+		if got := common.GetHeightMax(); got != 650 {
+			t.Fatalf("HeightMax = %d, want the peers' 650, not the node's own 700", got)
+		}
+	})
+	common.SetHeightMax(123) // marker: must stay, nothing live to replace it
+	common.CurrentHeightOfNetwork = 99999
+	withClaims(t, map[[4]byte]peerHeightClaim{{1}: claim(650, ClaimExpiryDuration+time.Minute)}, func() {
+		updateSyncTarget()
+		if got := common.GetHeightMax(); got != 123 {
+			t.Fatalf("HeightMax = %d with no live peer claim; the HEIGHT_OF_NETWORK setting must not enter it", got)
 		}
 	})
 }
