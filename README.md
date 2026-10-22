@@ -351,3 +351,107 @@ and `go test` on every push and pull request to `main` and `dev`. It builds
 RocksDB v10.4.2 (static) and liboqs 0.13.0 (shared) from source into a cached
 prefix, sets the matching `CGO_CFLAGS`/`CGO_LDFLAGS`/`PKG_CONFIG_PATH`, and
 excludes the Qt commands.
+
+## Key recovery after a signature-scheme change
+
+Every QWID account holds two keys of two different post-quantum signature
+schemes: a primary key and a spare key. Validators can vote to **pause** a
+scheme that is presumed broken and to **replace** it with a new one. A paused
+scheme can no longer approve anything, so you need a key of the new scheme,
+registered on chain, before you can use your account under it.
+
+### Before anything goes wrong
+
+1. **Create your wallet with a recovery phrase** using the CLI generator, with
+   your node running:
+
+       go run cmd/generateNewWallet/main.go [node_ip]
+
+   It asks the node which schemes are in force (default `127.0.0.1`). Write
+   the 24 words down and keep them offline: the phrase is the only backup that
+   can recreate your keys for any future scheme. Wallets created in the web UI
+   or on the public website have **no** phrase and cannot use the recovery
+   below.
+2. **Register both keys.** In the web UI, on the Send tab, tick
+   **Include Public Key**: the recipient (your own address) and the amount (0)
+   are filled in for you. Send once to register the first key, then once more,
+   in a later block, for the second. Until both keys are registered, the
+   account can send nothing else.
+3. **Your recovery commitment is set automatically** with your first
+   registration: a hash of a secret derived from your phrase. It becomes
+   effective after 60,480 blocks (about one week). If a scheme is paused as
+   broken before then, the commitment is voided and you set it again with
+   your next registration. You can see it as `recoveryCommit` in the web UI's
+   public-key information.
+
+On an **escrow** account a commitment change waits for the escrow delay (and
+can be cancelled during it); on a **multi-signature** account it needs the
+required approvals. Only then does its one-week maturity start.
+
+### Case 1: the primary scheme was replaced, your spare key still works
+
+This is the usual case and needs no recovery tool. In the web UI tick
+**Include Public Key** and **Register Paused public key**, then send. The key
+of the new scheme is registered, signed with your working spare key.
+
+### Case 2: none of your registered keys works any more
+
+For example, the new scheme was un-paused before you registered its key, so
+your spare is paused too. You can still register a key of the current scheme
+with the recovery tool, if:
+
+- your wallet has a recovery phrase;
+- your account had an effective recovery commitment (see above);
+- your account has funds for the fee;
+- a node is running, with your wallet file in `~/.qwid/wallet/<N>`.
+
+Recovery takes two transactions, at least one hour apart. Signature schemes
+play no part in it: what proves ownership is the secret derived from your
+phrase.
+
+1. **Prepare.** The tool derives your new key and the recovery secret from the
+   phrase and prints the bind data:
+
+       go run cmd/recoverKey/main.go prepare -wallet <N>
+
+2. **Bind.** Send the printed data from any funded wallet `<P>` that has both
+   keys registered and a working key: yours if it still can, or a friend's or
+   operator's wallet on the same machine. The bind reveals nothing about your
+   secret:
+
+       go run cmd/recoverKey/main.go bind -wallet <P> -data <hex from step 1>
+
+3. **Wait** at least 360 blocks (about one hour) after the bind is included
+   in a block.
+
+4. **Reveal.** This registers the new key under your account, even while its
+   scheme is still paused, and sets your next recovery commitment:
+
+       go run cmd/recoverKey/main.go reveal -wallet <N>
+
+5. **Register your second key** in the web UI as in Case 1; it is now signed
+   by the key you just recovered.
+
+All commands accept `-node <ip>` (default `127.0.0.1`) and ask for the wallet
+password. Someone who copies your revealed secret from the network cannot
+redirect the recovery: only the first bind counts, and it names your new key.
+
+### Restoring a wallet from its phrase
+
+Run the generator with your node reachable and choose "restore":
+
+    go run cmd/generateNewWallet/main.go [node_ip]
+
+It finds the account your phrase already owns on chain, whichever scheme its
+address came from, and creates keys for the schemes currently in force.
+
+### Limits
+
+- A wallet without a recovery phrase cannot be recovered this way: back up
+  its wallet file.
+- Without an effective recovery commitment, the recovery tool cannot help:
+  the account must wait until one of its registered keys works again.
+- An account that never registered a key, and whose address was made from a
+  key of a scheme the chain no longer uses (for example, a wallet generated
+  with default schemes after the chain changed them), cannot be opened at
+  present.
