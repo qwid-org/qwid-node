@@ -45,7 +45,27 @@ func main() {
 		logger.GetLogger().Fatal(err)
 	}
 
-	w := wallet.EmptyWallet(uint8(walletNumber), common.SigName(), common.SigName2())
+	// Keys and the address must be those of the schemes the chain runs NOW.
+	// Ask the node (argument 1, default 127.0.0.1); without one, fall back to
+	// the built-in defaults - right only for a chain that never changed its
+	// schemes, e.g. when preparing a genesis.
+	nodeIP := "127.0.0.1"
+	if len(os.Args) > 1 {
+		nodeIP = os.Args[1]
+	}
+	defaultSig, defaultSig2 := common.SigName(), common.SigName2()
+	sigName, sigName2, primaryPaused, schemeErr := chainSchemes(nodeIP)
+	online := schemeErr == nil
+	if online {
+		fmt.Printf("Chain signature schemes: %s (primary%s) / %s\n", sigName, map[bool]string{true: ", PAUSED", false: ""}[primaryPaused], sigName2)
+	} else {
+		sigName, sigName2 = defaultSig, defaultSig2
+		fmt.Printf("WARNING: %v\nUsing the default schemes %s / %s. That is right only for a chain that never changed\n"+
+			"its schemes (e.g. preparing a genesis); otherwise run this with a reachable node:\n"+
+			"  go run cmd/generateNewWallet/main.go <node_ip>\n", schemeErr, sigName, sigName2)
+	}
+
+	w := wallet.EmptyWallet(uint8(walletNumber), sigName, sigName2)
 	walletFile := walletFilePath(w.HomePath, walletNumber)
 
 	reader := bufio.NewReader(os.Stdin)
@@ -145,22 +165,28 @@ func main() {
 	// backs a real wallet. Falling through with a zero-value account would
 	// silently write a wallet file for the zero address instead. Fatal exits
 	// non-zero before any file is created.
-	acc, err := wallet.GenerateNewAccountFromSeed(w, w.SigName, true)
+	acc1, err := wallet.GenerateNewAccountFromSeed(w, w.SigName, true)
 	if err != nil {
 		logger.GetLogger().Fatalf("Can not create wallet, no file was written. Error %v", err)
 	}
-	w.MainAddress = acc.Address
-	acc.PublicKey.MainAddress = w.MainAddress
-	w.Account1 = acc
-	copy(w.Account1.EncryptedSecretKey, acc.EncryptedSecretKey)
-
-	acc, err = wallet.GenerateNewAccountFromSeed(w, w.SigName2, false)
+	acc2, err := wallet.GenerateNewAccountFromSeed(w, w.SigName2, false)
 	if err != nil {
 		logger.GetLogger().Fatalf("Can not create wallet, no file was written. Error %v", err)
 	}
+	w.Account1 = acc1
+	copy(w.Account1.EncryptedSecretKey, acc1.EncryptedSecretKey)
+	w.Account2 = acc2
+	copy(w.Account2.EncryptedSecretKey, acc2.EncryptedSecretKey)
 
-	w.Account2 = acc
-	copy(w.Account2.EncryptedSecretKey, acc.EncryptedSecretKey)
+	if mode == "2" {
+		restoreIdentity(&w, online, primaryPaused, defaultSig, defaultSig2)
+	} else {
+		// A new identity takes its address from the LIVE scheme's key: while the
+		// primary is paused, an address from the primary key could open the
+		// account but never add its spare (wallet.SetMainAddressFromLiveScheme).
+		w.SetMainAddressFromLiveScheme(online && primaryPaused)
+	}
+	fmt.Println("Wallet address (identity):", w.MainAddress.GetHex())
 
 	folderPath := w.HomePath
 	err = os.MkdirAll(folderPath, 0700) // CW-H3: owner-only; matches StoreJSON's 0700 (MkdirAll won't chmod an existing dir)
@@ -205,6 +231,41 @@ func main() {
 // walletFilePath is the file StoreJSON writes for this wallet number. Kept next
 // to the overwrite guard so the guard can never end up checking a different path
 // than the one that is about to be written.
+// restoreIdentity sets the identity a restored wallet signs as. The phrase
+// derives a key per scheme and slot, and which of them an identity's address
+// came from depends on the schemes when it was created - so look for the one
+// the chain knows instead of assuming the primary key.
+func restoreIdentity(w *wallet.Wallet, online, primaryPaused bool, defaultSig, defaultSig2 string) {
+	cands := []identityCandidate{
+		{w.Account1.Address, w.SigName + " primary key"},
+		{w.Account2.Address, w.SigName2 + " spare key"},
+	}
+	for _, d := range []struct {
+		name    string
+		primary bool
+	}{{defaultSig, true}, {defaultSig2, false}} {
+		if a, err := deriveAddress(w, d.name, d.primary); err == nil {
+			cands = append(cands, identityCandidate{a, d.name + " key (default scheme)"})
+		}
+	}
+	cands = identityCandidates(cands)
+	if online {
+		if c, ok := chooseRestoredIdentity(cands, knownOnChain); ok {
+			w.MainAddress = c.addr
+			w.Account1.PublicKey.MainAddress = c.addr
+			w.Account2.PublicKey.MainAddress = c.addr
+			fmt.Println("Restored the on-chain identity whose address comes from the", c.label)
+			return
+		}
+		fmt.Println("WARNING: no identity of this phrase is registered on chain; treating it as a new one.")
+		w.SetMainAddressFromLiveScheme(primaryPaused)
+		return
+	}
+	fmt.Println("WARNING: no node to look the identity up; using the address of the primary key. If this wallet " +
+		"was created under other schemes, run the generator again with a reachable node.")
+	w.SetMainAddressFromLiveScheme(false)
+}
+
 func walletFilePath(homePath string, walletNumber int) string {
 	return filepath.Join(homePath, "wallet"+strconv.Itoa(walletNumber)+".json")
 }

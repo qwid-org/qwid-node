@@ -71,3 +71,27 @@ func TestCommitmentForRegistration(t *testing.T) {
 		t.Fatal("phrase-less wallet produced a commitment")
 	}
 }
+
+// An identity's first key must be the one its address comes from, and while
+// the primary scheme is paused only the spare can sign that first
+// registration and then vouch for the primary key. A wallet created during a
+// pause whose address came from the (paused) primary key could register that
+// key but never add its spare: a paused scheme vouches for nothing. So the
+// address comes from the key of the scheme that is live at creation.
+func TestMainAddressComesFromTheLiveSchemesKey(t *testing.T) {
+	var w Wallet
+	w.Account1.Address.ByteValue[0] = 1
+	w.Account2.Address.ByteValue[0] = 2
+
+	w.SetMainAddressFromLiveScheme(false)
+	if w.MainAddress != w.Account1.Address {
+		t.Fatal("with the primary live, the identity must be the primary key's address")
+	}
+	w.SetMainAddressFromLiveScheme(true)
+	if w.MainAddress != w.Account2.Address {
+		t.Fatal("with the primary paused, the identity must be the spare key's address")
+	}
+	if w.Account1.PublicKey.MainAddress != w.MainAddress || w.Account2.PublicKey.MainAddress != w.MainAddress {
+		t.Fatal("both keys must name the chosen identity")
+	}
+}

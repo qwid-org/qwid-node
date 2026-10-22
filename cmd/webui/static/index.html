@@ -1352,10 +1352,13 @@ contract Coin {
                 return;
             }
             try {
-                const res = await api('/api/registration-recipient');
+                const usePrimary = document.getElementById('usePrimaryEncryption').checked;
+                const res = await api('/api/registration-recipient?usePrimaryEncryption=' + usePrimary);
                 if (res.error) {
                     hint.textContent = res.error;
+                    hint.style.color = '#ff6b6b';
                 } else {
+                    hint.style.color = '#00d4ff';
                     document.getElementById('recipientAddress').value = res.recipient;
                     document.getElementById('sendAmount').value = '0';
                     hint.textContent = res.note;

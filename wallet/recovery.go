@@ -81,3 +81,20 @@ func NewTestRecoveryWallet(seed, primaryPub []byte) *Wallet {
 	_ = w.Account1.PublicKey.Init(primaryPub, w.MainAddress)
 	return w
 }
+
+// SetMainAddressFromLiveScheme makes the address of the key whose scheme is
+// live the wallet's identity, and has both keys name it. An identity's first
+// on-chain key must be the one its address comes from; while the primary is
+// paused only the spare can sign that first registration and then vouch for
+// the primary key. An address taken from the paused primary key could open the
+// account but never add its spare - a paused scheme vouches for nothing - so
+// the account would stay frozen until the primary scheme is un-paused.
+func (w *Wallet) SetMainAddressFromLiveScheme(primaryPaused bool) {
+	main := w.Account1.Address
+	if primaryPaused {
+		main = w.Account2.Address
+	}
+	w.MainAddress = main
+	w.Account1.PublicKey.MainAddress = main
+	w.Account2.PublicKey.MainAddress = main
+}

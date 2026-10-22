@@ -301,6 +301,11 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		copy(wl.Account2.EncryptedSecretKey, acc.EncryptedSecretKey)
 	}
 
+	// The identity is the address of the LIVE scheme's key: while the primary
+	// is paused, an address from the primary key could never add its spare
+	// (SetMainAddressFromLiveScheme).
+	wl.SetMainAddressFromLiveScheme(common.IsPaused())
+
 	if err := wl.StoreJSON(); err != nil {
 		JsonError(w, fmt.Sprintf("Failed to store wallet: %v", err), http.StatusInternalServerError)
 		return
