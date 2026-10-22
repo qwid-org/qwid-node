@@ -957,14 +957,34 @@ func handleTRAN(byt []byte, reply *[]byte) {
 	for _, group := range byTopic {
 		txs = append(txs, group...)
 	}
+	// GetTransactionsFromBytes drops what it cannot decode or verify without
+	// an error; answering "transaction sent" for a submission it discarded
+	// told the wallet a refused transaction existed.
+	submitted := 0
+	for _, tbs := range txMsg.TransactionsBytes {
+		submitted += len(tbs)
+	}
+	if len(txs) != submitted {
+		*reply = []byte(fmt.Sprintf("transaction rejected: %d of %d transaction(s) failed to decode or verify (the node log names the reason)",
+			submitted-len(txs), submitted))
+		return
+	}
 	if err := rejectUnacceptableTransactions(txs); err != nil {
 		logger.GetLogger().Println("refusing local submission:", err)
 		*reply = []byte("transaction rejected: " + err.Error())
 		return
 	}
 
+	// Pool admission (funds, height window, minimum stake) runs here, before
+	// the reply, not after it in OnMessage: a wallet told "transaction sent"
+	// for a transaction the pool then dropped believed in a transfer that
+	// never existed. Admitted transactions propagate through the pool's delta
+	// broadcast loop, exactly as OnMessage-admitted ones did.
+	if err := transactionServices.AdmitLocalTransactions(txs); err != nil {
+		*reply = []byte("transaction rejected: " + err.Error())
+		return
+	}
 	*reply = []byte("transaction sent")
-	transactionServices.OnMessage([4]byte{0, 0, 0, 0}, byt)
 
 }
 

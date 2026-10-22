@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/hex"
 	"flag"
@@ -89,13 +90,26 @@ func loadWallet(n uint8) *wallet.Wallet {
 	common.SetEncryption(enc1.SigName, enc1.PubKeyLength, enc1.PrivateKeyLength, enc1.SignatureLength, enc1.IsPaused, true)
 	common.SetEncryption(enc2.SigName, enc2.PubKeyLength, enc2.PrivateKeyLength, enc2.SignatureLength, enc2.IsPaused, false)
 	fmt.Printf("Password for wallet %d: ", n)
-	pass, err := terminal.ReadPassword(0)
+	pass, err := readPassword()
 	fmt.Println()
 	if err != nil {
 		logger.GetLogger().Fatal(err)
 	}
 	wallet.InitActiveWallet(n, string(pass), enc1.SigName, enc2.SigName)
 	return wallet.GetActiveWallet()
+}
+
+// readPassword reads without echo from a terminal, or one line from a pipe
+// (scripted runs, where there is no terminal to read from).
+func readPassword() ([]byte, error) {
+	if terminal.IsTerminal(0) {
+		return terminal.ReadPassword(0)
+	}
+	line, err := bufio.NewReader(os.Stdin).ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return nil, err
+	}
+	return bytes.TrimRight(line, "\r\n"), nil
 }
 
 func keysOf(w *wallet.Wallet) (wallet.RegisteredKeys, error) {
@@ -154,7 +168,7 @@ func newTx(sender, recipient common.Address, opt []byte, pk common.PubKey) trans
 }
 
 func signAndSend(w *wallet.Wallet, tx *transactionsDefinition.Transaction, primary bool) error {
-	st := statistics.GetStatsManager().Stats
+	st := &statistics.Stats{} // only the node's reply is read; no stats manager runs here
 	if err := common.Unmarshal(noWallet("STAT", nil), common.StatDBPrefix, &st); err != nil {
 		return fmt.Errorf("cannot read node height: %w", err)
 	}

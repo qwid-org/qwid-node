@@ -274,21 +274,37 @@ func VerifyEncryptionVotes(newBlock, lastBlock Block) error {
 
 // EncryptionChangeAuthorised lets a producer check its own vote before
 // putting it in a header, so it never builds a block validators must reject.
-// It runs every rule validators apply to a scheme change - shape, votes, the
-// un-pause stake quorum and the producer's own key (operator) - and the
-// staking state must be the parent's.
 func EncryptionChangeAuthorised(proofs [][]byte, lastBlock Block, want []byte, primary bool, height int64, operator common.Address) bool {
+	return EncryptionChangeRefusal(proofs, lastBlock, want, primary, height, operator) == nil
+}
+
+// errNoChange marks a vote equal to the parent's config: nothing to authorise.
+var errNoChange = fmt.Errorf("no change from the parent's config")
+
+// EncryptionChangeRefusal says why a producer may not put want into its
+// header, or nil if it may. It runs every rule validators apply to a scheme
+// change - shape, votes, the un-pause stake quorum and the producer's own key
+// (operator) - and the staking state must be the parent's.
+func EncryptionChangeRefusal(proofs [][]byte, lastBlock Block, want []byte, primary bool, height int64, operator common.Address) error {
 	changed, err := checkEncryptionChangeShape(want, lastBlock, primary)
-	if err != nil || !changed {
-		return false
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return errNoChange
 	}
 	asBuilt := Block{BaseBlock: BaseBlock{BaseHeader: BaseHeader{Height: height, OperatorAccount: operator}}}
-	if checkPauseLeavesRegisteredKey(asBuilt, lastBlock, want, primary) != nil {
-		return false
+	if err := checkPauseLeavesRegisteredKey(asBuilt, lastBlock, want, primary); err != nil {
+		return err
 	}
 	total := account.GetStakedInAllDelegatedAccounts()
-	return encryptionChangeAuthorised(proofs, lastBlock, want, primary, height,
-		total, decodeProof, stakeOfDelegated) == nil &&
-		checkUnpauseKeyQuorum(want, lastBlock, primary, total,
-			stakeAndOperatorOfDelegated, operatorHasKeyAsOf(lastBlock.GetHeader().Height)) == nil
+	if err := encryptionChangeAuthorised(proofs, lastBlock, want, primary, height,
+		total, decodeProof, stakeOfDelegated); err != nil {
+		return err
+	}
+	return checkUnpauseKeyQuorum(want, lastBlock, primary, total,
+		stakeAndOperatorOfDelegated, operatorHasKeyAsOf(lastBlock.GetHeader().Height))
 }
+
+// IsNoChange reports whether a refusal only means the vote equals the parent.
+func IsNoChange(err error) bool { return err == errNoChange }

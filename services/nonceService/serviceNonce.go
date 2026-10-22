@@ -4,7 +4,9 @@ import (
 	"bytes"
 	crand "crypto/rand"
 	"encoding/binary"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/qwid-org/qwid-node/account"
@@ -78,6 +80,18 @@ func InitNonceService() {
 	go sendNonceMsgInLoopSelf()
 }
 
+// errNoSigningKey: the node has no registered key of a live scheme, so it
+// sends no nonce (already warned about, at most once a minute).
+var errNoSigningKey = errors.New("no registered key of a live signature scheme")
+
+var lastNoSigningKeyWarning atomic.Int64
+
+func shouldWarnNoSigningKey() bool {
+	now := time.Now().Unix()
+	last := lastNoSigningKeyWarning.Load()
+	return now-last >= 60 && lastNoSigningKeyWarning.CompareAndSwap(last, now)
+}
+
 func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	h := common.GetHeight()
 	w := wallet.GetActiveWallet()
@@ -128,21 +142,21 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	// Nonce transactions never carry a pubkey. Key registration happens through
 	// exactly one channel: a transaction the operator sends MANUALLY with the
 	// pubkey included (signed with that key), processed by ProcessBlockPubKey
-	// when it lands in a block. Until the key of the CURRENT secondary scheme is
-	// registered on-chain, sign nonces with the primary key so this node never
-	// emits material peers cannot verify.
+	// when it lands in a block. Sign only with a key peers can verify - a
+	// registered key of a live scheme. Without one, send no nonce at all: an
+	// unverifiable nonce reads as a forgery and gets this node banned, cutting
+	// it off from the chain it can still follow.
 	pubkey := common.PubKey{}
-	if primary == false {
-		if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(sender, false, common.PubKeyLength2(false)); err != nil {
-			if !common.IsPaused() {
-				primary = true
-			} else {
-				logger.GetLogger().Println("WARNING: secondary key of the current scheme is not registered on-chain and the " +
-					"primary scheme is paused - peers will ignore this node's nonces; register the new key by sending a " +
-					"transaction with the pubkey included")
-			}
+	slot, ok := services.SigningSlot(sender, primary)
+	if !ok {
+		if shouldWarnNoSigningKey() {
+			logger.GetLogger().Println("WARNING: this node holds no registered key of a live signature scheme - " +
+				"not sending nonces (it keeps following the chain). Register the key of the current scheme " +
+				"by sending a transaction with the pubkey included")
 		}
+		return message.TransactionsMessage{}, errNoSigningKey
 	}
+	primary = slot
 
 	dataTx := transactionsDefinition.TxData{
 		Recipient: common.GetDelegatedAccount(), // will be delegated account temporary
@@ -250,7 +264,9 @@ func sendNonceMsg(ip [4]byte, topic [2]byte) bool {
 	}
 	n, err := generateNonceMsg(topic)
 	if err != nil {
-		logger.GetLogger().Println(err)
+		if err != errNoSigningKey {
+			logger.GetLogger().Println(err)
+		}
 		return false
 	}
 	if !Send(ip, n.GetBytes()) {
@@ -275,7 +291,9 @@ func sendNonceMsgSelf(ip [4]byte, topic [2]byte) bool {
 	}
 	n, err := generateNonceMsg(topic)
 	if err != nil {
-		logger.GetLogger().Println(err)
+		if err != errNoSigningKey {
+			logger.GetLogger().Println(err)
+		}
 		return false
 	}
 	if !SendSelf(ip, n.GetBytes()) {
@@ -379,7 +397,9 @@ func sendReply(addr [4]byte) {
 	var topic = [2]byte{'N', 'N'}
 	n, err := generateNonceMsg(topic)
 	if err != nil {
-		logger.GetLogger().Println(err)
+		if err != errNoSigningKey {
+			logger.GetLogger().Println(err)
+		}
 		return
 	}
 	if Send(addr, n.GetBytes()) {

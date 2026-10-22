@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/blocks"
@@ -11,7 +13,6 @@ import (
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
 	"github.com/qwid-org/qwid-node/oracles"
-	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/tcpip"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
@@ -131,12 +132,8 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	// S4-05: our vote goes into the header only if the proofs in this very
 	// block carry enough stake for it; otherwise repeat the parent's config.
 	// Validators run the same tally, so a block is never built to be rejected.
-	if len(encryption1) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption1, true, heightTransaction, myWallet.MainAddress) {
-		encryption1 = lastBlock.GetHeader().Encryption1
-	}
-	if len(encryption2) == 0 || !blocks.EncryptionChangeAuthorised(bb.OracleProofs, lastBlock, encryption2, false, heightTransaction, myWallet.MainAddress) {
-		encryption2 = lastBlock.GetHeader().Encryption2
-	}
+	encryption1 = ownSchemeVote(bb.OracleProofs, lastBlock, encryption1, true, heightTransaction, myWallet.MainAddress)
+	encryption2 = ownSchemeVote(bb.OracleProofs, lastBlock, encryption2, false, heightTransaction, myWallet.MainAddress)
 	common.BlockMutex.Unlock()
 	if err != nil {
 		return blocks.Block{}, err
@@ -155,18 +152,13 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 		Signature:        common.Signature{},
 		SignatureMessage: sendingTimeMessage,
 	}
-	signPrimary := common.GetNodeSignPrimary(heightTransaction)
-	if !signPrimary && !common.IsPaused() {
-		// Never sign a header with a key peers cannot verify. After a signature-
-		// scheme change the freshly derived secondary key is unregistered until
-		// the operator MANUALLY sends a transaction carrying the pubkey and it
-		// lands in a block (ProcessBlockPubKey), and a header — unlike a
-		// transaction — cannot carry the pubkey itself. Until the key of the
-		// CURRENT secondary scheme is registered, keep headers primary-signed.
-		if _, err := pubkeys.LoadPubKeyWithPrimaryOfLength(myWallet.MainAddress, false, common.PubKeyLength2(false)); err != nil {
-			logger.GetLogger().Println("secondary key not yet registered on-chain - signing block header with primary key")
-			signPrimary = true
-		}
+	// Never sign a header with a key peers cannot verify: only a registered key
+	// of a live scheme. A header cannot carry its pubkey, and a node holding no
+	// such key (its scheme replaced or un-paused before it registered) would
+	// only produce blocks every peer rejects - and get banned for it.
+	signPrimary, ok := SigningSlot(myWallet.MainAddress, common.GetNodeSignPrimary(heightTransaction))
+	if !ok {
+		return blocks.Block{}, fmt.Errorf("not producing: this node holds no registered key of a live signature scheme")
 	}
 	sign, signatureBlockHeaderMessage, err := bh.Sign(signPrimary)
 	if err != nil {
@@ -261,4 +253,39 @@ func randaoForBlock(w *wallet.Wallet, lastBlock blocks.Block, height int64) (rev
 	}
 	commit, mix, rand = blocks.RandaoFields(lastBlock, height, reveal, next)
 	return reveal, commit, mix, rand, nil
+}
+
+// ownSchemeVote is the scheme config this producer puts in its header: its own
+// vote if validators would accept it, otherwise the parent's. A refused vote
+// used to fall back silently, leaving an operator who voted with no clue why
+// nothing changed; the reason is now logged, at most once a minute per slot.
+func ownSchemeVote(proofs [][]byte, lastBlock blocks.Block, vote []byte, primary bool, height int64, operator common.Address) []byte {
+	parent := lastBlock.GetHeader().Encryption1
+	if !primary {
+		parent = lastBlock.GetHeader().Encryption2
+	}
+	if len(vote) == 0 {
+		return parent
+	}
+	err := blocks.EncryptionChangeRefusal(proofs, lastBlock, vote, primary, height, operator)
+	if err == nil {
+		return vote
+	}
+	if !blocks.IsNoChange(err) && shouldLogVoteRefusal(primary) {
+		logger.GetLogger().Printf("own %s scheme vote not adopted at block %d: %v",
+			map[bool]string{true: "primary", false: "secondary"}[primary], height, err)
+	}
+	return parent
+}
+
+var lastVoteRefusalLog [2]atomic.Int64
+
+func shouldLogVoteRefusal(primary bool) bool {
+	i := 0
+	if !primary {
+		i = 1
+	}
+	now := time.Now().Unix()
+	last := lastVoteRefusalLog[i].Load()
+	return now-last >= 60 && lastVoteRefusalLog[i].CompareAndSwap(last, now)
 }
