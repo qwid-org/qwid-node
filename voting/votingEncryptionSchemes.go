@@ -243,3 +243,19 @@ func VerifyEncryptionForReplacing(height int64, totalStaked int64, primary bool,
 
 	return true
 }
+
+// DropVotesAbove forgets scheme votes from heights above height; a rewind calls
+// it with the new tip + 1. See oracles.DropSubmissionsAbove: a vote from the
+// abandoned branch would make every fresh vote "invalid height" until the chain
+// regrew past it.
+func DropVotesAbove(height int64) {
+	VotesEncryptionMutex.Lock()
+	defer VotesEncryptionMutex.Unlock()
+	for _, votes := range []map[uint8]Votes{VotesEncryption1, VotesEncryption2} {
+		for id, v := range votes {
+			if v.Height > height {
+				delete(votes, id)
+			}
+		}
+	}
+}

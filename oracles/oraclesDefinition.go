@@ -64,7 +64,10 @@ func GenerateOracleProofs(height int64) [][]byte {
 	defer oracleProofsRWMutex.RUnlock()
 	ids := make([]uint8, 0, len(oracleProofs))
 	for id, p := range oracleProofs {
-		if height <= p.height+common.OraclesHeightDistance {
+		// Not from the future either: blocks.authenticateOracleProofs rejects a
+		// proof above the block's height, and after a rewind the store can
+		// still hold submissions from the abandoned, higher branch.
+		if p.height <= height && height <= p.height+common.OraclesHeightDistance {
 			ids = append(ids, id)
 		}
 	}
@@ -120,7 +123,9 @@ func GeneratePriceData(height int64) ([]byte, []int64, int64) {
 	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
 	for _, i := range ids {
 		po := PriceOracles[i]
-		if height <= po.Height+common.OraclesHeightDistance && po.Price > 0 {
+		// Same window as GenerateOracleProofs - the block's price data must be
+		// exactly the values of its proofs.
+		if po.Height <= height && height <= po.Height+common.OraclesHeightDistance && po.Price > 0 {
 			priceData = append(priceData, i)
 			priceData = append(priceData, common.GetByteInt64(po.Height)...)
 			priceData = append(priceData, common.GetByteInt64(po.Price)...)
@@ -254,4 +259,27 @@ func PriceFromData(priceData []byte, totalStaked int64) (int64, error) {
 		return 0, errors.New("not enough prices propositions after removing min and max")
 	}
 	return Median(prices), nil
+}
+
+// DropSubmissionsAbove forgets price submissions and their proofs from heights
+// above height. A rewind calls it with the new tip + 1 (the height of the next
+// block's nonces): entries from the abandoned branch would otherwise sit above
+// the chain, where the strictly-newer save rule refuses every fresh submission
+// until the chain regrows past them, and the producer embeds proofs the block
+// verifier rejects as "not fresh".
+func DropSubmissionsAbove(height int64) {
+	PriceOraclesRWMutex.Lock()
+	for id, po := range PriceOracles {
+		if po.Height > height {
+			delete(PriceOracles, id)
+		}
+	}
+	PriceOraclesRWMutex.Unlock()
+	oracleProofsRWMutex.Lock()
+	for id, p := range oracleProofs {
+		if p.height > height {
+			delete(oracleProofs, id)
+		}
+	}
+	oracleProofsRWMutex.Unlock()
 }
