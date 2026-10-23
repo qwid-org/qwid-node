@@ -76,7 +76,7 @@ func VerifyStakeDependent(newBlock, lastBlock Block) error {
 	if err := VerifyEncryptionVotes(newBlock, lastBlock); err != nil {
 		return fmt.Errorf("scheme vote fails: %w", err)
 	}
-	totalStaked := account.GetStakedInAllDelegatedAccounts()
+	totalStaked := account.GetStakedInEligibleDelegatedAccounts()
 	// S4-06: a price that cannot be established carries the parent's forward,
 	// so a producer embedding too few proofs can at most freeze it, never
 	// publish 0.

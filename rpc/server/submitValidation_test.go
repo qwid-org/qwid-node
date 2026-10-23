@@ -152,3 +152,41 @@ func TestEmptyBatchIsAccepted(t *testing.T) {
 		t.Fatalf("an empty batch was refused: %v", err)
 	}
 }
+
+// An operational stake into a delegated account this node does not run took
+// that account away from the node producing for it (2026-10-23: a stake from
+// node 2 into account 1 halted node 1).
+func TestOperatorIntentOnlyForThisNodesDelegatedAccount(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+
+	mine := common.GetDelegatedAccountAddress(2)
+	stake := func(da int16, amount int64, opt []byte, locked int64) transactionsDefinition.Transaction {
+		return transactionsDefinition.Transaction{TxData: transactionsDefinition.TxData{
+			Recipient: common.GetDelegatedAccountAddress(da), Amount: amount, OptData: opt, LockedAmount: locked}}
+	}
+	cases := []struct {
+		name string
+		tx   transactionsDefinition.Transaction
+		ok   bool
+	}{
+		{"operator stake into another account", stake(1, 1000, []byte{1}, 0), false},
+		{"operator stake into this node's account", stake(2, 1000, []byte{1}, 0), true},
+		{"plain stake into another account", stake(1, 1000, nil, 0), true},
+		{"unstake with the flag", stake(1, -1000, []byte{1}, 0), true},
+		{"locked stake cannot make an operator", stake(1, 1000, []byte{1}, 500), true},
+		{"withdraw account", stake(1+256, 1000, []byte{1}, 0), true},
+		{"ordinary transfer with data", transactionsDefinition.Transaction{TxData: transactionsDefinition.TxData{
+			Recipient: rpcAddress(9), Amount: 1000, OptData: []byte{1}}}, true},
+	}
+	for _, c := range cases {
+		err := checkOperatorIntent(c.tx, mine)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err=%v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+	if err := checkOperatorIntent(stake(1, 1000, []byte{1}, 0), common.Address{}); err == nil ||
+		!strings.Contains(err.Error(), "runs delegated account none") {
+		t.Errorf("a node without DELEGATED_ACCOUNT accepted an operator stake: %v", err)
+	}
+}

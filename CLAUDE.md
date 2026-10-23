@@ -96,13 +96,20 @@ of accounts, staking, DEX and EVM state **after the parent block**), both
 covered by the producer's signature. Validators recompute `BlockHeaderHash`,
 `BodyHash` and `StateRoot` before applying a block. Signature-scheme votes are
 counted from the signed nonces embedded in the block (`OracleProofs`) against
-the parent's stake (`blocks/encryptionVote.go`). Un-pausing a scheme (which
+the parent's stake (`blocks/encryptionVote.go`). Every consensus threshold (price, pause,
+replace, un-pause) divides by the stake that can vote -
+`account.GetStakedInEligibleDelegatedAccounts`, the delegated accounts
+`IsTop128StakingNode` admits - never by all staked coins, which counted stake
+below the node minimum or outside the top 128 as a permanent vote against. Un-pausing a scheme (which
 makes it active and pauses the other) additionally needs two thirds of the
 stake held by operators with a key of it registered by the parent block
 (`checkUnpauseKeyQuorum`), and the producer must hold one too
 (`checkPauseLeavesRegisteredKey`); producers apply the same rules before
 proposing (`EncryptionChangeAuthorised`). Oracle data must be exactly
-the values of the embedded proofs. A price that cannot be established (proofs
+the values of the embedded proofs. Producers embed only proofs whose signer still
+operates its delegated account (`blocks.AuthorizedOracleProofs`): a stake that
+moves operatorship would otherwise leave a stale proof in every candidate and
+halt the chain. A price that cannot be established (proofs
 carry at most 2/3 of the stake) is the parent's carried forward, never 0.
 
 RAND is a RANDAO accumulator (`blocks/randao.go`, S4-06), not the validators'
@@ -227,7 +234,7 @@ CONTACT_TO=support@qwid.org          # Where the contact form delivers.
 CONTACT_FROM=support@qwid.org        # Envelope + From: sender. MUST be an identity verified in SES, or SES rejects the message. Never SMTP_USER — the visitor's address goes in Reply-To.
 ```
 
-Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change, website-registration and CLI wallet-generator flows. Gas: the EVM runs on exactly the declared gas; `MinGasUsage()` is the validation floor (DEX ops include `DexTokenCallGas`), `GasUsageEstimate()` is what wallets declare (10x the floor for contract calls/deploys, capped at `MaxGasUsage`). The web UI session idles out after 30 min (`POST /api/logout` ends it). Signed RPC requests carry a replay guard (time + nonce, `common.NewRPCGuard`) between the request and the signature; the node accepts each guard once, within 60 s of its clock — build requests only through `wallet.SignRPCRequest`. DEX buy/sell orders may carry a signed coin limit (`transactionsDefinition.DexOrderOptData`, OptData 16 bytes); an order whose limit the trade would break is skipped (fee paid), not a block error.
+Security defaults from the remediation: the wallet<->node RPC binds loopback-only (port 19009, keep firewalled); password minimum is 8 chars on password-change, website-registration and CLI wallet-generator flows. Gas: the EVM runs on exactly the declared gas; `MinGasUsage()` is the validation floor (DEX ops include `DexTokenCallGas`), `GasUsageEstimate()` is what wallets declare (10x the floor for contract calls/deploys, capped at `MaxGasUsage`). The web UI session idles out after 30 min (`POST /api/logout` ends it). Signed RPC requests carry a replay guard (time + nonce, `common.NewRPCGuard`) between the request and the signature; the node accepts each guard once, within 60 s of its clock — build requests only through `wallet.SignRPCRequest`. The node refuses (RPC `TRAN`, `checkOperatorIntent`) a local stake flagged "Intend to be an Operator" into any delegated account other than its own `DELEGATED_ACCOUNT` - the largest operational stake becomes the operator, so such a stake takes the account from the node producing for it; a local guard, not consensus. DEX buy/sell orders may carry a signed coin limit (`transactionsDefinition.DexOrderOptData`, OptData 16 bytes); an order whose limit the trade would break is skipped (fee paid), not a block error.
 
 Recovery phrases — exactly which flows produce one:
 - **CLI generator** (`go run cmd/generateNewWallet/main.go [node_ip]`): creates a wallet **from** a fresh 24-word BIP39 phrase (shown once, three words typed back to confirm), and restores a wallet from an existing phrase. The phrase is read without echo and stored encrypted in the wallet file.

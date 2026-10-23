@@ -921,8 +921,42 @@ func rejectUnacceptableTransactions(txs []transactionsDefinition.Transaction) er
 		if err := blocks.ValidateContractDeployment(tx); err != nil {
 			return err
 		}
+		if err := checkOperatorIntent(tx, common.GetDelegatedAccount()); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// checkOperatorIntent refuses a stake that intends to become the operator of
+// a delegated account other than the one this node runs (DELEGATED_ACCOUNT
+// in .env). The largest operational stake in a delegated account makes its
+// operator, so such a stake - easily sent by mistake, from a wallet whose
+// node runs another account - silently takes the account away from the node
+// that was producing for it, and nothing here would produce for it instead.
+// Becoming an operator on purpose means setting DELEGATED_ACCOUNT first.
+//
+// This is a local guard against mistakes, not a consensus rule: the chain
+// cannot know any node's .env, and a stake sent through another node is not
+// stopped.
+func checkOperatorIntent(tx transactionsDefinition.Transaction, mine common.Address) error {
+	if tx.TxData.Amount <= 0 || len(tx.TxData.OptData) == 0 || tx.GetLockedAmount() > 0 {
+		return nil
+	}
+	target, err := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient)
+	if err != nil || target >= 256 {
+		return nil // not a stake
+	}
+	own, err := account.IntDelegatedAccountFromAddress(mine)
+	if err == nil && own == target {
+		return nil
+	}
+	ownText := "none"
+	if err == nil {
+		ownText = fmt.Sprintf("%d", own)
+	}
+	return fmt.Errorf("staking with 'Intend to be an Operator' into delegated account %d, but this node runs delegated account %s (DELEGATED_ACCOUNT in .env): the largest operational stake becomes the account's operator, so this would take account %d away from the node producing for it. Stake without the operator flag, or set DELEGATED_ACCOUNT=%d first if this node is to operate it",
+		target, ownText, target, target)
 }
 
 // handleTRAN accepts a transaction batch from the local wallet.
