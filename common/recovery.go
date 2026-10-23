@@ -108,3 +108,25 @@ func RecoveryBindKey(identity Address, tag [32]byte) [32]byte {
 	copy(k[:], b)
 	return k
 }
+
+// AddressOpenMessage is what the old key signs when an account that never
+// registered a key is opened by revealing that key (the address is its hash):
+// the identity, the new key that joins it, and both commitments it starts
+// with. The signature makes the reveal useless to anyone who merely knows the
+// old public key - for instance because it was published on another chain.
+func AddressOpenMessage(identity, newKey, next, spare Address) ([]byte, error) {
+	return recoveryHash(32, "qwid-address-open", identity.GetBytes(), newKey.GetBytes(), next.GetBytes(), spare.GetBytes(),
+		GetByteInt64(int64(GetChainID())))
+}
+
+// AddressOpenPayload is the bind payload of an address opening: like
+// RecoveryPayload, it fixes in advance everything the reveal will do.
+func AddressOpenPayload(identity, newKey, next, spare Address, oldPub []byte) ([32]byte, error) {
+	var p [32]byte
+	b, err := recoveryHash(32, "qwid-address-open-payload", identity.GetBytes(), newKey.GetBytes(), next.GetBytes(), spare.GetBytes(), oldPub)
+	if err != nil {
+		return p, err
+	}
+	copy(p[:], b)
+	return p, nil
+}

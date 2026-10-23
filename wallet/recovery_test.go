@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 )
 
 func recoveryWallet(seedByte, addrByte byte) *Wallet {
@@ -53,22 +54,35 @@ func TestFindRecoveryIndex(t *testing.T) {
 	}
 }
 
-func TestCommitmentForRegistration(t *testing.T) {
+// Opening an account: the registration points at the spare key's ADDRESS (the
+// wallet's key in the other slot) and carries the recovery commitment C_0.
+func TestOpeningCommitments(t *testing.T) {
 	w := recoveryWallet(7, 1)
+	w.Account1.Address.ByteValue[0] = 0x11
+	w.Account2.Address.ByteValue[0] = 0x22
 	c0, _ := w.RecoveryCommitmentAddress(0)
-	got, err := w.CommitmentForRegistration(RegisteredKeys{})
-	if err != nil || got != c0 {
-		t.Fatalf("fresh identity should commit to C_0, got %v %v", got, err)
+
+	spare, rec, ok := w.OpeningCommitments(RegisteredKeys{}, true)
+	if !ok || spare != w.Account2.Address || !bytes.Equal(rec, c0.GetBytes()) {
+		t.Fatalf("opening with the primary key: spare %v rec %x ok %v", spare, rec, ok)
+	}
+	spare, _, _ = w.OpeningCommitments(RegisteredKeys{}, false)
+	if spare != w.Account1.Address {
+		t.Fatal("opening with the spare-slot key must point at the primary-slot key")
 	}
 	var some common.Address
 	some.ByteValue[0] = 5
-	for _, k := range []RegisteredKeys{{RecoveryCommit: some}, {RecoveryPending: some}} {
-		if got, _ := w.CommitmentForRegistration(k); got != w.MainAddress {
-			t.Fatalf("existing commitment overwritten: %+v", k)
+	for _, k := range []RegisteredKeys{{RecoveryCommit: some}, {SpareCommit: some}, {RecoveryPending: some}, {SparePending: some}} {
+		if _, _, ok := w.OpeningCommitments(k, true); ok {
+			t.Fatalf("existing commitments would be overwritten: %+v", k)
 		}
 	}
-	if _, err := (&Wallet{}).CommitmentForRegistration(RegisteredKeys{}); err == nil {
-		t.Fatal("phrase-less wallet produced a commitment")
+	// Without a phrase there is no recovery secret, but the spare still counts.
+	nophrase := &Wallet{}
+	nophrase.Account2.Address.ByteValue[0] = 0x22
+	spare, rec, ok = nophrase.OpeningCommitments(RegisteredKeys{}, true)
+	if !ok || spare != nophrase.Account2.Address || rec != nil {
+		t.Fatalf("phrase-less opening: spare %v rec %x ok %v", spare, rec, ok)
 	}
 }
 
@@ -93,5 +107,41 @@ func TestMainAddressComesFromTheLiveSchemesKey(t *testing.T) {
 	}
 	if w.Account1.PublicKey.MainAddress != w.MainAddress || w.Account2.PublicKey.MainAddress != w.MainAddress {
 		t.Fatal("both keys must name the chosen identity")
+	}
+}
+
+// Opening an old account means signing with the key its address came from,
+// whichever scheme that was - possibly one the chain no longer uses, so the
+// wallet no longer holds it as Account1/Account2. The phrase rederives it.
+func TestSignWithAddressKeyFindsTheKeyBehindTheAddress(t *testing.T) {
+	w := &Wallet{seed: bytes.Repeat([]byte{7}, 64)}
+	w.SetPassword("harness-password")
+	w.Iv = GenerateNewIv()
+	old, err := GenerateNewAccountFromSeed(*w, common.SigName(), true)
+	if err != nil {
+		t.Skipf("liboqs unavailable: %v", err)
+	}
+	w.MainAddress = old.Address
+
+	msg := []byte("open me")
+	scheme, pub, sig, err := w.SignWithAddressKey(msg, []string{common.SigName2(), common.SigName()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheme != common.SigName() || !bytes.Equal(pub, old.PublicKey.GetBytes()) {
+		t.Fatalf("found %s key %x, want the %s address key", scheme, pub[:4], common.SigName())
+	}
+	var v oqs.Signature
+	defer v.Clean()
+	if err := v.Init(scheme, nil); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := v.Verify(msg, sig, pub); err != nil || !ok {
+		t.Fatal("the signature does not verify against the address key")
+	}
+
+	w.MainAddress.ByteValue[0] ^= 1
+	if _, _, _, err := w.SignWithAddressKey(msg, []string{common.SigName()}); err == nil {
+		t.Fatal("signed although no key hashes to the address")
 	}
 }

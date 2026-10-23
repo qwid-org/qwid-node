@@ -1,6 +1,7 @@
 package qtwidgets
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"github.com/qwid-org/qwid-node/common"
@@ -247,8 +248,11 @@ func ShowSendPage() *widgets.QTabWidget {
 				return
 			}
 			signingPaused := (primary && common.IsPaused()) || (!primary && common.IsPaused2())
-			if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused {
-				ar = registrationRecipientGUI(ar)
+			if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused &&
+				bytes.Equal(ar.GetBytes(), MainWallet.MainAddress.GetBytes()) {
+				if spare, rec, ok := openingCommitmentsGUI(registerPrimary); ok {
+					ar, scData = spare, rec
+				}
 			}
 		} else {
 			if primaryChb.IsChecked() {

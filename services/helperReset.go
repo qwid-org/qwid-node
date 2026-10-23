@@ -5,7 +5,9 @@ import (
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/oracles"
 	"github.com/qwid-org/qwid-node/transactionsPool"
+	"github.com/qwid-org/qwid-node/voting"
 	"sync/atomic"
 )
 
@@ -274,6 +276,14 @@ func ResetAccountsAndBlocksSyncLocked(height int64) {
 			logger.GetLogger().Println(err)
 		}
 	}
+
+	// Oracle submissions and scheme votes from the abandoned branch sit above
+	// the new tip: the producer would embed proofs the block verifier rejects,
+	// and the strictly-newer save rule would refuse every fresh submission
+	// until the chain regrew past them - a lone producer stayed stuck until
+	// restarted. Keep tip+1: the next block's nonces build on our tip.
+	oracles.DropSubmissionsAbove(height + 1)
+	voting.DropVotesAbove(height + 1)
 
 	common.SetHeight(height)
 	logger.GetLogger().Println("reset to ", height, " is successful")

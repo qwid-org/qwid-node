@@ -147,7 +147,7 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	// unverifiable nonce reads as a forgery and gets this node banned, cutting
 	// it off from the chain it can still follow.
 	pubkey := common.PubKey{}
-	slot, ok := services.SigningSlot(sender, primary)
+	slot, ok := services.SigningSlot(sender, primary, w.Account1.PublicKey.GetBytes(), w.Account2.PublicKey.GetBytes())
 	if !ok {
 		if shouldWarnNoSigningKey() {
 			logger.GetLogger().Println("WARNING: this node holds no registered key of a live signature scheme - " +

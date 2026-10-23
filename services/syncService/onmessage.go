@@ -299,17 +299,27 @@ func shouldSyncToHeight(claimedHeight int64, localHeight int64) (bool, int64) {
 // one. With no live claims we fall back to the HEIGHT_OF_NETWORK hint, which
 // keeps a solo/genesis node producing.
 func networkHeight() int64 {
+	if h, ok := peerNetworkHeight(); ok {
+		return h
+	}
+	return common.CurrentHeightOfNetwork
+}
+
+// peerNetworkHeight is networkHeight from live peer claims alone: ok=false
+// when no claim is live, instead of falling back to the HEIGHT_OF_NETWORK
+// setting - an operator's figure, not something a peer reported.
+func peerNetworkHeight() (int64, bool) {
 	peerHeightClaimsMutex.RLock()
 	defer peerHeightClaimsMutex.RUnlock()
 
 	best, second, live := topTwo(liveClaimsBySource(time.Now()))
 	switch {
 	case live == 0:
-		return common.CurrentHeightOfNetwork
+		return 0, false
 	case live == 1:
-		return best
+		return best, true
 	default:
-		return second
+		return second, true
 	}
 }
 
@@ -450,8 +460,11 @@ func updateSyncTarget() {
 	//
 	// The CURRENT view, not a running maximum: claims expire after
 	// ClaimExpiryDuration, and a maximum kept one wrong claim (a forked or
-	// misconfigured peer) on display until the node restarted.
-	common.SetHeightMax(max(nh, common.GetHeight()))
+	// misconfigured peer) on display until the node restarted. Peers' height
+	// only - never our own height, nor the HEIGHT_OF_NETWORK setting.
+	if ph, ok := peerNetworkHeight(); ok {
+		common.SetHeightMax(ph)
+	}
 }
 
 // cleanupExpiredClaims removes old height claims

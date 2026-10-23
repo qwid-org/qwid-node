@@ -30,6 +30,27 @@ func processRecoveryTransaction(tx transactionsDefinition.Transaction, height, f
 			account.RecoveryBind{Identity: identity.ByteValue, Payload: payload, Height: height})
 		return true, AddBalance(sender.ByteValue, -fee)
 
+	case tx.IsAddressReveal():
+		r, err := transactionsDefinition.ParseAddressReveal(tx.TxData.OptData)
+		if err != nil {
+			return true, err
+		}
+		acc, ok := account.GetAccountByAddressBytes(sender.GetBytes())
+		if !ok || acc.HasCommitments() {
+			return true, fmt.Errorf("%s was opened before its address reveal applied", sender.GetHex())
+		}
+		tag, err := common.RecoveryTag(r.OldPub)
+		if err != nil {
+			return true, err
+		}
+		account.AddTransactionsSender(sender.ByteValue, tx.GetHash())
+		// The account's first commitments: they apply at once.
+		if err := account.SetAccountCommitments(sender.ByteValue, r.Spare.ByteValue, r.Next.ByteValue, height); err != nil {
+			return true, err
+		}
+		account.DeleteRecoveryBind(common.RecoveryBindKey(sender, tag))
+		return true, AddBalance(sender.ByteValue, -fee)
+
 	case tx.IsRecoveryReveal():
 		secret, next, err := transactionsDefinition.ParseRecoveryReveal(tx.TxData.OptData)
 		if err != nil {
@@ -85,10 +106,12 @@ func processRecoveryTransaction(tx transactionsDefinition.Transaction, height, f
 	return false, nil
 }
 
-// settleCommitment makes a commitment registration take effect: its
-// Recipient becomes the sender's pending commitment, maturing from height.
+// settleCommitment makes a commitment registration take effect: its spare
+// address and recovery commitment become the sender's (account.SetCommitments:
+// at once for an account's first, maturing from height for later ones).
 func settleCommitment(tx transactionsDefinition.Transaction, height int64) error {
-	return account.SetAccountPendingRecoveryCommit(tx.GetSenderAddress().ByteValue, tx.TxData.Recipient.ByteValue, height)
+	spare, recovery := tx.CommitmentValues()
+	return account.SetAccountCommitments(tx.GetSenderAddress().ByteValue, spare, recovery, height)
 }
 
 // applyRecoveryMaintenance runs after a block's transfers: expired binds go,

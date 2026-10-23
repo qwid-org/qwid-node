@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 )
 
 const recoverySecretDomain = "qwid-recovery-secret"
@@ -60,16 +61,23 @@ func (w *Wallet) FindRecoveryIndex(c common.Address, limit uint32) (uint32, erro
 	return 0, fmt.Errorf("commitment %s is not one of this wallet's first %d", c.GetHex(), limit)
 }
 
-// CommitmentForRegistration is the Recipient a key registration should carry:
-// C_0 for an identity with no commitment at all, otherwise the identity itself
-// (no change - re-sending a commitment would restart its maturity clock).
-func (w *Wallet) CommitmentForRegistration(keys RegisteredKeys) (common.Address, error) {
-	var zero common.Address
-	if !bytes.Equal(keys.RecoveryCommit.GetBytes(), zero.GetBytes()) ||
-		!bytes.Equal(keys.RecoveryPending.GetBytes(), zero.GetBytes()) {
-		return w.MainAddress, nil
+// OpeningCommitments are what the registration opening an account carries:
+// Recipient = the ADDRESS of the wallet's key in the other slot than the one
+// registered (the spare, whose public key stays unpublished until needed), and
+// OptData = the recovery commitment C_0 (nil without a recovery phrase). ok is
+// false once the identity has commitments: later registrations leave them.
+func (w *Wallet) OpeningCommitments(keys RegisteredKeys, registerPrimary bool) (spare common.Address, recovery []byte, ok bool) {
+	if keys.HasCommitments() {
+		return common.Address{}, nil, false
 	}
-	return w.RecoveryCommitmentAddress(0)
+	spare = w.Account2.Address
+	if !registerPrimary {
+		spare = w.Account1.Address
+	}
+	if c, err := w.RecoveryCommitmentAddress(0); err == nil {
+		recovery = c.GetBytes()
+	}
+	return spare, recovery, true
 }
 
 // NewTestRecoveryWallet builds a wallet with a seed and a primary public key
@@ -97,4 +105,46 @@ func (w *Wallet) SetMainAddressFromLiveScheme(primaryPaused bool) {
 	w.MainAddress = main
 	w.Account1.PublicKey.MainAddress = main
 	w.Account2.PublicKey.MainAddress = main
+}
+
+// SignWithAddressKey signs msg with the key whose address is the wallet's
+// identity, whichever scheme it belongs to - possibly one the chain no longer
+// uses, so not Account1/Account2 any more. It is rederived from the phrase for
+// each candidate scheme (both slots), or taken from the per-scheme key archive.
+// Used to open an account that never registered a key (an address opening).
+func (w *Wallet) SignWithAddressKey(msg []byte, schemes []string) (sigName string, pub, sig []byte, err error) {
+	if w.HasSeed() {
+		for _, name := range schemes {
+			for _, primary := range []bool{true, false} {
+				acc, derr := GenerateNewAccountFromSeed(*w, name, primary)
+				if derr != nil || acc.Address.ByteValue != w.MainAddress.ByteValue {
+					continue
+				}
+				s, serr := acc.signer.Sign(msg)
+				acc.signer.Clean()
+				return name, acc.PublicKey.GetBytes(), s, serr
+			}
+		}
+	}
+	for name, a := range w.Accounts {
+		if a.Address.ByteValue != w.MainAddress.ByteValue {
+			continue
+		}
+		secret, derr := w.decrypt(a.EncryptedSecretKey)
+		if derr != nil {
+			continue
+		}
+		var signer oqs.Signature
+		ierr := signer.Init(name, secret)
+		ZeroBytes(secret)
+		if ierr != nil {
+			signer.Clean()
+			continue
+		}
+		s, serr := signer.Sign(msg)
+		signer.Clean()
+		return name, a.PublicKey.GetBytes(), s, serr
+	}
+	return "", nil, nil, fmt.Errorf("no key of this wallet hashes to its address %s (tried %v and the key archive)",
+		w.MainAddress.GetHex(), schemes)
 }

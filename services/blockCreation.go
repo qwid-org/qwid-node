@@ -156,7 +156,8 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	// of a live scheme. A header cannot carry its pubkey, and a node holding no
 	// such key (its scheme replaced or un-paused before it registered) would
 	// only produce blocks every peer rejects - and get banned for it.
-	signPrimary, ok := SigningSlot(myWallet.MainAddress, common.GetNodeSignPrimary(heightTransaction))
+	signPrimary, ok := SigningSlot(myWallet.MainAddress, common.GetNodeSignPrimary(heightTransaction),
+		myWallet.Account1.PublicKey.GetBytes(), myWallet.Account2.PublicKey.GetBytes())
 	if !ok {
 		return blocks.Block{}, fmt.Errorf("not producing: this node holds no registered key of a live signature scheme")
 	}

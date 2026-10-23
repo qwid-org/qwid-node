@@ -9,6 +9,8 @@ import (
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/database"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/oracles"
+	"github.com/qwid-org/qwid-node/voting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -196,4 +198,38 @@ func TestResetRewindsToRequestedHeight(t *testing.T) {
 	ResetAccountsAndBlocksSync(4)
 
 	assert.Equal(t, int64(4), common.GetHeight())
+}
+
+// A rewind drops oracle submissions and scheme votes from above the new tip,
+// so the node can accept its fresh nonces (and produce) right away instead of
+// waiting for the chain to regrow past the abandoned branch's heights.
+func TestResetDropsOracleSubmissionsAboveTheNewTip(t *testing.T) {
+	withTempDB(t)
+	storeChainWithBalances(t, 10, 0, 1_000_000, nil)
+	savedHeight := common.GetHeight()
+	t.Cleanup(func() {
+		common.SetHeight(savedHeight)
+		oracles.DropSubmissionsAbove(-1) // leave the global stores empty
+		voting.DropVotesAbove(-1)
+	})
+	common.SetHeight(10)
+	da := common.GetDelegatedAccountAddress(1)
+	if err := oracles.SavePriceOracle(100, 11, da, 1000); err != nil { // from the abandoned branch
+		t.Fatal(err)
+	}
+	if err := voting.SaveVotesEncryption1([]byte{1}, 11, da, 1000); err != nil {
+		t.Fatal(err)
+	}
+
+	ResetAccountsAndBlocksSync(4)
+
+	if err := oracles.SavePriceOracle(101, 5, da, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if data, _, _ := oracles.GeneratePriceData(5); len(data) == 0 {
+		t.Fatal("the fresh height-5 price was refused: the height-11 entry from the abandoned branch survived the rewind")
+	}
+	if err := voting.SaveVotesEncryption1([]byte{2}, 5, da, 1000); err != nil {
+		t.Fatalf("a fresh vote was refused after the rewind: %v", err)
+	}
 }

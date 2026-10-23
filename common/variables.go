@@ -9,9 +9,10 @@ import (
 var height int64
 var heightMax int64
 
-// heightMaxAt is when heightMax was last refreshed from peer claims. The sync
-// service refreshes it on every peer "hi"; a value nobody has confirmed for
-// heightMaxTTL (no peers, or none reachable) is stale and is no longer shown.
+// heightMaxAt is when heightMax was last refreshed from live peer claims. The
+// sync service refreshes it on every peer "hi" while some claim is live; a
+// value nobody has confirmed for heightMaxTTL (no peers, or none reachable) is
+// stale and is no longer reported.
 var heightMaxAt time.Time
 
 const heightMaxTTL = 3 * time.Minute
@@ -47,20 +48,20 @@ func SetHeight(h int64) {
 	height = h
 }
 
-// GetHeightMax is the network height last observed from live peer claims,
-// never below this node's own height, and only while fresh: a value no peer
-// has confirmed for heightMaxTTL falls back to the own height, so a wrong
-// claim cannot stay on display (or steer the rewind depth) indefinitely.
+// GetHeightMax is the network height last reported by live peer claims -
+// the PEERS' height, never this node's own. A value no peer has confirmed for
+// heightMaxTTL is no longer reported: 0 means "no peer height known", so a
+// wrong claim cannot stay on display (or steer the rewind depth) indefinitely.
 func GetHeightMax() int64 {
 	heightMutex.RLock()
 	defer heightMutex.RUnlock()
 	if heightMaxAt.IsZero() || time.Since(heightMaxAt) > heightMaxTTL {
-		return height
+		return 0
 	}
-	return max(heightMax, height)
+	return heightMax
 }
 
-// SetHeightMax records the current network height view (not a running
+// SetHeightMax records the peers' current network height (not a running
 // maximum: it may go down when a claim expires).
 func SetHeightMax(hmax int64) {
 	heightMutex.Lock()
