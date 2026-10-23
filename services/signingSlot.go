@@ -1,6 +1,8 @@
 package services
 
 import (
+	"bytes"
+
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/pubkeys"
 )
@@ -21,8 +23,12 @@ func signingSlot(preferred bool, paused func(primary bool) bool, registered func
 }
 
 // SigningSlot is signingSlot against the node's current scheme config and the
-// live key registry.
-func SigningSlot(addr common.Address, preferred bool) (bool, bool) {
+// live key registry. ownPrimary/ownSecondary are this node's public keys: a
+// slot counts as registered only when THAT key is - two schemes can share a
+// key length (Falcon-512 and Falcon-padded-512, 897 bytes), so a registered
+// key of the right length may be a superseded scheme's, and signing with the
+// node's unregistered new key would read as a forgery.
+func SigningSlot(addr common.Address, preferred bool, ownPrimary, ownSecondary []byte) (bool, bool) {
 	paused := func(primary bool) bool {
 		if primary {
 			return common.IsPaused()
@@ -30,12 +36,24 @@ func SigningSlot(addr common.Address, preferred bool) (bool, bool) {
 		return common.IsPaused2()
 	}
 	registered := func(primary bool) bool {
-		n := common.PubKeyLength2(false)
+		n, own := common.PubKeyLength2(false), ownSecondary
 		if primary {
-			n = common.PubKeyLength(false)
+			n, own = common.PubKeyLength(false), ownPrimary
 		}
-		_, err := pubkeys.LoadPubKeyWithPrimaryOfLength(addr, primary, n)
-		return err == nil
+		if len(own) == 0 {
+			return false
+		}
+		addrs, err := pubkeys.LoadAddresses(addr)
+		if err != nil {
+			return false
+		}
+		for _, a := range addrs {
+			pk, err := pubkeys.LoadPubKey(a.GetBytes())
+			if err == nil && len(pk.GetBytes()) == n && bytes.Equal(pk.GetBytes(), own) {
+				return true
+			}
+		}
+		return false
 	}
 	return signingSlot(preferred, paused, registered)
 }

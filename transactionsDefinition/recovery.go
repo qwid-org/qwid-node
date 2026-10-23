@@ -6,16 +6,22 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/wallet"
 )
 
 // IsCommitmentRegistration: a key registration whose Recipient is not the
-// sender is a recovery commitment C = H160(S) (CLAUDE.md "Recovery
-// commitment"). Reserved, delegated and zero addresses never are.
+// sender sets the identity's commitments (CLAUDE.md "Recovery commitment"):
+// Recipient is the ADDRESS of the spare key - its public key stays unpublished
+// until needed - and OptData, when present, is the recovery commitment
+// C = H160(S). Reserved, delegated and zero recipients never are.
 func (tx *Transaction) IsCommitmentRegistration() bool {
 	r := tx.TxData.Recipient
-	if len(tx.TxData.Pubkey.GetBytes()) == 0 || !tx.pureShape() {
+	if len(tx.TxData.Pubkey.GetBytes()) == 0 || !noPolicyFields(tx) {
+		return false
+	}
+	if n := len(tx.TxData.OptData); n != 0 && n != common.AddressLength {
 		return false
 	}
 	if bytes.Equal(r.GetBytes(), tx.TxParam.Sender.GetBytes()) || common.IsRecoveryAddress(r) {
@@ -26,6 +32,17 @@ func (tx *Transaction) IsCommitmentRegistration() bool {
 	}
 	_, err := account.IntDelegatedAccountFromAddress(r)
 	return err != nil
+}
+
+// CommitmentValues are what a commitment registration commits to: the spare
+// key's address, and the recovery commitment (zero when absent, meaning
+// "leave it as it is").
+func (tx *Transaction) CommitmentValues() (spare, recovery [common.AddressLength]byte) {
+	spare = tx.TxData.Recipient.ByteValue
+	if len(tx.TxData.OptData) == common.AddressLength {
+		copy(recovery[:], tx.TxData.OptData)
+	}
+	return spare, recovery
 }
 
 func (tx *Transaction) IsRecoveryBind() bool {
@@ -109,10 +126,6 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 		return fmt.Errorf("recovery reveal must not move coins or set account policy")
 	}
 	sender := tx.GetSenderAddress()
-	secret, next, err := ParseRecoveryReveal(tx.TxData.OptData)
-	if err != nil {
-		return err
-	}
 	pk := tx.TxData.Pubkey
 	pkb := pk.GetBytes()
 	if len(pkb) == 0 || !keyNamesSender(pk.MainAddress, sender) {
@@ -136,17 +149,45 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 	if !ok {
 		return fmt.Errorf("no account for %s", sender.GetHex())
 	}
-	want := acc.EffectiveRecoveryCommit(height)
-	if want == ([common.AddressLength]byte{}) {
-		return fmt.Errorf("%s has no effective recovery commitment", sender.GetHex())
+
+	// The two modes differ only in what opens the bind: the secret behind the
+	// recovery commitment, or the key behind the address itself.
+	var secret []byte
+	var payload [32]byte
+	if tx.IsAddressReveal() {
+		r, err := ParseAddressReveal(tx.TxData.OptData)
+		if err != nil {
+			return err
+		}
+		if err := verifyAddressOpening(sender, pkAddr, r, acc, asOf); err != nil {
+			return err
+		}
+		secret = r.OldPub
+		if payload, err = common.AddressOpenPayload(sender, pkAddr, r.Next, r.Spare, r.OldPub); err != nil {
+			return err
+		}
+	} else {
+		var next common.Address
+		secret, next, err = ParseRecoveryReveal(tx.TxData.OptData)
+		if err != nil {
+			return err
+		}
+		want := acc.EffectiveRecoveryCommit(height)
+		if want == ([common.AddressLength]byte{}) {
+			return fmt.Errorf("%s has no effective recovery commitment", sender.GetHex())
+		}
+		c, err := common.RecoveryCommitment(secret)
+		if err != nil {
+			return err
+		}
+		if c.ByteValue != want {
+			return fmt.Errorf("secret does not open the recovery commitment")
+		}
+		if payload, err = common.RecoveryPayload(sender, pkAddr, next, secret); err != nil {
+			return err
+		}
 	}
-	c, err := common.RecoveryCommitment(secret)
-	if err != nil {
-		return err
-	}
-	if c.ByteValue != want {
-		return fmt.Errorf("secret does not open the recovery commitment")
-	}
+
 	tag, err := common.RecoveryTag(secret)
 	if err != nil {
 		return err
@@ -161,10 +202,6 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 	if height > bind.Height+common.RecoveryBindExpiryBlocks {
 		return fmt.Errorf("recovery bind from height %d expired", bind.Height)
 	}
-	payload, err := common.RecoveryPayload(sender, pkAddr, next, secret)
-	if err != nil {
-		return err
-	}
 	if payload != bind.Payload {
 		return fmt.Errorf("reveal does not match the first bind of this secret")
 	}
@@ -176,4 +213,121 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 		return fmt.Errorf("recovery reveal signature does not verify against the revealed key")
 	}
 	return nil
+}
+
+// verifyAddressOpening checks the authority of an address opening: the account
+// never registered a key nor set a commitment, its address is the hash of the
+// revealed old key, and that key signed the opening. The old key's scheme is
+// verified by name through liboqs, whether or not the chain still uses it -
+// the chain never signs with it again, it only checks this one signature.
+func verifyAddressOpening(sender, newKey common.Address, r AddressReveal, acc account.Account, asOf int64) error {
+	if _, err := pubkeys.LoadAddressesAsOf(sender, asOf); err == nil {
+		return fmt.Errorf("%s has registered keys; it recovers through its commitments", sender.GetHex())
+	}
+	if acc.HasCommitments() {
+		return fmt.Errorf("%s already has commitments", sender.GetHex())
+	}
+	derived, err := common.PubKeyToAddress(r.OldPub, true)
+	if err != nil {
+		return err
+	}
+	if derived.ByteValue != sender.ByteValue {
+		return fmt.Errorf("the revealed old key does not hash to %s", sender.GetHex())
+	}
+	msg, err := common.AddressOpenMessage(sender, newKey, r.Next, r.Spare)
+	if err != nil {
+		return err
+	}
+	var v oqs.Signature
+	defer v.Clean()
+	if err := v.Init(r.OldScheme, nil); err != nil {
+		return fmt.Errorf("unknown old signature scheme %q: %w", r.OldScheme, err)
+	}
+	ok, err := v.Verify(msg, r.OldSig, r.OldPub)
+	if err != nil || !ok {
+		return fmt.Errorf("the old key's signature over the opening does not verify")
+	}
+	return nil
+}
+
+// hasSpareCover reports whether identity has a way out of a broken scheme: a
+// commitment to its spare key's address (in force or pending), or both a
+// primary and a spare key registered (validators keep the latter: they must
+// sign at once when the primary is paused).
+func hasSpareCover(identity common.Address, asOf int64) bool {
+	if acc, ok := account.GetAccountByAddressBytes(identity.GetBytes()); ok {
+		var zero [common.AddressLength]byte
+		if acc.SpareCommit != zero || acc.SparePendingCommit != zero {
+			return true
+		}
+	}
+	return pubkeys.HasOperatorKeysAsOf(identity, asOf)
+}
+
+// isCommittedSpare reports whether keyAddr is the spare key address identity
+// committed to, in force at the height the transaction is judged at.
+func isCommittedSpare(identity, keyAddr common.Address, asOf int64) bool {
+	acc, ok := account.GetAccountByAddressBytes(identity.GetBytes())
+	if !ok {
+		return false
+	}
+	spare := acc.EffectiveSpareCommit(recoveryHeight(asOf))
+	var zero [common.AddressLength]byte
+	return spare != zero && spare == keyAddr.ByteValue
+}
+
+// AddressReveal is the data of a reveal that opens an account which never
+// registered a key: the address is the hash of OldPub, a key of a scheme the
+// chain may no longer use, and OldSig is that key's signature over
+// common.AddressOpenMessage.
+type AddressReveal struct {
+	Next      common.Address // recovery commitment the account starts with
+	Spare     common.Address // spare key address the account starts with
+	OldScheme string
+	OldPub    []byte
+	OldSig    []byte
+}
+
+// IsAddressReveal tells the two reveal kinds apart: a commitment reveal is
+// exactly secret ‖ next; anything longer is an address opening.
+func (tx *Transaction) IsAddressReveal() bool {
+	return tx.IsRecoveryReveal() && len(tx.TxData.OptData) != common.RecoveryRevealOptDataLength
+}
+
+func BuildAddressRevealOptData(r AddressReveal) []byte {
+	b := append(append([]byte{}, r.Next.GetBytes()...), r.Spare.GetBytes()...)
+	b = append(b, common.BytesToLenAndBytes([]byte(r.OldScheme))...)
+	b = append(b, common.BytesToLenAndBytes(r.OldPub)...)
+	return append(b, common.BytesToLenAndBytes(r.OldSig)...)
+}
+
+func ParseAddressReveal(opt []byte) (AddressReveal, error) {
+	var r AddressReveal
+	if len(opt) <= 2*common.AddressLength {
+		return r, fmt.Errorf("address reveal data too short")
+	}
+	if err := r.Next.Init(opt[:common.AddressLength]); err != nil {
+		return r, err
+	}
+	if err := r.Spare.Init(opt[common.AddressLength : 2*common.AddressLength]); err != nil {
+		return r, err
+	}
+	rest := opt[2*common.AddressLength:]
+	scheme, rest, err := common.BytesWithLenToBytes(rest)
+	if err != nil {
+		return r, err
+	}
+	pub, rest, err := common.BytesWithLenToBytes(rest)
+	if err != nil {
+		return r, err
+	}
+	sig, rest, err := common.BytesWithLenToBytes(rest)
+	if err != nil {
+		return r, err
+	}
+	if len(rest) != 0 {
+		return r, fmt.Errorf("address reveal data has %d trailing bytes", len(rest))
+	}
+	r.OldScheme, r.OldPub, r.OldSig = string(scheme), pub, sig
+	return r, nil
 }

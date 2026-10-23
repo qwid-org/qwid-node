@@ -35,8 +35,16 @@ func TestStateRootCoversRecoveryState(t *testing.T) {
 		t.Fatal("pending recovery commitment not in the state root")
 	}
 
+	acc = account.Accounts.AllAccounts[a.ByteValue]
+	acc.SparePendingCommit[0] = 1
+	account.Accounts.AllAccounts[a.ByteValue] = acc
+	r2 := rootNow(t)
+	if r2 == r1 {
+		t.Fatal("pending spare commitment not in the state root")
+	}
+
 	account.AddRecoveryBind([32]byte{9}, account.RecoveryBind{Identity: a.ByteValue, Height: 5})
-	if rootNow(t) == r1 {
+	if rootNow(t) == r2 {
 		t.Fatal("recovery bind not in the state root")
 	}
 }
@@ -218,23 +226,28 @@ func TestBindShape(t *testing.T) {
 	}
 }
 
-func TestCommitmentRegistrationSetsPendingWithoutCreatingAccount(t *testing.T) {
+// The registration that opens an account points at its spare key's address
+// (Recipient) and carries the recovery commitment (OptData). Both apply at
+// once - there is nothing earlier to protect - and neither address gets an
+// account of its own.
+func TestOpeningCommitmentsApplyWithoutCreatingAccounts(t *testing.T) {
 	owner := registeredStageBKey(t)
 	fund(owner.addr)
+	spare := secondaryKey(t)
 	c, _ := common.RecoveryCommitment(recoverySecret(5))
-	reg := pureRegistration(t, owner.addr, enclosed(t, owner, owner.addr, true), owner, true)
-	reg.TxData.Recipient = c
-	signIn(t, &reg, owner, true)
+	reg := commitmentRegistration(t, owner, spare.addr, &c, 31)
 	before := balanceOf(t, owner.addr)
 	if err := ProcessTransaction(reg, 100, 0); err != nil {
 		t.Fatal(err)
 	}
 	acc, _ := account.GetAccountByAddressBytes(owner.addr.GetBytes())
-	if acc.RecoveryPendingCommit != c.ByteValue || acc.RecoveryPendingHeight != 100 {
-		t.Fatalf("pending commitment not set: %+v", acc)
+	if acc.SpareCommit != spare.addr.ByteValue || acc.RecoveryCommit != c.ByteValue {
+		t.Fatalf("opening commitments not applied: spare %x recovery %x", acc.SpareCommit, acc.RecoveryCommit)
 	}
-	if _, exists := account.GetAccountByAddressBytes(c.GetBytes()); exists {
-		t.Fatal("an account was created for the commitment address")
+	for _, a := range []common.Address{spare.addr, c} {
+		if _, exists := account.GetAccountByAddressBytes(a.GetBytes()); exists {
+			t.Fatalf("an account was created for %s", a.GetHex())
+		}
 	}
 	if balanceOf(t, owner.addr) >= before {
 		t.Fatal("no fee charged")
@@ -361,11 +374,17 @@ func TestMaintenanceVoidsPendingOnlyOnBreakage(t *testing.T) {
 // delay and the chance to cancel, a multisig account its approvals. It used to
 // be set at inclusion for every account, its maturity counted from there.
 
-func commitmentRegistration(t *testing.T, owner stageBKey, c common.Address, nonce int64) transactionsDefinition.Transaction {
+// commitmentRegistration re-registers owner's primary key with Recipient = the
+// spare key's address and, if recovery is given, the recovery commitment in
+// OptData.
+func commitmentRegistration(t *testing.T, owner stageBKey, spare common.Address, recovery *common.Address, nonce int64) transactionsDefinition.Transaction {
 	t.Helper()
 	reg := pureRegistration(t, owner.addr, enclosed(t, owner, owner.addr, true), owner, true)
 	reg.TxParam.Nonce = nonce
-	reg.TxData.Recipient = c
+	reg.TxData.Recipient = spare
+	if recovery != nil {
+		reg.TxData.OptData = recovery.GetBytes()
+	}
 	signIn(t, &reg, owner, true)
 	return reg
 }
@@ -389,9 +408,10 @@ func freshPolicyPools(t *testing.T) {
 	t.Cleanup(func() { transactionsPool.PoolTxEscrow, transactionsPool.PoolTxMultiSign = savedE, savedM })
 }
 
-func pendingCommit(a common.Address) ([common.AddressLength]byte, int64) {
+// spareCommitAt is the spare commitment in force for a at height h.
+func spareCommitAt(a common.Address, h int64) [common.AddressLength]byte {
 	acc, _ := account.GetAccountByAddressBytes(a.GetBytes())
-	return acc.RecoveryPendingCommit, acc.RecoveryPendingHeight
+	return acc.EffectiveSpareCommit(h)
 }
 
 func TestEscrowCommitmentAppliesWhenTheDelayEnds(t *testing.T) {
@@ -400,24 +420,24 @@ func TestEscrowCommitmentAppliesWhenTheDelayEnds(t *testing.T) {
 	freshPolicyPools(t)
 	withAccountPolicy(t, owner.addr, 10)
 	c, _ := common.RecoveryCommitment(recoverySecret(5))
-	reg := commitmentRegistration(t, owner, c, 21)
+	reg := commitmentRegistration(t, owner, c, nil, 21)
 
 	if err := ProcessTransaction(reg, 100, 0); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+	if p := spareCommitAt(owner.addr, 1<<40); p != ([common.AddressLength]byte{}) {
 		t.Fatal("an escrow account's commitment was set at inclusion, before its delay")
 	}
 	if !transactionsPool.PoolTxEscrow.HasTransaction(reg.Hash.GetBytes()) {
 		t.Fatal("the commitment change is not held in escrow")
 	}
 	_ = ProcessTransactionsEscrow(109, nil)
-	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+	if p := spareCommitAt(owner.addr, 1<<40); p != ([common.AddressLength]byte{}) {
 		t.Fatal("the commitment applied before the escrow delay ended")
 	}
 	_ = ProcessTransactionsEscrow(110, nil)
-	if p, h := pendingCommit(owner.addr); p != c.ByteValue || h != 110 {
-		t.Fatalf("after the delay: pending %x at %d, want the commitment maturing from 110", p, h)
+	if p := spareCommitAt(owner.addr, 110); p != c.ByteValue {
+		t.Fatalf("after the delay the commitment is %x, want it in force from 110 (the account's first)", p)
 	}
 	if _, exists := account.GetAccountByAddressBytes(c.GetBytes()); exists {
 		t.Fatal("settlement created an account for the commitment address")
@@ -432,13 +452,13 @@ func TestCancelledEscrowCommitmentNeverApplies(t *testing.T) {
 	freshPolicyPools(t)
 	withAccountPolicy(t, owner.addr, 10)
 	c, _ := common.RecoveryCommitment(recoverySecret(6))
-	reg := commitmentRegistration(t, owner, c, 22)
+	reg := commitmentRegistration(t, owner, c, nil, 22)
 	if err := ProcessTransaction(reg, 100, 0); err != nil {
 		t.Fatal(err)
 	}
 	transactionsPool.RemoveEscrowTransaction(reg.Hash.GetBytes())
 	_ = ProcessTransactionsEscrow(200, nil)
-	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+	if p := spareCommitAt(owner.addr, 1<<40); p != ([common.AddressLength]byte{}) {
 		t.Fatal("a cancelled commitment change applied")
 	}
 }
@@ -450,12 +470,12 @@ func TestMultiSignCommitmentNeedsItsApprovals(t *testing.T) {
 	freshPolicyPools(t)
 	withAccountPolicy(t, owner.addr, 0, signer)
 	c, _ := common.RecoveryCommitment(recoverySecret(7))
-	reg := commitmentRegistration(t, owner, c, 23)
+	reg := commitmentRegistration(t, owner, c, nil, 23)
 
 	if err := ProcessTransaction(reg, 100, 0); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := pendingCommit(owner.addr); p != ([common.AddressLength]byte{}) {
+	if p := spareCommitAt(owner.addr, 1<<40); p != ([common.AddressLength]byte{}) {
 		t.Fatal("a multisig account's commitment was set without approvals")
 	}
 	approval := transactionsDefinition.Transaction{
@@ -472,7 +492,178 @@ func TestMultiSignCommitmentNeedsItsApprovals(t *testing.T) {
 	if err := ProcessTransactionsMultiSign(approval, 101, nil); err != nil {
 		t.Fatal(err)
 	}
-	if p, h := pendingCommit(owner.addr); p != c.ByteValue || h != 101 {
-		t.Fatalf("after the approval: pending %x at %d, want the commitment maturing from 101", p, h)
+	if p := spareCommitAt(owner.addr, 101); p != c.ByteValue {
+		t.Fatalf("after the approval the commitment is %x, want it in force from 101 (the account's first)", p)
+	}
+}
+
+// The second-key rule asks for a way out, not for two published keys: an
+// account that committed to its spare key's ADDRESS may send, with the spare's
+// public key still unpublished - an attacker who breaks a scheme has nothing
+// of it to work on.
+func TestSpareCommitmentReplacesTheSecondKey(t *testing.T) {
+	owner := primaryOnlyStageBKey(t)
+	fund(owner.addr)
+	transfer := signedTx(t, owner, testAddress(0x55), 1, common.GetHeight(), 3)
+	if verifyNow(transfer) {
+		t.Fatal("an account with one key and no spare commitment sent a transfer")
+	}
+	spare := secondaryKey(t)
+	acc := account.Accounts.AllAccounts[owner.addr.ByteValue]
+	acc.SpareCommit = spare.addr.ByteValue
+	account.Accounts.AllAccounts[owner.addr.ByteValue] = acc
+	if !verifyNow(transfer) {
+		t.Fatal("an account with a key and a spare commitment could not send")
+	}
+}
+
+// With the primary paused, the committed spare registers itself: matching the
+// committed address is the authority, so no (paused) key has to vouch for it.
+// Any other key gets nothing from this path.
+func TestCommittedSpareRegistersItselfUnderPause(t *testing.T) {
+	owner := primaryOnlyStageBKey(t)
+	fund(owner.addr)
+	spare := secondaryKey(t)
+	acc := account.Accounts.AllAccounts[owner.addr.ByteValue]
+	acc.SpareCommit = spare.addr.ByteValue
+	account.Accounts.AllAccounts[owner.addr.ByteValue] = acc
+
+	reveal := pureRegistration(t, owner.addr, enclosed(t, spare, owner.addr, false), spare, false)
+	if !reveal.Verify(common.SigName(), common.SigName2(), primaryPaused, secondaryLive) {
+		t.Fatal("the committed spare could not register itself while the primary is paused")
+	}
+	other := secondaryKey(t)
+	forged := pureRegistration(t, owner.addr, enclosed(t, other, owner.addr, false), other, false)
+	if forged.Verify(common.SigName(), common.SigName2(), primaryPaused, secondaryLive) {
+		t.Fatal("a key that is not the committed spare registered itself")
+	}
+}
+
+// Opening an account that never registered a key, by revealing the key its
+// address is the hash of - even when the chain no longer uses that key's
+// scheme. Bind first, then reveal with a new key of a current scheme; the old
+// key also signs, so knowing its public key (published elsewhere) is not
+// enough.
+
+type addressOpening struct {
+	id     common.Address
+	old    stageBKey
+	newKey stageBKey
+	next   common.Address
+	spare  common.Address
+}
+
+func newAddressOpening(t *testing.T) addressOpening {
+	t.Helper()
+	registeredStageBKey(t) // fresh registry; its own key plays no part
+	o := addressOpening{old: freshPrimaryKey(t), newKey: secondaryKey(t), spare: secondaryKey(t).addr}
+	o.id = o.old.addr
+	o.next, _ = common.RecoveryCommitment(recoverySecret(4))
+	fund(o.id)
+	return o
+}
+
+func (o addressOpening) oldSignature(t *testing.T, signer stageBKey) []byte {
+	t.Helper()
+	msg, err := common.AddressOpenMessage(o.id, o.newKey.addr, o.next, o.spare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := signer.s.Sign(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sig
+}
+
+func (o addressOpening) bind(t *testing.T, oldPub []byte, newKey common.Address, age int64) bool {
+	t.Helper()
+	tag, _ := common.RecoveryTag(oldPub)
+	payload, _ := common.AddressOpenPayload(o.id, newKey, o.next, o.spare, oldPub)
+	return account.AddRecoveryBind(common.RecoveryBindKey(o.id, tag), account.RecoveryBind{
+		Identity: o.id.ByteValue, Payload: payload, Height: common.GetHeight() + 1 - age,
+	})
+}
+
+func (o addressOpening) reveal(t *testing.T, old stageBKey, oldSig []byte, newKey stageBKey) transactionsDefinition.Transaction {
+	t.Helper()
+	tx := transactionsDefinition.Transaction{
+		TxParam: transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: o.id, SendingTime: 1, Nonce: 41},
+		TxData: transactionsDefinition.TxData{
+			Recipient: common.RecoveryRevealAddress,
+			OptData: transactionsDefinition.BuildAddressRevealOptData(transactionsDefinition.AddressReveal{
+				Next: o.next, Spare: o.spare, OldScheme: common.SigName(), OldPub: old.pub, OldSig: oldSig,
+			}),
+			Pubkey: enclosed(t, newKey, o.id, false),
+		},
+		Height: common.GetHeight(), GasPrice: 1, GasUsage: 2_000_000,
+	}
+	signIn(t, &tx, newKey, false)
+	return tx
+}
+
+func TestAddressRevealOpensAnUnregisteredAccount(t *testing.T) {
+	o := newAddressOpening(t)
+	o.bind(t, o.old.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	tx := o.reveal(t, o.old, o.oldSignature(t, o.old), o.newKey)
+	if !verifyNow(tx) {
+		t.Fatal("a valid address opening was refused")
+	}
+	if err := ProcessTransaction(tx, common.GetHeight()+1, 0); err != nil {
+		t.Fatal(err)
+	}
+	acc, _ := account.GetAccountByAddressBytes(o.id.GetBytes())
+	if acc.RecoveryCommit != o.next.ByteValue || acc.SpareCommit != o.spare.ByteValue {
+		t.Fatal("the opening did not install the account's commitments")
+	}
+	tag, _ := common.RecoveryTag(o.old.pub)
+	if _, ok := account.GetRecoveryBind(common.RecoveryBindKey(o.id, tag)); ok {
+		t.Fatal("the consumed bind was kept")
+	}
+}
+
+// Knowing the old public key is not enough: it may have been published (on a
+// previous chain, say), so the old key must sign too.
+func TestAddressRevealNeedsTheOldKeysSignature(t *testing.T) {
+	o := newAddressOpening(t)
+	o.bind(t, o.old.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	if verifyNow(o.reveal(t, o.old, o.oldSignature(t, freshPrimaryKey(t)), o.newKey)) {
+		t.Fatal("an opening without the old key's signature was accepted")
+	}
+}
+
+func TestAddressRevealNeedsTheKeyBehindTheAddress(t *testing.T) {
+	o := newAddressOpening(t)
+	other := freshPrimaryKey(t)
+	o.bind(t, other.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	if verifyNow(o.reveal(t, other, o.oldSignature(t, other), o.newKey)) {
+		t.Fatal("a key that does not hash to the address opened the account")
+	}
+}
+
+// An account that registered a key is opened already: it recovers through its
+// commitments, never by revealing its address key again.
+func TestAddressRevealOnlyForAccountsWithoutKeys(t *testing.T) {
+	o := newAddressOpening(t)
+	registerKey(t, enclosed(t, o.old, o.id, true))
+	o.bind(t, o.old.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	if verifyNow(o.reveal(t, o.old, o.oldSignature(t, o.old), o.newKey)) {
+		t.Fatal("an account with a registered key was opened by address")
+	}
+}
+
+// Someone who sees the old key in the owner's reveal binds too late: the first
+// bind names the owner's new key.
+func TestAddressRevealFirstBindWins(t *testing.T) {
+	o := newAddressOpening(t)
+	o.bind(t, o.old.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	attacker := secondaryKey(t)
+	if o.bind(t, o.old.pub, attacker.addr, common.RecoveryBindExpiryBlocks) {
+		t.Fatal("a second bind for the same old key replaced the first")
+	}
+	o2 := o
+	o2.newKey = attacker
+	if verifyNow(o2.reveal(t, o.old, o2.oldSignature(t, o.old), attacker)) {
+		t.Fatal("the attacker's key opened the account")
 	}
 }

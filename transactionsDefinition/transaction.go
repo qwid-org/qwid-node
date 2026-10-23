@@ -466,18 +466,19 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			return false
 		}
 	}
-	// Dual-key rule: an identity may send nothing but registrations of its
-	// keys until it holds BOTH a primary and a secondary key. When one scheme
-	// breaks, its signatures prove nothing about a published key, so the
-	// replacement key must be vouched for by the OTHER, independent key; an
-	// identity holding only the broken one could never be told apart from
-	// whoever forges it. Requiring both before any value moves means every
-	// identity that can lose something has that second key.
+	// Spare rule: an identity may send nothing but key registrations until it
+	// has a way out of a broken scheme - a commitment to its spare key's
+	// ADDRESS, or a registered spare. When one scheme breaks, its signatures
+	// prove nothing about a published key, so the replacement must come from
+	// something independent of it. Committing to the spare's address instead
+	// of publishing the spare keeps its public key out of an attacker's reach
+	// until it is needed (registering both keys at once widened the attack
+	// surface for nothing).
 	if sender := tx.GetSenderAddress(); kind == txKindRegular && !tx.IsKeyRegistration() && !tx.IsRecoveryReveal() &&
-		!pubkeys.HasOperatorKeysAsOf(sender, asOf) {
+		!hasSpareCover(sender, asOf) {
 		if ok, skipped := shouldLogVerifyFailure(sender); ok {
-			logger.GetLogger().Printf("Verify: sender %s must register both its primary and its secondary key "+
-				"(each by a pure registration: amount 0, to itself) before sending anything else%s",
+			logger.GetLogger().Printf("Verify: sender %s has no spare: it must commit to its spare key's address "+
+				"(the Recipient of a key registration) before sending anything else%s",
 				sender.GetHex(), suppressedNote(skipped))
 		}
 		return false
@@ -706,7 +707,23 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			addressMatch = bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes())
 			resolvedFromRegistry = true
 		}
-		if !resolvedFromRegistry {
+		// Committed spare: a pure registration of exactly the key whose
+		// address the identity committed to, signed by that key itself. The
+		// match with the committed address is the authority - the key was
+		// unpublished until now, so no signature forgery can produce it - which
+		// is why this works while the identity's other scheme is paused (the
+		// case it exists for) and needs no other key to vouch for it.
+		spareReveal := !resolvedFromRegistry && tx.isPureRegistration() && primary == pkPrimary &&
+			isCommittedSpare(senderAddr, pkAddr, asOf)
+		if spareReveal {
+			addressMatch = true
+			if primary {
+				effPaused = false
+			} else {
+				effPaused2 = false
+			}
+		}
+		if !resolvedFromRegistry && !spareReveal {
 			// The key is new: there is no recorded binding, so the transaction
 			// has to demonstrate authority over the identity it names.
 			//

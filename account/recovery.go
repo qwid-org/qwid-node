@@ -10,38 +10,83 @@ import (
 
 var zeroCommit [common.AddressLength]byte
 
-// EffectiveRecoveryCommit is the commitment a reveal at `height` must match.
+func matured(pendingHeight, height int64) bool {
+	return height >= pendingHeight+common.RecoveryCommitMaturityBlocks
+}
+
+// EffectiveRecoveryCommit is the recovery commitment a reveal at `height`
+// must match.
 func (a Account) EffectiveRecoveryCommit(height int64) [common.AddressLength]byte {
-	if a.RecoveryPendingCommit != zeroCommit && height >= a.RecoveryPendingHeight+common.RecoveryCommitMaturityBlocks {
+	if a.RecoveryPendingCommit != zeroCommit && matured(a.RecoveryPendingHeight, height) {
 		return a.RecoveryPendingCommit
 	}
 	return a.RecoveryCommit
 }
 
-// SetPendingRecoveryCommit: the latest commitment wins, but only after
-// maturing; one that already matured is kept as the active commitment.
-func (a *Account) SetPendingRecoveryCommit(c [common.AddressLength]byte, height int64) {
-	a.RecoveryCommit = a.EffectiveRecoveryCommit(height)
-	a.RecoveryPendingCommit = c
-	a.RecoveryPendingHeight = height
+// EffectiveSpareCommit is the address the spare key revealed at `height`
+// must have.
+func (a Account) EffectiveSpareCommit(height int64) [common.AddressLength]byte {
+	if a.SparePendingCommit != zeroCommit && matured(a.RecoveryPendingHeight, height) {
+		return a.SparePendingCommit
+	}
+	return a.SpareCommit
+}
+
+// HasCommitments reports whether the account has any commitment, active or
+// pending.
+func (a Account) HasCommitments() bool {
+	return a.RecoveryCommit != zeroCommit || a.RecoveryPendingCommit != zeroCommit ||
+		a.SpareCommit != zeroCommit || a.SparePendingCommit != zeroCommit
+}
+
+// promoteMatured moves pending commitments that matured by height into the
+// active ones and clears them; unmatured ones stay pending.
+func (a *Account) promoteMatured(height int64) {
+	if !matured(a.RecoveryPendingHeight, height) {
+		return
+	}
+	if a.RecoveryPendingCommit != zeroCommit {
+		a.RecoveryCommit = a.RecoveryPendingCommit
+	}
+	if a.SparePendingCommit != zeroCommit {
+		a.SpareCommit = a.SparePendingCommit
+	}
+	a.RecoveryPendingCommit, a.SparePendingCommit, a.RecoveryPendingHeight = zeroCommit, zeroCommit, 0
+}
+
+// SetCommitments records a registration's spare and recovery commitments
+// (zero = leave that one unchanged). An account's first commitments - set
+// when it is opened - apply at once: there is nothing earlier for an attacker
+// to replace. Every later change is pending: it applies after
+// RecoveryCommitMaturityBlocks, the latest change wins, and a scheme break
+// voids it before then (VoidPendingRecoveryCommits).
+func (a *Account) SetCommitments(spare, c [common.AddressLength]byte, height int64) {
+	if !a.HasCommitments() {
+		a.SpareCommit, a.RecoveryCommit = spare, c
+		return
+	}
+	a.promoteMatured(height)
+	a.SparePendingCommit, a.RecoveryPendingCommit, a.RecoveryPendingHeight = spare, c, height
 }
 
 // ConsumeRecoveryCommit: a reveal is authorised by S itself, so its next
-// commitment needs no maturing.
+// recovery commitment needs no maturing. The spare commitment is untouched.
 func (a *Account) ConsumeRecoveryCommit(next [common.AddressLength]byte) {
 	a.RecoveryCommit = next
 	a.RecoveryPendingCommit = zeroCommit
-	a.RecoveryPendingHeight = 0
+	if a.SparePendingCommit == zeroCommit {
+		a.RecoveryPendingHeight = 0
+	}
 }
 
-func SetAccountPendingRecoveryCommit(addr, c [common.AddressLength]byte, height int64) error {
+func SetAccountCommitments(addr, spare, c [common.AddressLength]byte, height int64) error {
 	AccountsRWMutex.Lock()
 	defer AccountsRWMutex.Unlock()
 	acc, ok := Accounts.AllAccounts[addr]
 	if !ok {
-		return fmt.Errorf("no account %x to set a recovery commitment on", addr)
+		return fmt.Errorf("no account %x to set commitments on", addr)
 	}
-	acc.SetPendingRecoveryCommit(c, height)
+	acc.SetCommitments(spare, c, height)
 	Accounts.AllAccounts[addr] = acc
 	return nil
 }
@@ -59,24 +104,22 @@ func ConsumeAccountRecoveryCommit(addr, next [common.AddressLength]byte) error {
 }
 
 // VoidPendingRecoveryCommits runs when a block marks a signature scheme as
-// broken (blocks.schemeBroken). A pending commitment may have been written
-// with a key of that scheme, so only those that matured before the break
-// survive (promoted); the rest are dropped. Returns how many dropped.
+// broken (blocks.schemeBroken). Pending commitments may have been written with
+// a key of that scheme, so only those that matured before the break survive
+// (promoted); the rest are dropped. Returns how many accounts lost some.
 func VoidPendingRecoveryCommits(height int64) int {
 	AccountsRWMutex.Lock()
 	defer AccountsRWMutex.Unlock()
 	dropped := 0
 	for k, acc := range Accounts.AllAccounts {
-		if acc.RecoveryPendingCommit == zeroCommit {
+		if acc.RecoveryPendingCommit == zeroCommit && acc.SparePendingCommit == zeroCommit {
 			continue
 		}
-		if height >= acc.RecoveryPendingHeight+common.RecoveryCommitMaturityBlocks {
-			acc.RecoveryCommit = acc.RecoveryPendingCommit
-		} else {
+		acc.promoteMatured(height)
+		if acc.RecoveryPendingCommit != zeroCommit || acc.SparePendingCommit != zeroCommit {
 			dropped++
+			acc.RecoveryPendingCommit, acc.SparePendingCommit, acc.RecoveryPendingHeight = zeroCommit, zeroCommit, 0
 		}
-		acc.RecoveryPendingCommit = zeroCommit
-		acc.RecoveryPendingHeight = 0
 		Accounts.AllAccounts[k] = acc
 	}
 	return dropped

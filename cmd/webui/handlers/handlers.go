@@ -650,11 +650,14 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "Registering a key while its signing scheme is paused must be a pure registration: set the amount to 0 and send again (funds can be moved after the key is registered).", http.StatusBadRequest)
 			return
 		}
-		// A paused scheme may not set a commitment (a forger of it could plant
-		// its own), so only a live-signed registration carries one.
+		// A paused scheme may not set commitments (a forger of it could plant
+		// its own), so only a live-signed registration carries them.
 		signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
-		if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused {
-			ar = registrationRecipient(ar)
+		if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused &&
+			bytes.Equal(ar.GetBytes(), MainWallet.MainAddress.GetBytes()) {
+			if spare, rec, ok := openingCommitments(registerPrimary); ok {
+				ar, scData = spare, rec
+			}
 		}
 	}
 
@@ -1392,24 +1395,17 @@ func registrationSignPrimary(registerPrimary, defaultPrimary bool) bool {
 	return chosen
 }
 
-// registrationRecipient: a pure registration to oneself carries the
-// identity's first recovery commitment when it has none yet (CLAUDE.md
-// "Recovery commitment"). Any failure keeps the plain self-registration:
-// the commitment can be set by any later registration.
-func registrationRecipient(recipient common.Address) common.Address {
-	if !bytes.Equal(recipient.GetBytes(), MainWallet.MainAddress.GetBytes()) {
-		return recipient
-	}
+// openingCommitments: the registration that opens an account points at the
+// spare key's ADDRESS (Recipient) and carries the recovery commitment C_0
+// (OptData), so the spare's public key stays unpublished until it is needed.
+// ok=false when the identity already has commitments - or when the node
+// cannot say, in which case it stays a plain self-registration.
+func openingCommitments(registerPrimary bool) (spare common.Address, recovery []byte, ok bool) {
 	keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))))
 	if err != nil {
-		return recipient
+		return common.Address{}, nil, false
 	}
-	c, err := MainWallet.CommitmentForRegistration(keys)
-	if err != nil {
-		logger.GetLogger().Println("no recovery commitment set:", err)
-		return recipient
-	}
-	return c
+	return MainWallet.OpeningCommitments(keys, registerPrimary)
 }
 
 // planRegistration decides, for a key-carrying registration, which key travels
@@ -1461,6 +1457,27 @@ func planRegistration(usePrimaryEncryption bool) (pk common.PubKey, registerPrim
 				"wallets created now take their address from the live scheme's key", scheme, scheme, scheme)
 		}
 	}
+	// The committed spare: when the identity's registered key belongs to a
+	// paused scheme, the spare key whose address it committed to registers
+	// itself, signed by itself - the match with the committed address is the
+	// authority, so nothing paused has to vouch for it. Whatever the checkbox
+	// says, that is the one registration that can work.
+	if keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...)))); err == nil {
+		for _, slot := range []bool{true, false} {
+			acc := MainWallet.Account2
+			if slot {
+				acc = MainWallet.Account1
+			}
+			committed := bytes.Equal(acc.Address.GetBytes(), keys.SpareCommit.GetBytes())
+			registered := (slot && keys.HasPrimary) || (!slot && keys.HasSecondary)
+			if committed && !registered && keys.SpareCommit != (common.Address{}) {
+				otherPaused := (!slot && common.IsPaused()) || (slot && common.IsPaused2())
+				if otherPaused {
+					return acc.PublicKey, slot, slot, nil
+				}
+			}
+		}
+	}
 	if registerPrimary {
 		pk = MainWallet.Account1.PublicKey
 	} else {
@@ -1485,23 +1502,42 @@ func RegistrationRecipient(w http.ResponseWriter, r *http.Request) {
 	}
 	own := MainWallet.MainAddress
 	resp := map[string]interface{}{"recipient": own.GetHex(), "commitment": false}
-	_, _, signPrimary, err := planRegistration(r.URL.Query().Get("usePrimaryEncryption") != "false")
+	pk, registerPrimary, signPrimary, err := planRegistration(r.URL.Query().Get("usePrimaryEncryption") != "false")
 	if err != nil {
 		resp["error"] = err.Error()
 		jsonResponse(w, resp)
 		return
 	}
 	signingPaused := (signPrimary && common.IsPaused()) || (!signPrimary && common.IsPaused2())
-	if c := registrationRecipient(own); !signingPaused && !bytes.Equal(c.GetBytes(), own.GetBytes()) {
+	spare, rec, ok := openingCommitments(registerPrimary)
+	switch {
+	case ok && !signingPaused:
 		resp["commitment"] = true
-		resp["note"] = "Registration to your own address. This identity has no recovery commitment yet, so the first one (" +
-			c.GetHex() + ") is attached automatically when you send - amount 0."
-	} else {
-		resp["note"] = "Registration to your own address, amount 0. No new recovery commitment is attached: " +
-			"the identity already has one, this wallet has no recovery phrase, or this registration is signed " +
-			"by a paused scheme (which may not set one)."
+		note := "This registration opens your account: it points at your spare key's address (" + spare.GetHex() +
+			") without publishing the spare key"
+		if rec != nil {
+			note += ", and attaches your recovery commitment"
+		}
+		resp["note"] = note + ". Amount 0; your own address is replaced automatically."
+	case !bytes.Equal(pk.Address.GetBytes(), own.GetBytes()) && registerPrimary == signPrimary &&
+		pk.Address.ByteValue == keysSpareCommit().ByteValue:
+		resp["note"] = "Your registered key belongs to a paused scheme, so this registers your committed spare key " +
+			"(" + pk.Address.GetHex() + "), signed by itself. Amount 0."
+	default:
+		resp["note"] = "Registration to your own address, amount 0. No commitment is attached: the identity already " +
+			"has them, or this registration is signed by a paused scheme (which may not set them)."
 	}
 	jsonResponse(w, resp)
+}
+
+// keysSpareCommit is the spare key address the identity committed to, zero if
+// none or the node cannot say.
+func keysSpareCommit() common.Address {
+	keys, err := wallet.ParsePUBA(clientrpc.Call(SignMessage(append([]byte("PUBA"), MainWallet.MainAddress.GetBytes()...))))
+	if err != nil {
+		return common.Address{}
+	}
+	return keys.SpareCommit
 }
 
 // sendRefusal reports why consensus would refuse tx because of the sender's

@@ -41,6 +41,12 @@ type Account struct {
 	RecoveryCommit        [common.AddressLength]byte `json:"recoveryCommit,omitempty"`
 	RecoveryPendingCommit [common.AddressLength]byte `json:"recoveryPendingCommit,omitempty"`
 	RecoveryPendingHeight int64                      `json:"recoveryPendingHeight,omitempty"`
+	// Spare commitment: the ADDRESS of the spare key, not the key. The spare's
+	// public key stays unpublished until it is needed, so a scheme break gives
+	// an attacker nothing to work on. It shares RecoveryPendingHeight with the
+	// recovery commitment: both are set by the same registration.
+	SpareCommit        [common.AddressLength]byte `json:"spareCommit,omitempty"`
+	SparePendingCommit [common.AddressLength]byte `json:"sparePendingCommit,omitempty"`
 }
 
 func GetAccountByAddressBytes(address []byte) (Account, bool) {
@@ -165,6 +171,8 @@ func (a Account) Marshal() []byte {
 	b = append(b, a.RecoveryCommit[:]...)
 	b = append(b, a.RecoveryPendingCommit[:]...)
 	b = append(b, common.GetByteInt64(a.RecoveryPendingHeight)...)
+	b = append(b, a.SpareCommit[:]...)
+	b = append(b, a.SparePendingCommit[:]...)
 	return b
 }
 
@@ -246,6 +254,11 @@ func (a *Account) Unmarshal(data []byte) error {
 		copy(a.RecoveryCommit[:], data[:common.AddressLength])
 		copy(a.RecoveryPendingCommit[:], data[common.AddressLength:2*common.AddressLength])
 		a.RecoveryPendingHeight = common.GetInt64FromByte(data[2*common.AddressLength : 2*common.AddressLength+8])
+		data = data[2*common.AddressLength+8:]
+	}
+	if len(data) >= 2*common.AddressLength {
+		copy(a.SpareCommit[:], data[:common.AddressLength])
+		copy(a.SparePendingCommit[:], data[common.AddressLength:2*common.AddressLength])
 	}
 	return nil
 }

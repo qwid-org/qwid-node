@@ -1,6 +1,13 @@
 package services
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+
+	"github.com/qwid-org/qwid-node/blocks"
+	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/pubkeys"
+)
 
 // A node must never emit a signature peers cannot verify: they treat it as a
 // forgery and ban the node, which then cannot even follow the chain (found in
@@ -37,5 +44,42 @@ func TestSigningSlotNeedsARegisteredKeyOfALiveScheme(t *testing.T) {
 		if ok != c.ok || (ok && got != c.want) {
 			t.Errorf("%s: got (%v, %v), want (%v, %v)", c.name, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// Two schemes can have keys of the same length (Falcon-512 and
+// Falcon-padded-512: 897 bytes). A node whose registered key is the OLD
+// scheme's must not take it for a key of the new one: it would sign with its
+// unregistered new key, peers would see a forged signature and ban it.
+func TestSigningSlotNeedsThisNodesOwnKeyRegistered(t *testing.T) {
+	withTempDB(t)
+	saved := pubkeys.GlobalMerkleTree
+	pubkeys.InitPermanentTrie()
+	t.Cleanup(func() { pubkeys.GlobalMerkleTree = saved })
+
+	n := common.PubKeyLength(false)
+	oldKey := bytes.Repeat([]byte{1}, n) // registered: the superseded scheme's key
+	newKey := bytes.Repeat([]byte{2}, n) // this node's key of the current scheme
+	addr, err := common.PubKeyToAddress(oldKey, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pk common.PubKey
+	if err := pk.Init(oldKey, addr); err != nil {
+		t.Skipf("cannot build key: %v", err)
+	}
+	pk.MainAddress = addr
+	if err := blocks.StorePubKey(pk); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocks.StorePubKeyInPatriciaTrie(pk); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := SigningSlot(addr, true, newKey, nil); ok {
+		t.Fatal("a same-length key of another scheme was taken for this node's registered key")
+	}
+	if slot, ok := SigningSlot(addr, true, oldKey, nil); !ok || !slot {
+		t.Fatal("this node's own registered key was not found")
 	}
 }

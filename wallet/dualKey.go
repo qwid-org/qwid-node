@@ -3,7 +3,6 @@ package wallet
 import (
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 
 	"github.com/qwid-org/qwid-node/common"
 )
@@ -20,6 +19,8 @@ type RegisteredKeys struct {
 	AnySecondary    bool
 	RecoveryCommit  common.Address // effective recovery commitment, zero if none
 	RecoveryPending common.Address // commitment still maturing, zero if none
+	SpareCommit     common.Address // spare key address in force, zero if none
+	SparePending    common.Address // spare key address still maturing, zero if none
 }
 
 // ParsePUBA reads the node's PUBA reply.
@@ -32,6 +33,8 @@ func ParsePUBA(reply []byte) (RegisteredKeys, error) {
 		} `json:"addresses"`
 		RecoveryCommit  string `json:"recoveryCommit"`
 		RecoveryPending string `json:"recoveryPending"`
+		SpareCommit     string `json:"spareCommit"`
+		SparePending    string `json:"sparePending"`
 	}
 	if err := json.Unmarshal(reply, &resp); err != nil {
 		return RegisteredKeys{}, err
@@ -50,7 +53,8 @@ func ParsePUBA(reply []byte) (RegisteredKeys, error) {
 	for _, f := range []struct {
 		hexv string
 		dst  *common.Address
-	}{{resp.RecoveryCommit, &k.RecoveryCommit}, {resp.RecoveryPending, &k.RecoveryPending}} {
+	}{{resp.RecoveryCommit, &k.RecoveryCommit}, {resp.RecoveryPending, &k.RecoveryPending},
+		{resp.SpareCommit, &k.SpareCommit}, {resp.SparePending, &k.SparePending}} {
 		if f.hexv == "" {
 			continue
 		}
@@ -65,14 +69,27 @@ func ParsePUBA(reply []byte) (RegisteredKeys, error) {
 	return k, nil
 }
 
+// HasSpareCover mirrors the consensus spare rule: a spare key address
+// committed to (in force or maturing), or both slots registered.
+func (k RegisteredKeys) HasSpareCover() bool {
+	var zero common.Address
+	return k.SpareCommit != zero || k.SparePending != zero || (k.AnyPrimary && k.AnySecondary)
+}
+
+// HasCommitments reports whether the identity has any commitment yet.
+func (k RegisteredKeys) HasCommitments() bool {
+	var zero common.Address
+	return k.RecoveryCommit != zero || k.RecoveryPending != zero || k.SpareCommit != zero || k.SparePending != zero
+}
+
 // SendRefusal mirrors, for a wallet about to send, the two consensus rules a
 // transaction can break through its keys alone, so the operator is told why
 // instead of the node dropping the transaction. It returns "" when neither
 // applies.
 //
-//   - Dual-key rule: until an identity holds both a primary and a secondary
-//     key, it may send only pure registrations (amount 0, to itself) carrying a
-//     key.
+//   - Spare rule: until an identity has a way out of a broken scheme - a
+//     commitment to its spare key's address, or both keys registered - it may
+//     send only key registrations (amount 0).
 //   - Paused schemes authorise no new key, except an identity's very first
 //     one registering itself (its public key is unpublished until then).
 func SendRefusal(keys RegisteredKeys, carriesKey, pureRegistration, signingPaused bool) string {
@@ -82,11 +99,10 @@ func SendRefusal(keys RegisteredKeys, carriesKey, pureRegistration, signingPause
 			"is presumed broken, so it can no longer vouch for a new key; only the identity's other, live key can. " +
 			"Without one, wait until the scheme is un-paused."
 	}
-	if !(keys.AnyPrimary && keys.AnySecondary) && !(carriesKey && pureRegistration) {
-		return fmt.Sprintf("This identity must register BOTH its keys before sending anything else "+
-			"(registered: primary=%v, secondary=%v). Send a pure registration for each missing key first: "+
-			"amount 0, to your own address, with the public key included - the second one after the first is in a block.",
-			keys.AnyPrimary, keys.AnySecondary)
+	if !keys.HasSpareCover() && !(carriesKey && pureRegistration) {
+		return "This identity has no spare yet, so it can send nothing but a key registration. Register your key " +
+			"with \"Include Public Key\" (amount 0, to your own address): the registration commits to your spare " +
+			"key's address automatically."
 	}
 	return ""
 }

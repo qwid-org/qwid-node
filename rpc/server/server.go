@@ -1265,6 +1265,8 @@ func handlePUBA(line []byte, reply *[]byte) {
 		Addresses       []PubKeyAddrInfo `json:"addresses"`
 		RecoveryCommit  string           `json:"recoveryCommit,omitempty"`
 		RecoveryPending string           `json:"recoveryPending,omitempty"`
+		SpareCommit     string           `json:"spareCommit,omitempty"`
+		SparePending    string           `json:"sparePending,omitempty"`
 	}
 
 	resp := PubKeyResponse{}
@@ -1299,6 +1301,13 @@ func handlePUBA(line []byte, reply *[]byte) {
 		}
 		if acc.RecoveryPendingCommit != zero && acc.RecoveryPendingCommit != eff {
 			resp.RecoveryPending = hex.EncodeToString(acc.RecoveryPendingCommit[:])
+		}
+		spare := acc.EffectiveSpareCommit(common.GetHeight() + 1)
+		if spare != zero {
+			resp.SpareCommit = hex.EncodeToString(spare[:])
+		}
+		if acc.SparePendingCommit != zero && acc.SparePendingCommit != spare {
+			resp.SparePending = hex.EncodeToString(acc.SparePendingCommit[:])
 		}
 	}
 

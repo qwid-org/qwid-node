@@ -39,6 +39,7 @@ func main() {
 	if *num < 0 || *num > 255 {
 		usage()
 	}
+	defaultSchemes = []string{common.SigName(), common.SigName2()}
 	go clientrpc.ConnectRPC(*node)
 	time.Sleep(time.Second)
 	w := loadWallet(uint8(*num))
@@ -152,8 +153,14 @@ func reveal(w *wallet.Wallet) error {
 	if err != nil {
 		return err
 	}
-	tx := newTx(w.MainAddress, common.RecoveryRevealAddress,
-		transactionsDefinition.BuildRecoveryRevealOptData(p.secret, p.next), p.newKey)
+	opt := transactionsDefinition.BuildRecoveryRevealOptData(p.secret, p.next)
+	if p.addressMode {
+		opt = transactionsDefinition.BuildAddressRevealOptData(transactionsDefinition.AddressReveal{
+			Next: p.next, Spare: p.spare, OldScheme: p.oldScheme, OldPub: p.oldPub, OldSig: p.oldSig,
+		})
+		fmt.Printf("opening an account that never registered a key, with its old %s key\n", p.oldScheme)
+	}
+	tx := newTx(w.MainAddress, common.RecoveryRevealAddress, opt, p.newKey)
 	return signAndSend(w, &tx, p.slotPrimary)
 }
 
@@ -199,7 +206,19 @@ type recovery struct {
 	secret      []byte
 	next        common.Address
 	bindData    []byte
+
+	// Address opening: the account never registered a key, so the key its
+	// address is the hash of - of whatever scheme - opens it.
+	addressMode bool
+	spare       common.Address
+	oldScheme   string
+	oldPub      []byte
+	oldSig      []byte
 }
+
+// defaultSchemes are the built-in schemes, captured before the chain's are
+// installed: an old wallet's address may come from a key of one of them.
+var defaultSchemes []string
 
 // planRecovery works out everything both phases need, from the phrase and the
 // node's PUBA answer only: which slot lacks a key of the current scheme, the
@@ -207,6 +226,9 @@ type recovery struct {
 // commitment that replaces it.
 func planRecovery(w *wallet.Wallet, keys wallet.RegisteredKeys) (recovery, error) {
 	var r recovery
+	if !keys.AnyPrimary && !keys.AnySecondary && !keys.HasCommitments() {
+		return planAddressOpening(w, common.IsPaused())
+	}
 	switch {
 	case !keys.HasPrimary:
 		r.slotPrimary = true
@@ -239,6 +261,44 @@ func planRecovery(w *wallet.Wallet, keys wallet.RegisteredKeys) (recovery, error
 		return r, err
 	}
 	payload, err := common.RecoveryPayload(w.MainAddress, r.newKey.Address, r.next, r.secret)
+	if err != nil {
+		return r, err
+	}
+	r.bindData = transactionsDefinition.BuildRecoveryBindOptData(w.MainAddress, tag, payload)
+	return r, nil
+}
+
+// planAddressOpening opens an account that never registered a key: the new
+// key is the wallet's key of the LIVE scheme, the spare commitment points at
+// its other key, the recovery commitment is C_0, and the old key behind the
+// address signs all of it.
+func planAddressOpening(w *wallet.Wallet, primaryPaused bool) (recovery, error) {
+	r := recovery{addressMode: true, slotPrimary: !primaryPaused}
+	if r.slotPrimary {
+		r.newKey, r.spare = w.Account1.PublicKey, w.Account2.Address
+	} else {
+		r.newKey, r.spare = w.Account2.PublicKey, w.Account1.Address
+	}
+	if len(r.newKey.GetBytes()) == 0 {
+		return r, fmt.Errorf("the wallet has no key of the live scheme; load it with the current schemes")
+	}
+	r.newKey.MainAddress = w.MainAddress
+	if c, err := w.RecoveryCommitmentAddress(0); err == nil {
+		r.next = c
+	}
+	msg, err := common.AddressOpenMessage(w.MainAddress, r.newKey.Address, r.next, r.spare)
+	if err != nil {
+		return r, err
+	}
+	schemes := append(append([]string{}, defaultSchemes...), w.SigName, w.SigName2)
+	if r.oldScheme, r.oldPub, r.oldSig, err = w.SignWithAddressKey(msg, schemes); err != nil {
+		return r, err
+	}
+	tag, err := common.RecoveryTag(r.oldPub)
+	if err != nil {
+		return r, err
+	}
+	payload, err := common.AddressOpenPayload(w.MainAddress, r.newKey.Address, r.next, r.spare, r.oldPub)
 	if err != nil {
 		return r, err
 	}

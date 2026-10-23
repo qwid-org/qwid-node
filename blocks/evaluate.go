@@ -53,8 +53,8 @@ func isContractCallTx(tx transactionsDefinition.Transaction, senderAcc account.A
 	if len(tx.TxData.OptData) == 0 {
 		return false
 	}
-	if common.IsRecoveryAddress(tx.TxData.Recipient) {
-		return false // recovery bind/reveal data, not EVM input
+	if common.IsRecoveryAddress(tx.TxData.Recipient) || tx.IsCommitmentRegistration() {
+		return false // recovery data or a recovery commitment, not EVM input
 	}
 	if _, err := account.IntDelegatedAccountFromAddress(tx.TxData.Recipient); err == nil {
 		return false // delegated recipient (staking/reward/DEX) — not an SC call
@@ -493,7 +493,7 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 		}
 
 		addressRecipient := t.TxData.Recipient
-		if common.IsRecoveryAddress(addressRecipient) {
+		if common.IsRecoveryAddress(addressRecipient) || t.IsCommitmentRegistration() {
 			continue
 		}
 		n, err := account.IntDelegatedAccountFromAddress(addressRecipient)

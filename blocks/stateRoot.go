@@ -56,6 +56,8 @@ func computeStateRoot(dump io.Writer) (common.Hash, error) {
 		w.bytes(a.RecoveryCommit[:])
 		w.bytes(a.RecoveryPendingCommit[:])
 		w.i64(a.RecoveryPendingHeight)
+		w.bytes(a.SpareCommit[:])
+		w.bytes(a.SparePendingCommit[:])
 	}
 	w.section("recovery-binds")
 	binds := account.Accounts.RecoveryBinds

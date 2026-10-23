@@ -354,10 +354,13 @@ excludes the Qt commands.
 
 ## Key recovery after a signature-scheme change
 
-Every QWID account holds two keys of two different post-quantum signature
-schemes: a primary key and a spare key. Validators can vote to **pause** a
-scheme that is presumed broken and to **replace** it with a new one. A paused
-scheme can no longer approve anything, so you need a key of the new scheme,
+Every QWID account has keys of two different post-quantum signature schemes:
+a primary key and a spare key. Only one of them is published when you open
+the account; the spare is represented on chain by its **address** (a hash of
+its public key) until you need it, so an attacker who breaks a scheme has
+nothing of your spare to work on. Validators can vote to **pause** a scheme
+that is presumed broken and to **replace** it with a new one. A paused scheme
+can no longer approve anything, so you need a key of a working scheme,
 registered on chain, before you can use your account under it.
 
 ### Before anything goes wrong
@@ -372,27 +375,35 @@ registered on chain, before you can use your account under it.
    can recreate your keys for any future scheme. Wallets created in the web UI
    or on the public website have **no** phrase and cannot use the recovery
    below.
-2. **Register both keys.** In the web UI, on the Send tab, tick
-   **Include Public Key**: the recipient (your own address) and the amount (0)
-   are filled in for you. Send once to register the first key, then once more,
-   in a later block, for the second. Until both keys are registered, the
-   account can send nothing else.
-3. **Your recovery commitment is set automatically** with your first
-   registration: a hash of a secret derived from your phrase. It becomes
-   effective after 60,480 blocks (about one week). If a scheme is paused as
-   broken before then, the commitment is voided and you set it again with
-   your next registration. You can see it as `recoveryCommit` in the web UI's
-   public-key information.
+2. **Open your account.** In the web UI, on the Send tab, tick
+   **Include Public Key** and send (amount 0, to your own address - both are
+   filled in for you). This one registration publishes your first key and
+   commits to two things, both taking effect at once:
+   - your **spare key's address** (`spareCommit`): the spare's public key
+     stays unpublished;
+   - your **recovery commitment** (`recoveryCommit`): a hash of a one-time
+     secret derived from your phrase.
+
+   Until the account has a spare (committed or registered) it can send
+   nothing but key registrations. You can see both commitments in the web
+   UI's public-key information.
+3. **Later changes wait.** A registration that changes your commitments takes
+   effect after 60,480 blocks (about one week); if a scheme is paused as
+   broken before then, the change is voided.
 
 On an **escrow** account a commitment change waits for the escrow delay (and
 can be cancelled during it); on a **multi-signature** account it needs the
 required approvals. Only then does its one-week maturity start.
 
-### Case 1: the primary scheme was replaced, your spare key still works
+### Case 1: your key's scheme is paused or replaced, your spare's still works
 
 This is the usual case and needs no recovery tool. In the web UI tick
-**Include Public Key** and **Register Paused public key**, then send. The key
-of the new scheme is registered, signed with your working spare key.
+**Include Public Key** and send. If your registered key belongs to a paused
+scheme, the web UI registers your **committed spare** instead, signed by the
+spare itself: matching the committed address is what authorises it, so no
+paused key has to vouch for it. Then register the key of the new scheme the
+same way (tick **Register Paused public key** for a scheme that is still
+paused); it is signed by your now-registered spare.
 
 ### Case 2: none of your registered keys works any more
 
@@ -414,8 +425,8 @@ phrase.
 
        go run cmd/recoverKey/main.go prepare -wallet <N>
 
-2. **Bind.** Send the printed data from any funded wallet `<P>` that has both
-   keys registered and a working key: yours if it still can, or a friend's or
+2. **Bind.** Send the printed data from any funded wallet `<P>` that can
+   send under the current schemes: yours if it still can, or a friend's or
    operator's wallet on the same machine. The bind reveals nothing about your
    secret:
 
@@ -429,8 +440,26 @@ phrase.
 
        go run cmd/recoverKey/main.go reveal -wallet <N>
 
-5. **Register your second key** in the web UI as in Case 1; it is now signed
+5. **Register any further key** in the web UI as in Case 1; it is now signed
    by the key you just recovered.
+
+### Case 3: your account never registered a key, and its scheme is gone
+
+Funds were sent to your address, but you never registered a key, and the
+chain no longer uses the scheme of the key your address was made from. The
+same tool opens the account by revealing that old key - its hash is your
+address - together with its signature; the old scheme is checked once, by
+name, and never used again. Run the same three steps:
+
+    go run cmd/recoverKey/main.go prepare -wallet <N>
+    go run cmd/recoverKey/main.go bind -wallet <P> -data <hex from prepare>
+    # wait at least 360 blocks
+    go run cmd/recoverKey/main.go reveal -wallet <N>
+
+`prepare` recognises the case by itself (nothing registered, no
+commitments). The wallet must still hold the old key: from its recovery
+phrase, or in its key archive. The reveal opens the account with a key of a
+working scheme and sets both commitments, so it can send at once.
 
 All commands accept `-node <ip>` (default `127.0.0.1`) and ask for the wallet
 password. Someone who copies your revealed secret from the network cannot
@@ -453,7 +482,7 @@ stored anywhere: it is recomputed from the phrase when needed, and only the
 hash `C` is on chain. A recovery reveals `S` once, and the same transaction
 sets your next commitment, made from the next secret.
 
-There are exactly three ways a key can be attached to an account:
+There are exactly five ways a key can be attached to an account:
 
 1. **A normal registration**, signed by a key already registered to the
    account in a scheme that is **not paused**. A paused scheme approves
@@ -466,6 +495,10 @@ There are exactly three ways a key can be attached to an account:
      for a given `S` counts);
    - that bind naming exactly this new key and the next commitment;
    - the reveal signed by the new key itself.
+4. **The committed spare**: exactly the key whose address the account
+   committed to, signed by that key itself.
+5. **Opening an account that never registered a key** (Case 3): the old key
+   behind the address, its signature, and a matured bind, as in recovery.
 
 What an attacker can and cannot do:
 
@@ -489,7 +522,5 @@ noticed.
   its wallet file.
 - Without an effective recovery commitment, the recovery tool cannot help:
   the account must wait until one of its registered keys works again.
-- An account that never registered a key, and whose address was made from a
-  key of a scheme the chain no longer uses (for example, a wallet generated
-  with default schemes after the chain changed them), cannot be opened at
-  present.
+- Opening an account that never registered a key (Case 3) needs the old key:
+  keep the phrase or the wallet file of every address that may receive funds.

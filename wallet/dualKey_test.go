@@ -1,6 +1,10 @@
 package wallet
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/qwid-org/qwid-node/common"
+)
 
 func TestParsePUBACountsKeysOfAnyScheme(t *testing.T) {
 	// After a scheme replacement the superseded primary is still registered:
@@ -19,6 +23,9 @@ func TestSendRefusal(t *testing.T) {
 	none := RegisteredKeys{}
 	primaryOnly := RegisteredKeys{HasPrimary: true, AnyPrimary: true}
 	both := RegisteredKeys{HasPrimary: true, HasSecondary: true, AnyPrimary: true, AnySecondary: true}
+	var spareAddr common.Address
+	spareAddr.ByteValue[0] = 9
+	primaryAndSpare := RegisteredKeys{HasPrimary: true, AnyPrimary: true, SpareCommit: spareAddr}
 
 	cases := []struct {
 		name                     string
@@ -34,6 +41,7 @@ func TestSendRefusal(t *testing.T) {
 		{"transfer with only the primary", primaryOnly, false, false, false, true},
 		{"spare riding along a transfer", primaryOnly, true, false, false, true},
 		{"transfer with both keys", both, false, false, false, false},
+		{"transfer with a key and a spare commitment", primaryAndSpare, false, false, false, false},
 		{"new key via paused scheme with both keys", both, true, true, true, true},
 	}
 	for _, c := range cases {
@@ -47,11 +55,12 @@ func TestSendRefusal(t *testing.T) {
 func TestParsePUBAReadsCommitments(t *testing.T) {
 	k, err := ParsePUBA([]byte(`{"hasPrimary":true,"hasSecondary":true,
 		"recoveryCommit":"0101010101010101010101010101010101010101",
-		"recoveryPending":"0202020202020202020202020202020202020202"}`))
+		"recoveryPending":"0202020202020202020202020202020202020202",
+		"spareCommit":"0303030303030303030303030303030303030303"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if k.RecoveryCommit.ByteValue[0] != 1 || k.RecoveryPending.ByteValue[19] != 2 {
+	if k.RecoveryCommit.ByteValue[0] != 1 || k.RecoveryPending.ByteValue[19] != 2 || k.SpareCommit.ByteValue[0] != 3 {
 		t.Fatalf("commitments not parsed: %+v", k)
 	}
 }
