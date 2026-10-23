@@ -106,7 +106,10 @@ stake held by operators with a key of it registered by the parent block
 (`checkUnpauseKeyQuorum`), and the producer must hold one too
 (`checkPauseLeavesRegisteredKey`); producers apply the same rules before
 proposing (`EncryptionChangeAuthorised`). Oracle data must be exactly
-the values of the embedded proofs. A price that cannot be established (proofs
+the values of the embedded proofs. Producers embed only proofs whose signer still
+operates its delegated account (`blocks.AuthorizedOracleProofs`): a stake that
+moves operatorship would otherwise leave a stale proof in every candidate and
+halt the chain. A price that cannot be established (proofs
 carry at most 2/3 of the stake) is the parent's carried forward, never 0.
 
 RAND is a RANDAO accumulator (`blocks/randao.go`, S4-06), not the validators'

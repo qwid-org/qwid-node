@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
@@ -183,4 +184,50 @@ func TestAuthorizeOracleProofSigners(t *testing.T) {
 		})
 		assert.Error(t, err)
 	})
+}
+
+func TestFilterAuthorizedOracleProofs(t *testing.T) {
+	logger.InitLogger()
+	txs := map[byte]*transactionsDefinition.Transaction{
+		1: nonceTxFor(2, 10, 100, 0),
+		2: nonceTxFor(3, 10, 200, 0),
+	}
+	txs[1].TxParam.Sender = stakeOperator(7)
+	txs[2].TxParam.Sender = stakeOperator(8)
+	authorize := func(id int, sender common.Address) bool {
+		return id == 2 && sender == stakeOperator(7)
+	}
+	got := filterAuthorizedOracleProofs([][]byte{{1}, {2}, {0xff}}, decoderFor(txs, 0xff), authorize)
+	assert.Equal(t, [][]byte{{1}}, got, "only the authorized, decodable proof stays, in order")
+	assert.NoError(t, authorizeOracleProofSigners(got, decoderFor(txs, 0xff), authorize))
+}
+
+// A stake that hands delegated account 1 to another operator must not leave
+// the old operator's still-fresh proof in the next block: validators reject
+// it, every candidate carried it, and the chain halted (2026-10-23, block 3214).
+func TestStakeChangingOperatorDropsItsProof(t *testing.T) {
+	logger.InitLogger()
+	saved := account.StakingAccounts
+	t.Cleanup(func() { account.StakingAccounts = saved })
+	for i := range account.StakingAccounts {
+		account.StakingAccounts[i] = account.StakingAccountsType{AllStakingAccounts: map[[20]byte]account.StakingAccount{}}
+	}
+	oldOp, newOp := stakeOperator(1), stakeOperator(2)
+	min := common.MinStakingForNode
+	assert.NoError(t, account.Stake(oldOp.GetBytes(), min, 100, 1000, 1, true, 0, 0))
+
+	txs := map[byte]*transactionsDefinition.Transaction{1: nonceTxFor(1, 3214, 100, 0)}
+	txs[1].TxParam.Sender = oldOp
+	proofs := [][]byte{{1}}
+	assert.NoError(t, authorizeOracleProofSigners(proofs, decoderFor(txs, 0xff), account.IsTop128StakingNode))
+
+	// Another wallet stakes more into delegated account 1 as an operator.
+	assert.NoError(t, account.Stake(newOp.GetBytes(), 2*min, 200, 2000, 1, true, 0, 0))
+	assert.Error(t, authorizeOracleProofSigners(proofs, decoderFor(txs, 0xff), account.IsTop128StakingNode),
+		"validators reject the stale proof")
+
+	kept := filterAuthorizedOracleProofs(proofs, decoderFor(txs, 0xff), account.IsTop128StakingNode)
+	assert.Empty(t, kept)
+	assert.NoError(t, authorizeOracleProofSigners(kept, decoderFor(txs, 0xff), account.IsTop128StakingNode),
+		"the producer's filtered proofs pass validation")
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/oracles"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
@@ -275,4 +276,37 @@ func AuthorizeOracleProofSigners(proofs [][]byte) error {
 		}
 		return &decoded, nil
 	}, account.IsTop128StakingNode)
+}
+
+// AuthorizedOracleProofs keeps the proofs whose signer is, in the current
+// staking snapshot, the operator of the delegated account they name - the
+// rule validators apply in AuthorizeOracleProofSigners. A producer must
+// filter by it: a proof stays in the store for OraclesHeightDistance blocks,
+// and if a stake change hands its delegated account to another operator
+// meanwhile, the block carrying it is rejected. Every candidate then carries
+// the same stale proof, no block is accepted, the height never moves on, and
+// the proof never ages out - the chain halts for good.
+func AuthorizedOracleProofs(proofs [][]byte) [][]byte {
+	return filterAuthorizedOracleProofs(proofs, decodeProof, account.IsTop128StakingNode)
+}
+
+func filterAuthorizedOracleProofs(proofs [][]byte, decode verifiedDecoder, authorize oracleProofAuthorizer) [][]byte {
+	out := make([][]byte, 0, len(proofs))
+	for _, pb := range proofs {
+		tx, err := decode(pb)
+		if err != nil {
+			continue
+		}
+		id, _, err := extractOracleSubmission(tx)
+		if err != nil {
+			continue
+		}
+		if !authorize(int(id), tx.GetSenderAddress()) {
+			logger.GetLogger().Println("leaving out the oracle proof of delegated account", id,
+				"- its signer no longer operates it")
+			continue
+		}
+		out = append(out, pb)
+	}
+	return out
 }

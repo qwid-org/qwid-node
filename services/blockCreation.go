@@ -89,7 +89,9 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	// S4-06: the oracle data is derived from exactly the proofs embedded, so
 	// the two always agree, and the values are computed the way validators
 	// recompute them.
-	oracleProofs := oracles.GenerateOracleProofs(heightTransaction)
+	// Only proofs whose signers still operate their delegated accounts: a
+	// stale one would get every candidate rejected (AuthorizedOracleProofs).
+	oracleProofs := blocks.AuthorizedOracleProofs(oracles.GenerateOracleProofs(heightTransaction))
 	priceOracleData, err := blocks.OracleDataFromProofs(oracleProofs)
 	if err != nil {
 		return blocks.Block{}, err
