@@ -17,6 +17,7 @@ import (
 	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/recoveryplan"
 	clientrpc "github.com/qwid-org/qwid-node/rpc/client"
 	"github.com/qwid-org/qwid-node/services/transactionServices"
 	"github.com/qwid-org/qwid-node/statistics"
@@ -39,7 +40,7 @@ func main() {
 	if *num < 0 || *num > 255 {
 		usage()
 	}
-	defaultSchemes = []string{common.SigName(), common.SigName2()}
+	defaultSchemes = []string{common.SigName(), common.SigName2()} // before the chain's are installed
 	go clientrpc.ConnectRPC(*node)
 	time.Sleep(time.Second)
 	w := loadWallet(uint8(*num))
@@ -121,13 +122,13 @@ func prepare(w *wallet.Wallet) error {
 	if err != nil {
 		return err
 	}
-	p, err := planRecovery(w, keys)
+	p, err := recoveryplan.Make(w, keys, common.IsPaused(), defaultSchemes)
 	if err != nil {
 		return err
 	}
 	fmt.Println("identity:", w.MainAddress.GetHex())
 	fmt.Println("bind data (pass to 'bind' with a funded payer wallet):")
-	fmt.Println(hex.EncodeToString(p.bindData))
+	fmt.Println(hex.EncodeToString(p.BindData))
 	fmt.Printf("then wait %d blocks after the bind is included and run 'reveal'\n", common.RecoveryBindDelayBlocks)
 	return nil
 }
@@ -149,19 +150,15 @@ func reveal(w *wallet.Wallet) error {
 	if err != nil {
 		return err
 	}
-	p, err := planRecovery(w, keys)
+	p, err := recoveryplan.Make(w, keys, common.IsPaused(), defaultSchemes)
 	if err != nil {
 		return err
 	}
-	opt := transactionsDefinition.BuildRecoveryRevealOptData(p.secret, p.next)
-	if p.addressMode {
-		opt = transactionsDefinition.BuildAddressRevealOptData(transactionsDefinition.AddressReveal{
-			Next: p.next, Spare: p.spare, OldScheme: p.oldScheme, OldPub: p.oldPub, OldSig: p.oldSig,
-		})
-		fmt.Printf("opening an account that never registered a key, with its old %s key\n", p.oldScheme)
+	if p.AddressMode {
+		fmt.Printf("opening an account that never registered a key, with its old %s key\n", p.OldScheme)
 	}
-	tx := newTx(w.MainAddress, common.RecoveryRevealAddress, opt, p.newKey)
-	return signAndSend(w, &tx, p.slotPrimary)
+	tx := newTx(w.MainAddress, common.RecoveryRevealAddress, p.RevealOptData(), p.NewKey)
+	return signAndSend(w, &tx, p.SlotPrimary)
 }
 
 func newTx(sender, recipient common.Address, opt []byte, pk common.PubKey) transactionsDefinition.Transaction {
@@ -198,110 +195,6 @@ func signAndSend(w *wallet.Wallet, tx *transactionsDefinition.Transaction, prima
 	return nil
 }
 
-const maxRecoveryIndex = 1000
-
-type recovery struct {
-	slotPrimary bool
-	newKey      common.PubKey
-	secret      []byte
-	next        common.Address
-	bindData    []byte
-
-	// Address opening: the account never registered a key, so the key its
-	// address is the hash of - of whatever scheme - opens it.
-	addressMode bool
-	spare       common.Address
-	oldScheme   string
-	oldPub      []byte
-	oldSig      []byte
-}
-
 // defaultSchemes are the built-in schemes, captured before the chain's are
 // installed: an old wallet's address may come from a key of one of them.
 var defaultSchemes []string
-
-// planRecovery works out everything both phases need, from the phrase and the
-// node's PUBA answer only: which slot lacks a key of the current scheme, the
-// wallet's key for it, the secret opening the effective commitment, and the
-// commitment that replaces it.
-func planRecovery(w *wallet.Wallet, keys wallet.RegisteredKeys) (recovery, error) {
-	var r recovery
-	if !keys.AnyPrimary && !keys.AnySecondary && !keys.HasCommitments() {
-		return planAddressOpening(w, common.IsPaused())
-	}
-	switch {
-	case !keys.HasPrimary:
-		r.slotPrimary = true
-		r.newKey = w.Account1.PublicKey
-	case !keys.HasSecondary:
-		r.newKey = w.Account2.PublicKey
-	default:
-		return r, fmt.Errorf("both slots already hold a key of the current scheme: nothing to recover")
-	}
-	if len(r.newKey.GetBytes()) == 0 {
-		return r, fmt.Errorf("the wallet has no key for the slot to recover; load it with the current schemes")
-	}
-	var zero common.Address
-	if keys.RecoveryCommit == zero {
-		return r, fmt.Errorf("the identity has no effective recovery commitment")
-	}
-	n, err := w.FindRecoveryIndex(keys.RecoveryCommit, maxRecoveryIndex)
-	if err != nil {
-		return r, err
-	}
-	if r.secret, err = w.RecoverySecret(n); err != nil {
-		return r, err
-	}
-	if r.next, err = w.RecoveryCommitmentAddress(n + 1); err != nil {
-		return r, err
-	}
-	r.newKey.MainAddress = w.MainAddress
-	tag, err := common.RecoveryTag(r.secret)
-	if err != nil {
-		return r, err
-	}
-	payload, err := common.RecoveryPayload(w.MainAddress, r.newKey.Address, r.next, r.secret)
-	if err != nil {
-		return r, err
-	}
-	r.bindData = transactionsDefinition.BuildRecoveryBindOptData(w.MainAddress, tag, payload)
-	return r, nil
-}
-
-// planAddressOpening opens an account that never registered a key: the new
-// key is the wallet's key of the LIVE scheme, the spare commitment points at
-// its other key, the recovery commitment is C_0, and the old key behind the
-// address signs all of it.
-func planAddressOpening(w *wallet.Wallet, primaryPaused bool) (recovery, error) {
-	r := recovery{addressMode: true, slotPrimary: !primaryPaused}
-	if r.slotPrimary {
-		r.newKey, r.spare = w.Account1.PublicKey, w.Account2.Address
-	} else {
-		r.newKey, r.spare = w.Account2.PublicKey, w.Account1.Address
-	}
-	if len(r.newKey.GetBytes()) == 0 {
-		return r, fmt.Errorf("the wallet has no key of the live scheme; load it with the current schemes")
-	}
-	r.newKey.MainAddress = w.MainAddress
-	if c, err := w.RecoveryCommitmentAddress(0); err == nil {
-		r.next = c
-	}
-	msg, err := common.AddressOpenMessage(w.MainAddress, r.newKey.Address, r.next, r.spare)
-	if err != nil {
-		return r, err
-	}
-	schemes := append(append([]string{}, defaultSchemes...), w.SigName, w.SigName2)
-	if r.oldScheme, r.oldPub, r.oldSig, err = w.SignWithAddressKey(msg, schemes); err != nil {
-		return r, err
-	}
-	tag, err := common.RecoveryTag(r.oldPub)
-	if err != nil {
-		return r, err
-	}
-	payload, err := common.AddressOpenPayload(w.MainAddress, r.newKey.Address, r.next, r.spare, r.oldPub)
-	if err != nil {
-		return r, err
-	}
-	r.bindData = transactionsDefinition.BuildRecoveryBindOptData(w.MainAddress, tag, payload)
-	return r, nil
-}

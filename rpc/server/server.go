@@ -389,6 +389,8 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 		handlePEER(byt, reply)
 	case "PUBA":
 		handlePUBA(byt, reply)
+	case "RBND":
+		handleRBND(byt, reply)
 	case "HELO":
 		handleHELO(byt, reply)
 	case "VALS":
@@ -1317,6 +1319,32 @@ func handlePUBA(line []byte, reply *[]byte) {
 		return
 	}
 	*reply = result
+}
+
+// handleRBND reports whether a recovery bind is stored under the given
+// 32-byte key (common.RecoveryBindKey), from which height, and when its reveal
+// becomes possible - so a wallet can tell the owner where the recovery stands.
+// The key is a hash; it reveals nothing about the secret.
+func handleRBND(line []byte, reply *[]byte) {
+	if len(line) < 32 {
+		*reply = []byte("{\"error\":\"invalid bind key length\"}")
+		return
+	}
+	var key [32]byte
+	copy(key[:], line[:32])
+	resp := struct {
+		Exists    bool  `json:"exists"`
+		Height    int64 `json:"height,omitempty"`
+		ReadyAt   int64 `json:"readyAt,omitempty"`
+		ExpiresAt int64 `json:"expiresAt,omitempty"`
+	}{}
+	if b, ok := account.GetRecoveryBind(key); ok {
+		resp.Exists, resp.Height = true, b.Height
+		resp.ReadyAt = b.Height + common.RecoveryBindDelayBlocks
+		resp.ExpiresAt = b.Height + common.RecoveryBindExpiryBlocks
+	}
+	out, _ := json.Marshal(resp)
+	*reply = out
 }
 
 func handleVALS(line []byte, reply *[]byte) {

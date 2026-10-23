@@ -263,6 +263,7 @@
         <button class="tab" data-tab="escrow">Escrow</button>
         <button class="tab" data-tab="smartcontract">Smart Contract</button>
         <button class="tab" data-tab="vote">Vote</button>
+        <button class="tab" data-tab="recovery">Recovery</button>
         <button class="tab" data-tab="dex">DEX</button>
         <button class="tab" data-tab="peers">Peers</button>
         <button class="tab" data-tab="logs">Logs</button>
@@ -714,6 +715,55 @@ contract Coin {
         </div>
 
         <!-- Vote Panel -->
+        <div class="panel" id="panel-recovery">
+            <div class="card">
+                <h3>Account Recovery</h3>
+                <p style="color:#888;margin-bottom:15px;">
+                    Use this when none of your registered keys works any more (its signature scheme was paused
+                    or replaced), or when funds sit on an address that never registered a key and whose scheme the
+                    chain no longer uses. Ownership is proven from your recovery phrase, which never leaves this
+                    machine; no working signature scheme of yours is needed.
+                </p>
+                <div id="recoveryStatus" style="font-family:monospace;font-size:0.9em;line-height:1.7;">Loading...</div>
+                <button class="btn-secondary" style="margin-top:10px;" onclick="loadRecovery()">Refresh</button>
+            </div>
+
+            <div class="card" id="recoveryBindCard" style="display:none;">
+                <h3>Step 1 &middot; Bind</h3>
+                <p style="color:#888;margin-bottom:15px;">
+                    The bind fixes in advance which new key your account receives, without revealing your secret.
+                    Your own account usually cannot pay for it, so another wallet on this machine that can still
+                    send pays the small fee. That wallet is opened only to sign and is not kept loaded.
+                </p>
+                <div class="form-group">
+                    <label>Paying wallet number (0-255)</label>
+                    <input type="number" id="recoveryPayerWallet" min="0" max="255" value="0">
+                </div>
+                <div class="form-group">
+                    <label>Paying wallet password</label>
+                    <input type="password" id="recoveryPayerPassword" autocomplete="off">
+                </div>
+                <button class="btn-primary" onclick="recoveryBind()">Send bind</button>
+                <details style="margin-top:15px;color:#888;">
+                    <summary style="cursor:pointer;">Or send it from another device</summary>
+                    <p style="margin-top:8px;">Send a transaction with amount 0 to the address below, with this data as
+                    Smart Contract Data, from any account that can still send:</p>
+                    <p style="font-family:monospace;word-break:break-all;">Recipient: <span id="recoveryBindAddress"></span></p>
+                    <p style="font-family:monospace;word-break:break-all;">Data: <span id="recoveryBindData"></span></p>
+                </details>
+            </div>
+
+            <div class="card" id="recoveryRevealCard" style="display:none;">
+                <h3>Step 2 &middot; Reveal</h3>
+                <p style="color:#888;margin-bottom:15px;">
+                    Possible once the bind is old enough. It registers your new key, even if its scheme is still
+                    paused, and sets your next recovery commitment.
+                </p>
+                <p id="recoveryRevealInfo" style="font-family:monospace;margin-bottom:10px;"></p>
+                <button class="btn-primary" id="recoveryRevealButton" onclick="recoveryReveal()">Send reveal</button>
+            </div>
+        </div>
+
         <div class="panel" id="panel-vote">
             <div class="card">
                 <h3>Vote on Encryption Changes</h3>
@@ -943,6 +993,9 @@ contract Coin {
                 if (tab.dataset.tab === 'peers') {
                     updatePeers();
                 }
+                if (tab.dataset.tab === 'recovery') {
+                    loadRecovery();
+                }
             });
         });
 
@@ -953,6 +1006,105 @@ contract Coin {
             if (tabBtn) tabBtn.classList.add('active');
             const panel = document.getElementById('panel-' + tabName);
             if (panel) panel.classList.add('active');
+        }
+
+        // Recovery tab: the server does prepare/bind/reveal with the loaded
+        // wallet; the browser shows where the recovery stands.
+        function escapeHtml(t) {
+            return String(t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        async function loadRecovery() {
+            const box = document.getElementById('recoveryStatus');
+            const bindCard = document.getElementById('recoveryBindCard');
+            const revealCard = document.getElementById('recoveryRevealCard');
+            try {
+                const res = await api('/api/recovery/status');
+                if (res.error) {
+                    box.textContent = res.error;
+                    bindCard.style.display = 'none';
+                    revealCard.style.display = 'none';
+                    return;
+                }
+                let html = 'Account: ' + escapeHtml(res.identity) + '<br>';
+                if (res.mode === 'none') {
+                    html += '<span style="color:#00d4ff;">Nothing to recover.</span> ' + escapeHtml(res.reason || '');
+                    box.innerHTML = html;
+                    bindCard.style.display = 'none';
+                    revealCard.style.display = 'none';
+                    return;
+                }
+                if (res.mode === 'address') {
+                    html += 'Route: <b>opening an account that never registered a key</b>, with its old ' +
+                        escapeHtml(res.oldScheme) + ' key<br>';
+                } else {
+                    html += 'Route: <b>recovery through your recovery commitment</b><br>';
+                }
+                html += 'New key: ' + escapeHtml(res.newKey) + ' (' + escapeHtml(res.newKeyScheme) + ')<br>';
+                html += 'Current block: ' + escapeHtml(res.height) + '<br>';
+                const b = res.bind || {};
+                if (b.exists) {
+                    html += 'Bind: on chain since block ' + b.height + ', reveal possible from block ' + b.readyAt +
+                        ', expires after block ' + b.expiresAt;
+                } else {
+                    html += 'Bind: not sent yet';
+                }
+                box.innerHTML = html;
+                document.getElementById('recoveryBindAddress').textContent = res.bindAddress;
+                document.getElementById('recoveryBindData').textContent = res.bindData;
+                bindCard.style.display = b.exists ? 'none' : 'block';
+                revealCard.style.display = b.exists ? 'block' : 'none';
+                const info = document.getElementById('recoveryRevealInfo');
+                const btn = document.getElementById('recoveryRevealButton');
+                if (b.exists) {
+                    const left = b.readyAt - (res.height + 1);
+                    if (left > 0) {
+                        info.textContent = left + ' more block(s) until the reveal is possible (about ' +
+                            Math.ceil(left * 10 / 60) + ' min). Refresh to check.';
+                        btn.disabled = true;
+                    } else {
+                        info.textContent = 'The bind is old enough: you can send the reveal now.';
+                        btn.disabled = false;
+                    }
+                }
+            } catch (e) {
+                box.textContent = 'Failed to load the recovery status: ' + e.message;
+            }
+        }
+
+        async function recoveryBind() {
+            const payerWallet = parseInt(document.getElementById('recoveryPayerWallet').value, 10);
+            const payerPassword = document.getElementById('recoveryPayerPassword').value;
+            if (isNaN(payerWallet) || !payerPassword) {
+                showMessage('Give the paying wallet number and its password', 'error');
+                return;
+            }
+            try {
+                const res = await api('/api/recovery/bind', 'POST', { payerWallet, payerPassword });
+                document.getElementById('recoveryPayerPassword').value = '';
+                if (res.error) {
+                    showMessage(res.error, 'error');
+                } else {
+                    showMessage(res.message + ' Hash: ' + res.txHash);
+                    loadRecovery();
+                }
+            } catch (e) {
+                showMessage('Failed to send the bind: ' + e.message, 'error');
+            }
+        }
+
+        async function recoveryReveal() {
+            try {
+                const res = await api('/api/recovery/reveal', 'POST', {});
+                if (res.error) {
+                    showMessage(res.error, 'error');
+                } else {
+                    showMessage(res.message + ' Hash: ' + res.txHash);
+                    loadRecovery();
+                }
+            } catch (e) {
+                showMessage('Failed to send the reveal: ' + e.message, 'error');
+            }
         }
 
         // Show message

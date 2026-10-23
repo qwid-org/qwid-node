@@ -420,6 +420,15 @@ Recovery takes two transactions, at least one hour apart. Signature schemes
 play no part in it: what proves ownership is the secret derived from your
 phrase.
 
+**In the web UI**, load the wallet and open the **Recovery** tab. It tells
+you whether your account needs recovering and by which route, then walks you
+through both steps: **Send bind** (paid by another wallet on the same
+machine, whose number and password you enter there; it is opened only to sign)
+and, once the bind is old enough, **Send reveal**. Your phrase and the
+recovery secret never leave the machine running the web UI.
+
+**From the command line**, the same steps are:
+
 1. **Prepare.** The tool derives your new key and the recovery secret from the
    phrase and prints the bind data:
 
@@ -456,8 +465,8 @@ name, and never used again. Run the same three steps:
     # wait at least 360 blocks
     go run cmd/recoverKey/main.go reveal -wallet <N>
 
-`prepare` recognises the case by itself (nothing registered, no
-commitments). The wallet must still hold the old key: from its recovery
+The web UI's **Recovery** tab does the same, and `prepare` too recognises
+the case by itself (nothing registered, no commitments). The wallet must still hold the old key: from its recovery
 phrase, or in its key archive. The reveal opens the account with a key of a
 working scheme and sets both commitments, so it can send at once.
 
