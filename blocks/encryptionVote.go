@@ -223,9 +223,14 @@ func checkUnpauseKeyQuorum(want []byte, parent Block, primary bool, total int64,
 	return nil
 }
 
+// stakeAndOperatorOfDelegated counts only delegated accounts that can vote,
+// like the total it is weighed against (GetStakedInEligibleDelegatedAccounts).
 func stakeAndOperatorOfDelegated(id int) (int64, common.Address) {
-	_, staked, op := account.GetStakedInDelegatedAccount(id)
 	var a common.Address
+	if !account.IsEligibleDelegatedAccount(id) {
+		return 0, a
+	}
+	_, staked, op := account.GetStakedInDelegatedAccount(id)
 	_ = a.Init(op.Address[:])
 	return staked, a
 }
@@ -261,10 +266,10 @@ func VerifyEncryptionVotes(newBlock, lastBlock Block) error {
 			continue
 		}
 		if err := encryptionChangeAuthorised(newBlock.BaseBlock.OracleProofs, lastBlock, want, primary,
-			newBlock.GetHeader().Height, account.GetStakedInAllDelegatedAccounts(), decodeProof, stakeOfDelegated); err != nil {
+			newBlock.GetHeader().Height, account.GetStakedInEligibleDelegatedAccounts(), decodeProof, stakeOfDelegated); err != nil {
 			return err
 		}
-		if err := checkUnpauseKeyQuorum(want, lastBlock, primary, account.GetStakedInAllDelegatedAccounts(),
+		if err := checkUnpauseKeyQuorum(want, lastBlock, primary, account.GetStakedInEligibleDelegatedAccounts(),
 			stakeAndOperatorOfDelegated, operatorHasKeyAsOf(lastBlock.GetHeader().Height)); err != nil {
 			return err
 		}
@@ -297,7 +302,7 @@ func EncryptionChangeRefusal(proofs [][]byte, lastBlock Block, want []byte, prim
 	if err := checkPauseLeavesRegisteredKey(asBuilt, lastBlock, want, primary); err != nil {
 		return err
 	}
-	total := account.GetStakedInAllDelegatedAccounts()
+	total := account.GetStakedInEligibleDelegatedAccounts()
 	if err := encryptionChangeAuthorised(proofs, lastBlock, want, primary, height,
 		total, decodeProof, stakeOfDelegated); err != nil {
 		return err

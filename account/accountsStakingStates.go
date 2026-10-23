@@ -254,20 +254,68 @@ func IsTop128StakingNode(delegatedAccount int, operator common.Address) bool {
 	if delegatedAccount <= 0 || delegatedAccount >= len(StakingAccounts) {
 		return false
 	}
+	totals := delegatedTotalsLocked()
+	selected, ok := eligibleOperatorLocked(&totals, delegatedAccount)
+	return ok && bytes.Equal(selected[:], operator.GetBytes())
+}
 
+// GetStakedInEligibleDelegatedAccounts is the stake that can vote: the sum
+// over the delegated accounts IsTop128StakingNode admits (at least
+// MinStakingForNode, an operator, ranked in the top 128). Every consensus
+// threshold - price, scheme pause, replacement and un-pause - divides by it,
+// because only these accounts can sign nonces. Dividing by all staked coins
+// instead counted every coin staked below the node minimum or outside the top
+// 128 as a permanent vote against: with 40% of the stake there, two thirds
+// could never be reached, so a paused scheme could be neither replaced nor
+// un-paused.
+func GetStakedInEligibleDelegatedAccounts() int64 {
+	StakingRWMutex.RLock()
+	defer StakingRWMutex.RUnlock()
+	totals := delegatedTotalsLocked()
+	sum := int64(0)
+	for id := 1; id < len(StakingAccounts); id++ {
+		if _, ok := eligibleOperatorLocked(&totals, id); ok {
+			sum += totals[id]
+		}
+	}
+	return sum
+}
+
+// IsEligibleDelegatedAccount reports whether delegated account id can vote
+// at all, whoever operates it.
+func IsEligibleDelegatedAccount(id int) bool {
+	StakingRWMutex.RLock()
+	defer StakingRWMutex.RUnlock()
+	if id <= 0 || id >= len(StakingAccounts) {
+		return false
+	}
+	totals := delegatedTotalsLocked()
+	_, ok := eligibleOperatorLocked(&totals, id)
+	return ok
+}
+
+// delegatedTotalsLocked sums every delegated account's stake. The caller
+// holds StakingRWMutex.
+func delegatedTotalsLocked() [256]int64 {
 	var totals [256]int64
 	for id, delegated := range StakingAccounts {
 		for _, staking := range delegated.AllStakingAccounts {
 			totals[id] += staking.StakedBalance
 		}
 	}
+	return totals
+}
 
+// eligibleOperatorLocked returns the operator selected for delegatedAccount
+// and whether the account is eligible to produce and vote. The caller holds
+// StakingRWMutex and passes delegatedTotalsLocked's totals.
+func eligibleOperatorLocked(totals *[256]int64, delegatedAccount int) ([common.AddressLength]byte, bool) {
+	var selectedOperator [common.AddressLength]byte
 	targetStake := totals[delegatedAccount]
 	if targetStake < common.MinStakingForNode {
-		return false
+		return selectedOperator, false
 	}
 
-	var selectedOperator [common.AddressLength]byte
 	selectedStake := int64(-1)
 	selectedSince := int64(0)
 	for address, staking := range StakingAccounts[delegatedAccount].AllStakingAccounts {
@@ -283,8 +331,8 @@ func IsTop128StakingNode(delegatedAccount int, operator common.Address) bool {
 			selectedOperator = address
 		}
 	}
-	if selectedStake < 0 || !bytes.Equal(selectedOperator[:], operator.GetBytes()) {
-		return false
+	if selectedStake < 0 {
+		return selectedOperator, false
 	}
 
 	targetTime := StakingAccounts[delegatedAccount].StakeChangedAt
@@ -300,5 +348,5 @@ func IsTop128StakingNode(delegatedAccount int, operator common.Address) bool {
 			rank++
 		}
 	}
-	return rank <= MaxActiveStakingNodes
+	return selectedOperator, rank <= MaxActiveStakingNodes
 }

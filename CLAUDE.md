@@ -96,7 +96,11 @@ of accounts, staking, DEX and EVM state **after the parent block**), both
 covered by the producer's signature. Validators recompute `BlockHeaderHash`,
 `BodyHash` and `StateRoot` before applying a block. Signature-scheme votes are
 counted from the signed nonces embedded in the block (`OracleProofs`) against
-the parent's stake (`blocks/encryptionVote.go`). Un-pausing a scheme (which
+the parent's stake (`blocks/encryptionVote.go`). Every consensus threshold (price, pause,
+replace, un-pause) divides by the stake that can vote -
+`account.GetStakedInEligibleDelegatedAccounts`, the delegated accounts
+`IsTop128StakingNode` admits - never by all staked coins, which counted stake
+below the node minimum or outside the top 128 as a permanent vote against. Un-pausing a scheme (which
 makes it active and pauses the other) additionally needs two thirds of the
 stake held by operators with a key of it registered by the parent block
 (`checkUnpauseKeyQuorum`), and the producer must hold one too

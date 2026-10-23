@@ -419,3 +419,55 @@ func TestOperatorTieUsesFirstSignal(t *testing.T) {
 	assert.True(t, IsTop128StakingNode(1, early))
 	assert.False(t, IsTop128StakingNode(1, late))
 }
+
+// Only delegated accounts that can sign nonces count towards the stake every
+// consensus threshold divides by. Coins staked below the node minimum, with
+// no operator, or outside the top 128 cannot vote, and counting them made
+// two thirds unreachable as soon as they held more than a third.
+func TestEligibleStakeExcludesAccountsThatCannotVote(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+	initTestStakingAccounts()
+
+	addrb := func(a byte) []byte {
+		x := make([]byte, 20)
+		x[0] = a
+		return x
+	}
+	min := common.MinStakingForNode
+	// Two eligible validators.
+	assert.NoError(t, Stake(addrb(1), 3*min, 100, 1001, 1, true, 0, 0))
+	assert.NoError(t, Stake(addrb(2), 3*min, 100, 1002, 2, true, 0, 0))
+	// Below the node minimum, with an operator.
+	assert.NoError(t, Stake(addrb(3), min-1, 100, 1003, 3, true, 0, 0))
+	// Plenty of stake but no operator.
+	assert.NoError(t, Stake(addrb(4), 4*min, 100, 1004, 4, false, 0, 0))
+
+	assert.Equal(t, int64(11*min-1), GetStakedInAllDelegatedAccounts())
+	assert.Equal(t, int64(6*min), GetStakedInEligibleDelegatedAccounts())
+	assert.True(t, IsEligibleDelegatedAccount(1))
+	assert.False(t, IsEligibleDelegatedAccount(3))
+	assert.False(t, IsEligibleDelegatedAccount(4))
+	assert.False(t, IsEligibleDelegatedAccount(0))
+	assert.False(t, IsEligibleDelegatedAccount(256))
+
+	// Both validators voting is now two thirds and more; against all staked
+	// coins it was 6/11 - never enough.
+	votes := int64(6 * min)
+	assert.True(t, votes*3 >= GetStakedInEligibleDelegatedAccounts()*2)
+	assert.False(t, votes*3 >= GetStakedInAllDelegatedAccounts()*2)
+}
+
+func TestEligibleStakeExcludesRankBeyond128(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+	initTestStakingAccounts()
+
+	for id := 1; id <= 129; id++ {
+		var a [20]byte
+		a[0] = byte(id)
+		assert.NoError(t, Stake(a[:], common.MinStakingForNode, 100, int64(1000+id), id, true, 0, 0))
+	}
+	assert.Equal(t, 128*common.MinStakingForNode, GetStakedInEligibleDelegatedAccounts())
+	assert.False(t, IsEligibleDelegatedAccount(129))
+}

@@ -1,8 +1,10 @@
 package blocks
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 )
@@ -112,5 +114,39 @@ func TestUnpauseProducerMustHoldAKeyOfTheScheme(t *testing.T) {
 	newBlock.BaseBlock.BaseHeader.OperatorAccount = testAddress(0x66)
 	if err := checkPauseLeavesRegisteredKey(newBlock, parent, cfg(false), true); err == nil {
 		t.Fatal("a producer without a key of the un-paused scheme was accepted")
+	}
+}
+
+// The key quorum is weighed against the stake that can vote, so it must also
+// count only that stake: a delegated account below the node minimum signs no
+// nonces and must not lift an un-pause past two thirds.
+func TestUnpauseQuorumCountsOnlyEligibleAccounts(t *testing.T) {
+	logger.InitLogger()
+	saved := account.StakingAccounts
+	t.Cleanup(func() { account.StakingAccounts = saved })
+	for i := range account.StakingAccounts {
+		account.StakingAccounts[i] = account.StakingAccountsType{AllStakingAccounts: map[[20]byte]account.StakingAccount{}}
+	}
+	min := common.MinStakingForNode
+	stake := func(id int, op common.Address, amount int64) {
+		var a [20]byte
+		copy(a[:], op.GetBytes())
+		account.StakingAccounts[id].AllStakingAccounts[a] = account.StakingAccount{
+			StakedBalance: amount, Address: a, OperationalAccount: true, OperationalSince: int64(id)}
+	}
+	stake(1, testAddress(1), min)   // eligible, no key of the scheme
+	stake(2, testAddress(2), min-1) // below the node minimum, holds a key
+
+	parent := blockWithEnc(99, falcon1024(t, true), mayo5(t))
+	hasKey := func(op common.Address, primary bool, keyLen int) bool {
+		want := testAddress(2)
+		return bytes.Equal(op.GetBytes(), want.GetBytes())
+	}
+	total := account.GetStakedInEligibleDelegatedAccounts()
+	if total != min {
+		t.Fatalf("eligible stake %d, want %d", total, min)
+	}
+	if err := checkUnpauseKeyQuorum(falcon1024(t, false), parent, true, total, stakeAndOperatorOfDelegated, hasKey); err == nil {
+		t.Fatal("stake of an account that cannot vote carried the un-pause key quorum")
 	}
 }

@@ -94,7 +94,7 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	if err != nil {
 		return blocks.Block{}, err
 	}
-	totalStaked := account.GetStakedInAllDelegatedAccounts()
+	totalStaked := account.GetStakedInEligibleDelegatedAccounts()
 	priceOracle, err := oracles.PriceFromData(priceOracleData, totalStaked)
 	if err != nil {
 		// S4-06: an unestablished price carries the parent's forward.
