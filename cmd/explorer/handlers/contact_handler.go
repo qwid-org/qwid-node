@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
 	"strings"
+	"time"
 )
 
 // Size limits for the contact form. The rate limit in cmd/explorer/ratelimit.go
@@ -146,10 +149,82 @@ func SendContact(w http.ResponseWriter, r *http.Request) {
 	// an IAM credential, and SES requires the envelope sender to be a verified
 	// identity.
 	auth := smtp.PlainAuth("", smtpUser, smtpPass, cfg.Host)
-	if err := smtp.SendMail(cfg.Addr(), auth, cfg.From, []string{cfg.To}, msg); err != nil {
+	select {
+	case contactSendSlots <- struct{}{}:
+		defer func() { <-contactSendSlots }()
+	default:
+		jsonError(w, "Contact form is busy, please try again in a minute", http.StatusServiceUnavailable)
+		return
+	}
+	if err := sendMailWithTimeout(cfg, auth, msg, contactSMTPTimeout); err != nil {
 		jsonError(w, "Failed to send message", http.StatusInternalServerError)
 		return
 	}
 
 	jsonResponse(w, map[string]string{"success": "true"})
+}
+
+// smtp.SendMail dials without a timeout and sets no deadline, so a request to
+// /api/contact could hang for as long as the SMTP server (or anything in
+// between) held the connection open: requests from many addresses - each
+// within the per-IP rate limit - piled up goroutines and sockets, and an SES
+// outage stalled every one of them (W3). The whole exchange now has one
+// deadline, and only a few sends run at once; the rest are refused at once.
+var (
+	contactSMTPTimeout = 10 * time.Second
+	contactSendSlots   = make(chan struct{}, 4)
+)
+
+// sendMailWithTimeout does what smtp.SendMail does - EHLO, STARTTLS when
+// offered, AUTH, MAIL, RCPT, DATA, QUIT - but dials with a timeout and puts a
+// deadline on the connection covering the whole conversation.
+func sendMailWithTimeout(cfg mailConfig, auth smtp.Auth, msg []byte, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	conn, err := net.DialTimeout("tcp", cfg.Addr(), timeout)
+	if err != nil {
+		return err
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		conn.Close()
+		return err
+	}
+	c, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	defer c.Close()
+	if err := c.Hello("localhost"); err != nil {
+		return err
+	}
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err := c.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
+			return err
+		}
+	}
+	if auth != nil {
+		if ok, _ := c.Extension("AUTH"); !ok {
+			return fmt.Errorf("smtp: server does not support AUTH")
+		}
+		if err := c.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := c.Mail(cfg.From); err != nil {
+		return err
+	}
+	if err := c.Rcpt(cfg.To); err != nil {
+		return err
+	}
+	wc, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := wc.Write(msg); err != nil {
+		return err
+	}
+	if err := wc.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
 }
