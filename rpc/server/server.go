@@ -1306,7 +1306,8 @@ func handlePUBA(line []byte, reply *[]byte) {
 	}
 
 	resp := PubKeyResponse{}
-	addresses, err := pubkeys.LoadAddresses(addr)
+	// Keys in force only: one a scheme break voided is of no use to the wallet.
+	addresses, err := pubkeys.LoadAddressesAsOf(addr, pubkeys.NoHeightLimit)
 	if err == nil {
 		for _, a := range addresses {
 			resp.Addresses = append(resp.Addresses, PubKeyAddrInfo{

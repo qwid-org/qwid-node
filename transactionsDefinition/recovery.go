@@ -11,36 +11,61 @@ import (
 	"github.com/qwid-org/qwid-node/wallet"
 )
 
-// IsCommitmentRegistration: a key registration whose Recipient is not the
-// sender sets the identity's commitments (CLAUDE.md "Recovery commitment"):
-// Recipient is the ADDRESS of the spare key - its public key stays unpublished
-// until needed - and OptData, when present, is the recovery commitment
-// C = H160(S). Reserved, delegated and zero recipients never are.
+// IsCommitmentRegistration: a key registration sent to
+// common.RecoveryCommitAddress sets the identity's commitments (CLAUDE.md
+// "Recovery commitment"). OptData is the ADDRESS of the spare key (20 bytes) -
+// its public key stays unpublished until needed - optionally followed by the
+// recovery commitment C = H160(S) (20 bytes).
+//
+// The reserved recipient is an explicit marker (P-05). The registration used
+// to be recognised by its shape - a key, no amount, a Recipient other than the
+// sender - with the Recipient as the spare's address, so any zero-amount
+// transaction that carried a key committed the sender to whatever address it
+// was sent to.
 func (tx *Transaction) IsCommitmentRegistration() bool {
-	r := tx.TxData.Recipient
+	if !bytes.Equal(tx.TxData.Recipient.GetBytes(), common.RecoveryCommitAddress.GetBytes()) {
+		return false
+	}
+	return tx.verifyCommitmentShape() == nil
+}
+
+// verifyCommitmentShape: a transaction to the commitment address is a
+// commitment registration and nothing else.
+func (tx *Transaction) verifyCommitmentShape() error {
 	if len(tx.TxData.Pubkey.GetBytes()) == 0 || !noPolicyFields(tx) {
-		return false
+		return fmt.Errorf("a commitment registration must carry a key and nothing but its commitments")
 	}
-	if n := len(tx.TxData.OptData); n != 0 && n != common.AddressLength {
-		return false
+	opt := tx.TxData.OptData
+	if len(opt) != common.AddressLength && len(opt) != 2*common.AddressLength {
+		return fmt.Errorf("commitment data must be %d or %d bytes, got %d", common.AddressLength, 2*common.AddressLength, len(opt))
 	}
-	if bytes.Equal(r.GetBytes(), tx.TxParam.Sender.GetBytes()) || common.IsRecoveryAddress(r) {
-		return false
+	if bytes.Equal(opt[:common.AddressLength], make([]byte, common.AddressLength)) {
+		return fmt.Errorf("a commitment registration names no spare key address")
 	}
-	if bytes.Equal(r.GetBytes(), make([]byte, common.AddressLength)) {
-		return false
+	return nil
+}
+
+// CommitmentRegistration returns the Recipient and OptData of a registration
+// that commits to the spare key's address and, if given (20 bytes), the
+// recovery commitment.
+func CommitmentRegistration(spare common.Address, recovery []byte) (common.Address, []byte) {
+	opt := append([]byte{}, spare.GetBytes()...)
+	if len(recovery) == common.AddressLength {
+		opt = append(opt, recovery...)
 	}
-	_, err := account.IntDelegatedAccountFromAddress(r)
-	return err != nil
+	return common.RecoveryCommitAddress, opt
 }
 
 // CommitmentValues are what a commitment registration commits to: the spare
 // key's address, and the recovery commitment (zero when absent, meaning
 // "leave it as it is").
 func (tx *Transaction) CommitmentValues() (spare, recovery [common.AddressLength]byte) {
-	spare = tx.TxData.Recipient.ByteValue
-	if len(tx.TxData.OptData) == common.AddressLength {
-		copy(recovery[:], tx.TxData.OptData)
+	opt := tx.TxData.OptData
+	if len(opt) >= common.AddressLength {
+		copy(spare[:], opt[:common.AddressLength])
+	}
+	if len(opt) == 2*common.AddressLength {
+		copy(recovery[:], opt[common.AddressLength:])
 	}
 	return spare, recovery
 }
@@ -159,7 +184,7 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 		if err != nil {
 			return err
 		}
-		if err := verifyAddressOpening(sender, pkAddr, r, acc, asOf); err != nil {
+		if err := verifyAddressOpening(sender, pkAddr, r, acc, asOf, sigName, sigName2); err != nil {
 			return err
 		}
 		secret = r.OldPub
@@ -192,18 +217,17 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 	if err != nil {
 		return err
 	}
-	bind, ok := account.GetRecoveryBind(common.RecoveryBindKey(sender, tag))
-	if !ok || bind.Identity != sender.ByteValue {
-		return fmt.Errorf("no recovery bind for this secret")
+	// The bind with exactly this reveal's payload (P-03): other binds of the
+	// same tag - copies landed first by a front-runner - are not in the way.
+	bind, ok := account.GetRecoveryBind(common.RecoveryBindKey(sender, tag, payload))
+	if !ok || bind.Identity != sender.ByteValue || bind.Payload != payload {
+		return fmt.Errorf("no recovery bind for this secret, key and next commitment")
 	}
 	if height < bind.Height+common.RecoveryBindDelayBlocks {
 		return fmt.Errorf("recovery bind from height %d matures at %d", bind.Height, bind.Height+common.RecoveryBindDelayBlocks)
 	}
 	if height > bind.Height+common.RecoveryBindExpiryBlocks {
 		return fmt.Errorf("recovery bind from height %d expired", bind.Height)
-	}
-	if payload != bind.Payload {
-		return fmt.Errorf("reveal does not match the first bind of this secret")
 	}
 	sig := tx.GetSignature().GetBytes()
 	if len(sig) < 1 || (sig[0] == 0) != pk.Primary {
@@ -218,9 +242,16 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 // verifyAddressOpening checks the authority of an address opening: the account
 // never registered a key nor set a commitment, its address is the hash of the
 // revealed old key, and that key signed the opening. The old key's scheme is
-// verified by name through liboqs, whether or not the chain still uses it -
-// the chain never signs with it again, it only checks this one signature.
-func verifyAddressOpening(sender, newKey common.Address, r AddressReveal, acc account.Account, asOf int64) error {
+// verified by name through liboqs, whether the chain still uses it or retired
+// it (pubkeys.SchemeRetiredAsOf) - the chain never signs with a retired
+// scheme again, it only checks this one signature.
+func verifyAddressOpening(sender, newKey common.Address, r AddressReveal, acc account.Account, asOf int64, sigName, sigName2 string) error {
+	// Only a scheme this chain uses or used (P-08). The revealer used to name
+	// any scheme liboqs knows, so the account's safety rested on the weakest
+	// of them all rather than on the scheme its address was made with.
+	if r.OldScheme != sigName && r.OldScheme != sigName2 && !pubkeys.SchemeRetiredAsOf(r.OldScheme, asOf) {
+		return fmt.Errorf("old signature scheme %q was never used by this chain", r.OldScheme)
+	}
 	if _, err := pubkeys.LoadAddressesAsOf(sender, asOf); err == nil {
 		return fmt.Errorf("%s has registered keys; it recovers through its commitments", sender.GetHex())
 	}
@@ -266,6 +297,12 @@ func hasSpareCover(identity common.Address, asOf int64) bool {
 
 // isCommittedSpare reports whether keyAddr is the spare key address identity
 // committed to, in force at the height the transaction is judged at.
+// IsCommittedSpare is isCommittedSpare for block application, which decides
+// with it whether a newly registered key is voidable (P-01).
+func IsCommittedSpare(identity, keyAddr common.Address, asOf int64) bool {
+	return isCommittedSpare(identity, keyAddr, asOf)
+}
+
 func isCommittedSpare(identity, keyAddr common.Address, asOf int64) bool {
 	acc, ok := account.GetAccountByAddressBytes(identity.GetBytes())
 	if !ok {

@@ -55,13 +55,18 @@ func (a *Account) promoteMatured(height int64) {
 }
 
 // SetCommitments records a registration's spare and recovery commitments
-// (zero = leave that one unchanged). An account's first commitments - set
-// when it is opened - apply at once: there is nothing earlier for an attacker
-// to replace. Every later change is pending: it applies after
-// RecoveryCommitMaturityBlocks, the latest change wins, and a scheme break
-// voids it before then (VoidPendingRecoveryCommits).
-func (a *Account) SetCommitments(spare, c [common.AddressLength]byte, height int64) {
-	if !a.HasCommitments() {
+// (zero = leave that one unchanged). Only the commitments that OPEN an account
+// apply at once: opening means no key of the identity was public before this
+// block, so no signature of it could have been forged and there is nothing
+// earlier for an attacker to replace. The caller decides that from the key
+// registry as of the parent block - having no commitments yet is not enough:
+// an identity that published its keys first (a validator holding both) could
+// have a forger of a not-yet-paused scheme plant commitments in force, out of
+// reach of the break's voiding (P-02). Every other change is pending: it
+// applies after RecoveryCommitMaturityBlocks, the latest change wins, and a
+// scheme break voids it before then (VoidPendingRecoveryCommits).
+func (a *Account) SetCommitments(spare, c [common.AddressLength]byte, height int64, opening bool) {
+	if opening && !a.HasCommitments() {
 		a.SpareCommit, a.RecoveryCommit = spare, c
 		return
 	}
@@ -79,14 +84,14 @@ func (a *Account) ConsumeRecoveryCommit(next [common.AddressLength]byte) {
 	}
 }
 
-func SetAccountCommitments(addr, spare, c [common.AddressLength]byte, height int64) error {
+func SetAccountCommitments(addr, spare, c [common.AddressLength]byte, height int64, opening bool) error {
 	AccountsRWMutex.Lock()
 	defer AccountsRWMutex.Unlock()
 	acc, ok := Accounts.AllAccounts[addr]
 	if !ok {
 		return fmt.Errorf("no account %x to set commitments on", addr)
 	}
-	acc.SetCommitments(spare, c, height)
+	acc.SetCommitments(spare, c, height, opening)
 	Accounts.AllAccounts[addr] = acc
 	return nil
 }
@@ -147,8 +152,8 @@ func SortRecoveryBindKeys(m map[[32]byte]RecoveryBind) [][32]byte {
 	return sortedBindKeys(m)
 }
 
-// AddRecoveryBind keeps the FIRST bind per key: S becomes public only when
-// revealed, so an attacker's bind for the same tag is always the later one.
+// AddRecoveryBind keeps the FIRST bind per key (identity, tag, payload):
+// repeating a bind neither refreshes its expiry nor makes it look younger.
 func AddRecoveryBind(key [32]byte, b RecoveryBind) bool {
 	AccountsRWMutex.Lock()
 	defer AccountsRWMutex.Unlock()

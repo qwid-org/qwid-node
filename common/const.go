@@ -206,7 +206,20 @@ var (
 	// so neither the order of work inside one block nor a registration left
 	// over from an abandoned apply can change a verdict. No record means
 	// height 0: genesis keys and keys stored before the index existed.
+	// A ninth byte 1 marks a voidable registration: the key was authorised
+	// by another key's signature (P-01, pubkeys.StoreRegistration).
 	PubKeyRegistrationHeightDBPrefix = [2]byte{'P', 'R'}
+	// SchemeBreaksDBPrefix (one record) lists the heights of the blocks that
+	// marked a signature scheme as broken (blocks.schemeBroken). A key that
+	// joined an identity on another key's signature less than
+	// RecoveryCommitMaturityBlocks before such a block is void from it on
+	// (pubkeys.VoidedAsOf, P-01). Derived from the chain; trimmed on rewind.
+	SchemeBreaksDBPrefix = [2]byte{'P', 'B'}
+	// RetiredSchemesDBPrefix (one record) lists the signature schemes the
+	// chain replaced, each with the height of the block that replaced it
+	// (pubkeys.SchemeRetiredAsOf, P-08): an address opening accepts a key of
+	// a scheme in force or retired, and of no other. Trimmed on rewind.
+	RetiredSchemesDBPrefix = [2]byte{'P', 'S'}
 	//StakingDBPrefix                    = [2]byte{'S', 'S'}
 	TransactionPoolHashesDBPrefix    = [2]byte{'D', '0'}
 	TransactionToSendHashesDBPrefix  = [2]byte{'E', '0'}

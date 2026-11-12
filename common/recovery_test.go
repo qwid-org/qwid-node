@@ -46,8 +46,12 @@ func TestRecoveryHashesAreDomainSeparatedAndDeterministic(t *testing.T) {
 	if p1 == p2 {
 		t.Fatal("payload does not bind the new key")
 	}
-	if RecoveryBindKey(id, tag) == RecoveryBindKey(next, tag) {
+	if RecoveryBindKey(id, tag, p1) == RecoveryBindKey(next, tag, p1) {
 		t.Fatal("bind key does not bind the identity")
+	}
+	// P-03: a bind with another payload must not collide with the owner's.
+	if RecoveryBindKey(id, tag, p1) == RecoveryBindKey(id, tag, p2) {
+		t.Fatal("bind key does not bind the payload")
 	}
 }
 

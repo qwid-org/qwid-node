@@ -565,6 +565,16 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			return false
 		}
 	}
+	// The commitment address takes commitment registrations only (P-05); a
+	// multisig approval of one repeats its recipient and is judged as an
+	// approval.
+	if bytes.Equal(tx.TxData.Recipient.GetBytes(), common.RecoveryCommitAddress.GetBytes()) &&
+		bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength)) {
+		if err := tx.verifyCommitmentShape(); err != nil {
+			logger.GetLogger().Println("Verify:", err)
+			return false
+		}
+	}
 	b := tx.GetHash().GetBytes()
 	err = tx.CalcHashAndSet()
 	if err != nil {

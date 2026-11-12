@@ -60,6 +60,17 @@ func BeginPendingPoolJournal(height int64) {
 	journalMu.Unlock()
 }
 
+// ResumePendingPoolJournal journals further pool changes of the block at
+// height, after the ones BeginPendingPoolJournal..EndPendingPoolJournal
+// recorded for it: nothing is undone and the sequence continues. For work the
+// same block does on the pools after its transfers (P-04: voiding held
+// commitment changes at a scheme break).
+func ResumePendingPoolJournal(height int64) {
+	journalMu.Lock()
+	journalHeight = height
+	journalMu.Unlock()
+}
+
 // EndPendingPoolJournal stops journalling.
 func EndPendingPoolJournal() {
 	journalMu.Lock()

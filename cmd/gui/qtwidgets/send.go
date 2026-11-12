@@ -251,7 +251,7 @@ func ShowSendPage() *widgets.QTabWidget {
 			if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused &&
 				bytes.Equal(ar.GetBytes(), MainWallet.MainAddress.GetBytes()) {
 				if spare, rec, ok := openingCommitmentsGUI(registerPrimary); ok {
-					ar, scData = spare, rec
+					ar, scData = transactionsDefinition.CommitmentRegistration(spare, rec)
 				}
 			}
 		} else {

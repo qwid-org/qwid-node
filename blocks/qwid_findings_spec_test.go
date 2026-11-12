@@ -123,30 +123,21 @@ func TestQWID38_BlockGasSumIsOverflowSafe(t *testing.T) {
 	}
 }
 
-// QWID-2026-24: DEX LP-rebalance arithmetic must never inject NaN/Inf into
-// consensus state. A share over an empty pool is zero, and a NaN/Inf/overflow
-// product converts to a skip (ok=false), not implementation-defined int64
-// garbage that forks amd64 vs arm64.
+// QWID-2026-24: DEX LP-rebalance arithmetic must never inject garbage into
+// consensus state. It is done in whole base units now (dexShareDelta): a share
+// over an empty pool side is zero, and one that does not fit in int64 is
+// reported (ok=false) and skipped - there is no float left to turn NaN/Inf
+// into implementation-defined int64 values that fork amd64 from arm64.
 func TestQWID24_DexRebalanceArithmeticIsSafe(t *testing.T) {
-	// Empty pool → zero share (not 0/0 = NaN or x/0 = Inf).
-	if s := dexPoolShare(100, 0); s != 0 {
-		t.Fatalf("share over an empty pool = %v, want 0 (QWID-2026-24)", s)
-	}
-	if s := dexPoolShare(0, 0); s != 0 {
-		t.Fatalf("0/0 share = %v, want 0 (QWID-2026-24)", s)
-	}
-	// Normal share is finite.
-	if s := dexPoolShare(-50, 200); s != -0.25 {
-		t.Fatalf("normal share = %v, want -0.25", s)
-	}
-	// Checked conversion rejects the degenerate values a pre-fix pool produced.
-	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 1e30} {
-		if _, ok := checkedRoundToken(v, 8); ok {
-			t.Fatalf("checkedRoundToken accepted a degenerate value %v (QWID-2026-24)", v)
+	for _, pool := range []int64{0, -7} {
+		if d, ok := dexShareDelta(1000, 100, pool); !ok || d != 0 {
+			t.Fatalf("share over the empty pool side %d = %d (%v), want 0 (QWID-2026-24)", pool, d, ok)
 		}
 	}
-	// A normal value converts cleanly.
-	if got, ok := checkedRoundToken(12.0, 0); !ok || got != 12 {
-		t.Fatalf("checkedRoundToken(12,0) = %d,%v; want 12,true", got, ok)
+	if d, ok := dexShareDelta(1000, -50, 200); !ok || d != -250 {
+		t.Fatalf("normal share = %d (%v), want -250", d, ok)
+	}
+	if _, ok := dexShareDelta(math.MaxInt64, math.MaxInt64, 1); ok {
+		t.Fatal("a share beyond int64 was reported as fitting (QWID-2026-24)")
 	}
 }

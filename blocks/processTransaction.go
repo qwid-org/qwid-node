@@ -706,7 +706,7 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 			if mainTx.IsCommitmentRegistration() {
 				// Approved: the commitment change takes effect, its maturity
 				// counting from here.
-				return settleCommitment(mainTx, height)
+				return settleCommitment(mainTx, height, false)
 			}
 			err = AddBalance(address.ByteValue, -amount)
 			if err != nil {
@@ -793,7 +793,7 @@ func ProcessTransactionsEscrow(height int64, tree *transactionsPool.MerkleTree) 
 			} else if tx.IsCommitmentRegistration() {
 				// The escrow delay is over: the commitment change now takes
 				// effect, its maturity counting from here.
-				if err := settleCommitment(tx, height); err != nil {
+				if err := settleCommitment(tx, height, false); err != nil {
 					return err
 				}
 				transactionsPool.RemoveEscrowTransaction(tx.Hash.GetBytes())

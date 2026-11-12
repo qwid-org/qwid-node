@@ -220,14 +220,21 @@ func (bh *BaseHeader) Verify(sigName, sigName2 string, isPaused, isPaused2 bool)
 	if !primary {
 		schemeName = sigName2
 	}
+	// Keys as of the parent block, never the live registry (P-07): the
+	// verdict must not depend on what this node has applied since, and a key
+	// voided by a scheme break (P-01) signs no later header.
+	asOf := bh.Height - 1
+	if asOf < 0 {
+		asOf = 0
+	}
 	var pk common.PubKey
 	if expLen, lerr := oqs.PubKeyLength(schemeName); lerr == nil {
-		pk, err = pubkeys.LoadPubKeyWithPrimaryOfLength(a, primary, expLen)
+		pk, err = pubkeys.LoadPubKeyWithPrimaryOfLengthAsOf(a, primary, expLen, asOf)
 	} else {
 		err = lerr
 	}
 	if err != nil {
-		pk, err = pubkeys.LoadPubKeyWithPrimary(a, primary)
+		pk, err = pubkeys.LoadPubKeyWithPrimaryAsOf(a, primary, asOf)
 	}
 	if err != nil {
 		logger.GetLogger().Println(err)

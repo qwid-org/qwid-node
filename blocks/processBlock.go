@@ -277,9 +277,35 @@ func checkPauseLeavesRegisteredKey(newBlock, lastBlock Block, slot []byte, prima
 	if err != nil {
 		return err
 	}
-	if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, !primary, becomesActive.PubKeyLength); kerr != nil {
-		return fmt.Errorf("refusing to pause %q: the scheme %q that becomes active has no registered key for operator %s - register it first, then pause",
-			cur.SigName, becomesActive.SigName, op.GetHex())
+	// Read as of the parent, like every consensus rule (P-07), and count only
+	// a key this very pause does not void (P-01): a spare vouched for by the
+	// scheme being paused less than a maturity period ago is gone after this
+	// block.
+	if !pubkeys.HasKeySurvivingBreakAt(op, !primary, becomesActive.PubKeyLength, lastBlock.GetHeader().Height, newBlock.GetHeader().Height) {
+		return fmt.Errorf("refusing to pause %q: operator %s has no key of %q, the scheme that becomes active, that outlives the pause - "+
+			"a spare registered with a signature of the paused scheme within the last %d blocks is voided by it; commit to the spare when opening the account, or register it earlier",
+			cur.SigName, op.GetHex(), becomesActive.SigName, common.RecoveryCommitMaturityBlocks)
+	}
+	return nil
+}
+
+// checkOneRevealPerIdentity refuses a block carrying more than one reveal
+// (commitment or address) of the same identity (P-06). Each is verified
+// against the parent state, where they all open the same commitment; only the
+// first can apply, and the others used to fail in the apply pass, after
+// ProcessBlockPubKey had registered the block's keys. Honest producers never
+// build such a block (FilterUnbuildableTransactions).
+func checkOneRevealPerIdentity(txs []transactionsDefinition.Transaction) error {
+	seen := map[[common.AddressLength]byte]bool{}
+	for _, tx := range txs {
+		if !tx.IsRecoveryReveal() {
+			continue
+		}
+		s := tx.GetSenderAddress()
+		if seen[s.ByteValue] {
+			return fmt.Errorf("block carries more than one recovery reveal of %s", s.GetHex())
+		}
+		seen[s.ByteValue] = true
 	}
 	return nil
 }
@@ -425,6 +451,9 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			return 0, 0, err
 		}
 		loaded = append(loaded, poolTx)
+	}
+	if err := checkOneRevealPerIdentity(loaded); err != nil {
+		return 0, 0, err
 	}
 
 	// Phase 2: verify every signature as of the parent block. Pool bodies are

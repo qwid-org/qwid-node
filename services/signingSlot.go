@@ -43,7 +43,8 @@ func SigningSlot(addr common.Address, preferred bool, ownPrimary, ownSecondary [
 		if len(own) == 0 {
 			return false
 		}
-		addrs, err := pubkeys.LoadAddresses(addr)
+		// Only keys in force: one a scheme break voided verifies nowhere.
+		addrs, err := pubkeys.LoadAddressesAsOf(addr, pubkeys.NoHeightLimit)
 		if err != nil {
 			return false
 		}

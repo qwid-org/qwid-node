@@ -12,7 +12,7 @@ import (
 
 type AccountsType struct {
 	AllAccounts map[[common.AddressLength]byte]Account `json:"all_accounts"`
-	// Phase-1 recovery binds keyed by common.RecoveryBindKey(identity, tag).
+	// Phase-1 recovery binds keyed by common.RecoveryBindKey(identity, tag, payload).
 	RecoveryBinds map[[32]byte]RecoveryBind `json:"recovery_binds,omitempty"`
 	Height        int64                     `json:"height"`
 }

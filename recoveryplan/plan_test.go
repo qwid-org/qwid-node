@@ -33,7 +33,7 @@ func TestPlanRecoversTheUnregisteredSlotWithTheCurrentSecret(t *testing.T) {
 	if tag != wantTag || payload != wantPayload {
 		t.Fatal("bind data does not commit to this reveal")
 	}
-	if p.BindKey != common.RecoveryBindKey(w.MainAddress, wantTag) {
+	if p.BindKey != common.RecoveryBindKey(w.MainAddress, wantTag, wantPayload) {
 		t.Fatal("the plan names the wrong bind key")
 	}
 	if !bytes.Equal(p.RevealOptData(), transactionsDefinition.BuildRecoveryRevealOptData(s2, c3)) {
