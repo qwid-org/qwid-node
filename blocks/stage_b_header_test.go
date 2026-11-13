@@ -46,6 +46,11 @@ func signedTestBlock(t *testing.T, k stageBKey, h int64, parent Block, stateRoot
 	}
 	bl.BaseBlock.BaseHeader.BodyHash = body
 	msg := bl.BaseBlock.BaseHeader.GetBytesWithoutSignature()
+	if h > 0 {
+		bl.BaseBlock.BaseHeader.SignatureMessage = NonceMessage(bl.BaseBlock.BlockTimeStamp, k.addr, bl.GetHeader().DelegatedAccount, parent, h)
+	} else {
+		bl.BaseBlock.BaseHeader.SignatureMessage = msg
+	}
 	digest, err := common.CalcHashToByte(msg)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +60,6 @@ func signedTestBlock(t *testing.T, k stageBKey, h int64, parent Block, stateRoot
 		t.Fatal(err)
 	}
 	bl.BaseBlock.BaseHeader.Signature, _ = common.GetSignatureFromBytes(append([]byte{0}, raw...), k.addr)
-	bl.BaseBlock.BaseHeader.SignatureMessage = msg
 	bl.BaseBlock.BlockHeaderHash, err = bl.BaseBlock.BaseHeader.CalcHash()
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +79,7 @@ func headerTestSetup(t *testing.T) (stageBKey, Block) {
 	t.Cleanup(func() { transactionsPool.GlobalMerkleTree = saved })
 	parent := Block{BaseBlock: BaseBlock{BaseHeader: BaseHeader{Height: 9}, BlockTimeStamp: 1_700_000_000, Supply: 1_000_000_000_000}}
 	parent.BlockHash, _ = parent.CalcBlockHash()
+	resealParents[parent.BlockHash] = parent
 	return k, parent
 }
 
@@ -189,6 +194,10 @@ func TestCheckBaseBlockRejectsNegativeRewardPercentage(t *testing.T) {
 }
 
 // resealTestBlock recomputes body hash, signature and hashes after an edit.
+// resealParents lets resealTestBlock rebuild the nonce of a block whose
+// timestamp a test changed; headerTestSetup registers its parent.
+var resealParents = map[common.Hash]Block{}
+
 func resealTestBlock(t *testing.T, k stageBKey, bl Block) Block {
 	t.Helper()
 	body, err := bl.BaseBlock.CalcBodyHash()
@@ -203,7 +212,11 @@ func resealTestBlock(t *testing.T, k stageBKey, bl Block) Block {
 		t.Fatal(err)
 	}
 	bl.BaseBlock.BaseHeader.Signature, _ = common.GetSignatureFromBytes(append([]byte{0}, raw...), k.addr)
-	bl.BaseBlock.BaseHeader.SignatureMessage = msg
+	if bl.GetHeader().Height == 0 {
+		bl.BaseBlock.BaseHeader.SignatureMessage = msg
+	} else if parent, ok := resealParents[bl.GetHeader().PreviousHash]; ok {
+		bl.BaseBlock.BaseHeader.SignatureMessage = NonceMessage(bl.BaseBlock.BlockTimeStamp, k.addr, bl.GetHeader().DelegatedAccount, parent, bl.GetHeader().Height)
+	}
 	bl.BaseBlock.BlockHeaderHash, _ = bl.BaseBlock.BaseHeader.CalcHash()
 	bl.BlockHash, _ = bl.CalcBlockHash()
 	return bl

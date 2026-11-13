@@ -33,8 +33,13 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 		return fmt.Errorf("timestamp must increase")
 	}
 
-	// 2. Not too far in future (allow 30s clock skew)
-	if shouldCheck && (blockTime > currTime+common.MaxBlockForwardInTime) {
+	// 2. Not too far in the future, on EVERY path. The sync path used to skip
+	// this and accept blocks up to MaxBlockTimeInterval ahead of the clock; a
+	// later timestamp lowers the difficulty, so a syncing node could be fed a
+	// chain built faster than the real one (audit 2026-11-12). A historical
+	// block is in the past and always passes.
+	_ = shouldCheck
+	if blockTime > currTime+common.MaxBlockForwardInTime {
 		return fmt.Errorf("timestamp too far in future")
 	}
 
@@ -69,6 +74,10 @@ func VerifyStakeDependent(newBlock, lastBlock Block) error {
 		newBlock.GetHeader().OperatorAccount,
 	) {
 		return fmt.Errorf("block producer is not an eligible top-128 staking node")
+	}
+	if blockHeight > 0 && !ProducerStakeMatured(mustDelegatedAccountID(newBlock.GetHeader().DelegatedAccount), blockHeight) {
+		return fmt.Errorf("%w: the producer's delegated account needs the node minimum staked for %d blocks",
+			ErrStakeNotMatured, common.MinNumberOfBlocksInStake)
 	}
 	if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
 		return fmt.Errorf("oracle proof authorization fails: %w", err)
@@ -137,9 +146,9 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 		logger.GetLogger().Println("lastBlock.BlockHash", lastBlock.BlockHash.GetHex(), newBlock.GetHeader().PreviousHash.GetHex())
 		return nil, fmt.Errorf("last block hash not match to one stored in new block")
 	}
-	// needs to check block and process
-	if newBlock.CheckProofOfSynergy() == false {
-		return nil, fmt.Errorf("proof of synergy fails of block")
+	// The block nonce wins the lottery (F-CONS-01).
+	if err := CheckLottery(newBlock, lastBlock); err != nil {
+		return nil, err
 	}
 	hash, err := newBlock.CalcBlockHash()
 	if err != nil {
@@ -381,6 +390,24 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	// unchanged, only pool hygiene improves, so the next production attempt builds
 	// a clean block from the surviving good transactions.
 	var badTxErr error
+	// An account's own stake/unstake operations are paced
+	// (MinNumberOfBlocksInStake): a second one in the same block always fails
+	// when applied, so it is refused here (audit 2026-11-12 F-TX-04).
+	type stakeOp struct {
+		sender [common.AddressLength]byte
+		n      int
+	}
+	ownStakeOps := map[stakeOp]bool{}
+	// Keys each sender adds in this block, against the per-identity limit:
+	// each registration is verified against the parent alone (F-TX-04).
+	newKeys := map[[common.AddressLength]byte]map[[common.AddressLength]byte]bool{}
+	// Room left in the pending pools for what this block will hold
+	// (F-POOL-01). Settlements in the block are not counted: refusing near
+	// the limit is safe, holding beyond it lost the transfer.
+	heldRoom := map[int]int{
+		heldEscrow:   transactionsPool.PoolTxEscrow.FreeSlots(),
+		heldMultiSig: transactionsPool.PoolTxMultiSign.FreeSlots(),
+	}
 	// Name the pass. This function runs twice for every block — once to verify
 	// it and once to apply it — and the two lines were identical, so a healthy
 	// block looked like it was being processed twice.
@@ -487,6 +514,40 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			continue
 		}
 
+		if pool := heldPoolOf(poolTx); pool != heldNone {
+			if heldRoom[pool] <= 0 {
+				transactionsPool.RemoveBadTransactionByHash(hash, block.GetHeader().Height, tree)
+				if badTxErr == nil {
+					badTxErr = fmt.Errorf("transaction %x would be held in a full %s pool",
+						hash[:8], map[int]string{heldEscrow: "escrow", heldMultiSig: "multisig"}[pool])
+				}
+				continue
+			}
+			heldRoom[pool]--
+		}
+		if pk := poolTx.TxData.Pubkey; len(pk.GetBytes()) > 0 {
+			sender := poolTx.GetSenderAddress()
+			if pkAddr, aerr := common.PubKeyToAddress(pk.GetBytes(), pk.Primary); aerr == nil &&
+				!pubkeys.IsRegisteredUnder(sender, pkAddr) {
+				held := 0
+				if cur, lerr := pubkeys.LoadAddressesAsOf(sender, lastBlock.GetHeader().Height); lerr == nil {
+					held = len(cur)
+				}
+				if newKeys[sender.ByteValue] == nil {
+					newKeys[sender.ByteValue] = map[[common.AddressLength]byte]bool{}
+				}
+				newKeys[sender.ByteValue][pkAddr.ByteValue] = true
+				if held+len(newKeys[sender.ByteValue]) > common.MaxKeysPerIdentity {
+					transactionsPool.RemoveBadTransactionByHash(hash, block.GetHeader().Height, tree)
+					if badTxErr == nil {
+						badTxErr = fmt.Errorf("transaction %x registers a key beyond the %d keys of %s",
+							hash[:8], common.MaxKeysPerIdentity, sender.GetHex())
+					}
+					continue
+				}
+			}
+		}
+
 		fee, feeErr := poolTx.CalcFee()
 		if feeErr != nil {
 			return 0, 0, feeErr
@@ -533,6 +594,17 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			}
 		} else {
 			n, err = account.IntDelegatedAccountFromAddress(recipientAddress)
+		}
+		if err == nil && n > 0 && n < 256 && !isThirdPartyLock(poolTx) {
+			op := stakeOp{sender: address.ByteValue, n: n}
+			if ownStakeOps[op] {
+				transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
+				if badTxErr == nil {
+					badTxErr = fmt.Errorf("second staking operation of %s on delegated account %d in one block: CheckBlockTransfers", address.GetHex(), n)
+				}
+				continue
+			}
+			ownStakeOps[op] = true
 		}
 		if err == nil && n < 512 { // delegated account
 			stakingAcc := account.GetStakingAccountByAddressBytes(address.GetBytes(), n%256)

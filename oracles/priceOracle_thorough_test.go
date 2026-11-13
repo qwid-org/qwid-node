@@ -9,10 +9,10 @@ import (
 )
 
 // The PRICE oracle turns independent submissions into one number the chain
-// commits to, via a trimmed median: drop the lowest and the highest, then take
-// the median of the rest. That trimming is the defence against a single
-// validator dragging the price, so exactly where it applies — and where it
-// stops applying — is what these tests pin.
+// commits to. It is the stake-weighted median (audit 2026-11-12 F-CONS-02,
+// weighted_median_test.go). These tests stake every account equally, where the
+// weighted median equals the former trimmed median (drop the lowest and the
+// highest, then the median of the rest), and pin those results.
 
 func resetPrice(t *testing.T) {
 	t.Helper()

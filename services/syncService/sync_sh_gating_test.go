@@ -189,7 +189,9 @@ func signedForkBlockWithTxs(t *testing.T, h int64, parent blocks.Block, txs []co
 		t.Fatal(err)
 	}
 	bl.BaseBlock.BaseHeader.Signature = sig
-	bl.BaseBlock.BaseHeader.SignatureMessage = msg
+	// The block nonce (F-CONS-01); difficulty 7 wins every second.
+	bl.BaseBlock.BaseHeader.SignatureMessage = blocks.NonceMessage(bl.GetBlockTimeStamp(), op,
+		bl.GetHeader().DelegatedAccount, parent, h)
 	hash, err := bl.CalcBlockHash()
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +219,7 @@ func TestRequestedShWithUnsignedForkDoesNotRewind(t *testing.T) {
 	fake.BlockHash, _ = fake.CalcBlockHash()
 	recordHeaderRequest(requestedPeer, 20, 40)
 
-	OnMessage(requestedPeer, shMessage([]int64{29, 31}, []blocks.Block{fake, unsignedTestBlock(t, 31, fake.BlockHash, 1, 0)}))
+	OnMessage(requestedPeer, shMessage([]int64{29, 30, 31}, []blocks.Block{fake, unsignedTestBlock(t, 30, fake.BlockHash, 1, 0), unsignedTestBlock(t, 31, fake.BlockHash, 1, 0)}))
 
 	assertChainIntact(t, 30)
 }
@@ -255,7 +257,7 @@ func TestRequestedShWithSignedForkRewindsToAncestor(t *testing.T) {
 	fork := signedForkBlock(t, 29, chain[28])
 	recordHeaderRequest(requestedPeer, 20, 40)
 
-	OnMessage(requestedPeer, shMessage([]int64{29, 31}, []blocks.Block{fork, unsignedTestBlock(t, 31, fork.BlockHash, 1, 0)}))
+	OnMessage(requestedPeer, shMessage([]int64{29, 30, 31}, []blocks.Block{fork, unsignedTestBlock(t, 30, fork.BlockHash, 1, 0), unsignedTestBlock(t, 31, fork.BlockHash, 1, 0)}))
 
 	if h := common.GetHeight(); h > 28 || h < 20 {
 		t.Fatalf("height after a verified fork at 29 = %d, want the ancestor 28 (or the nearest snapshot below)", h)
@@ -274,7 +276,7 @@ func TestRequestedShWithDeeperForkAsksForEarlierHeaders(t *testing.T) {
 	lastHeaderRequestMutex.Unlock()
 	out := withSyncSendChannel(t)
 
-	OnMessage(requestedPeer, shMessage([]int64{29, 31}, []blocks.Block{other, unsignedTestBlock(t, 31, other.BlockHash, 1, 0)}))
+	OnMessage(requestedPeer, shMessage([]int64{29, 30, 31}, []blocks.Block{other, unsignedTestBlock(t, 30, other.BlockHash, 1, 0), unsignedTestBlock(t, 31, other.BlockHash, 1, 0)}))
 
 	assertChainIntact(t, 30)
 	select {

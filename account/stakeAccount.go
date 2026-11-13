@@ -146,9 +146,8 @@ func stake(accb []byte, amount int64, height int64, stakingTime int64, delegated
 		return fmt.Errorf("locked amount cannot be larger than amount")
 	}
 	if !thirdParty {
-		hmax := lastStakeBlock(acc)
-		if height < hmax+common.MinNumberOfBlocksInStake {
-			return fmt.Errorf("staking must be delayed %v blocks", common.MinNumberOfBlocksInStake)
+		if err := stakePacingRefusal(acc, height); err != nil {
+			return err
 		}
 	}
 	// in order for someone else not to spoil to be operator
@@ -190,6 +189,88 @@ func stake(accb []byte, amount int64, height int64, stakingTime int64, delegated
 	return nil
 }
 
+// stakePacingRefusal: an account's own stake and unstake operations are at
+// least MinNumberOfBlocksInStake blocks apart.
+func stakePacingRefusal(acc StakingAccount, height int64) error {
+	if height < lastStakeBlock(acc)+common.MinNumberOfBlocksInStake {
+		return fmt.Errorf("staking must be delayed %v blocks", common.MinNumberOfBlocksInStake)
+	}
+	return nil
+}
+
+// unstakeRefusal says why acc cannot unstake amount (negative) at height, or
+// returns the indices of its locks that have fully released by then.
+func unstakeRefusal(acc StakingAccount, amount, height int64) ([]int, error) {
+	if err := stakePacingRefusal(acc, height); err != nil {
+		return nil, err
+	}
+	if acc.StakedBalance+amount < 0 {
+		return nil, fmt.Errorf("insufficient staked balance")
+	}
+	locked := int64(0)
+	released := []int{}
+	for ind := range acc.LockedAmount {
+		lock := acc.LockedAmount[ind] - (height-acc.LockedInitBlock[ind])*acc.ReleasePerBlock[ind]
+		if lock <= 0 {
+			lock = 0
+			released = append(released, ind)
+		}
+		locked += lock
+	}
+	if acc.StakedBalance-locked+amount < 0 {
+		return nil, fmt.Errorf("insufficient staked balance after locking")
+	}
+	return released, nil
+}
+
+// StakeChangeRefusal says why the owner's own stake (amount > 0) or unstake
+// (amount < 0) into delegated account n would fail at height, or nil. It is
+// the rule Stake and Unstake apply, exposed so that the block check refuses
+// exactly what the apply pass refuses: a transaction passing the check and
+// failing when applied invalidates a block every node has already received
+// (audit 2026-11-12 F-TX-04). A locked stake paid into someone else's account
+// (StakeLockedFor) is not paced and is not judged here.
+func StakeChangeRefusal(accb []byte, amount, height int64, n int) error {
+	if amount == 0 {
+		return fmt.Errorf("a staking transaction needs an amount")
+	}
+	acc := GetStakingAccountByAddressBytes(accb, n)
+	if amount > 0 {
+		return stakePacingRefusal(acc, height)
+	}
+	if !bytes.Equal(acc.Address[:], accb) {
+		return fmt.Errorf("no account present in unstaking account")
+	}
+	_, err := unstakeRefusal(acc, amount, height)
+	return err
+}
+
+// MaturedStakeInDelegatedAccount is what delegated account n holds staked,
+// minus the deposits made in the window blocks up to and including height.
+// Withdrawals count at once; only fresh money waits.
+func MaturedStakeInDelegatedAccount(n int, height, window int64) int64 {
+	StakingRWMutex.RLock()
+	defer StakingRWMutex.RUnlock()
+	if n <= 0 || n >= len(StakingAccounts) {
+		return 0
+	}
+	total := int64(0)
+	for _, sa := range StakingAccounts[n].AllStakingAccounts {
+		total += sa.StakedBalance
+		for h, details := range sa.StakingDetails {
+			if h <= 0 || h <= height-window || h > height {
+				continue
+			}
+			for _, d := range details {
+				if d.Amount > 0 {
+					total -= d.Amount
+				}
+			}
+		}
+	}
+	return total
+}
+
 func Unstake(accb []byte, amount int64, height int64, stakingTime int64, delegatedAccount int) error {
 	if len(accb) != common.AddressLength {
 		return fmt.Errorf("wrong address length, must be %v", common.AddressLength)
@@ -203,27 +284,11 @@ func Unstake(accb []byte, amount int64, height int64, stakingTime int64, delegat
 	if amount >= 0 {
 		return fmt.Errorf("unstaked amount has to be larger than 0")
 	}
-	hmax := lastStakeBlock(acc)
-	if height < hmax+common.MinNumberOfBlocksInStake {
-		return fmt.Errorf("staking must be delayed %v blocks", common.MinNumberOfBlocksInStake)
+	toRemoveLockedInd, err := unstakeRefusal(acc, amount, height)
+	if err != nil {
+		return err
 	}
-	if acc.StakedBalance+amount < 0 {
-		return fmt.Errorf("insufficient staked balance")
-	}
-	locked := int64(0)
 	numLocked := len(acc.LockedAmount)
-	toRemoveLockedInd := []int{}
-	for ind := 0; ind < numLocked; ind++ {
-		lock := acc.LockedAmount[ind] - (height-acc.LockedInitBlock[ind])*acc.ReleasePerBlock[ind]
-		if lock <= 0 {
-			lock = 0
-			toRemoveLockedInd = append(toRemoveLockedInd, ind)
-		}
-		locked += lock
-	}
-	if acc.StakedBalance-locked+amount < 0 {
-		return fmt.Errorf("insufficient staked balance after locking")
-	}
 	// AC-H1: rebuild the three parallel slices excluding the marked indices.
 	// The previous code removed by original index in a loop, but each removal
 	// shifts later elements, so subsequent indices were wrong (dropping the

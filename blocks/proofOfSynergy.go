@@ -2,27 +2,25 @@ package blocks
 
 import (
 	"github.com/qwid-org/qwid-node/common"
-	"math"
 	"math/big"
 )
 
-func CheckProofOfSynergy(block BaseBlock) bool {
-	head := block.BaseHeader
-	h := block.BlockHeaderHash
-	return validProof(h, head.Difficulty)
-}
-
+// validProof reports whether a lottery ticket passes the difficulty: the
+// 128-bit AND of its halves, num, satisfies log2(num) <= 128 - (difficulty/10)/10.
+// It is decided in integers - num^10 <= 2^(1280 - difficulty/10) - where the
+// float log2 it replaces could round differently across architectures at the
+// threshold (audit 2026-11-12 F-CONS-04).
 func validProof(hash common.Hash, difficulty int32) bool {
-	hh := hash.GetBytes()
-	byteAnd := make([]byte, 16)
-	for i := 0; i < 16; i++ {
-		byteAnd[i] = hh[i] & hh[i+16]
+	num := lotteryValue(hash)
+	if num.Sign() == 0 {
+		return true
 	}
-	num := new(big.Int).SetBytes(byteAnd)
-	f, _ := new(big.Float).SetInt(num).Float64()
-	proof := math.Log2(f)
-	minimalProof := minimalHashProof(difficulty)
-	return proof <= minimalProof
+	e := 1280 - int64(difficulty/10)
+	if e < 0 {
+		return false
+	}
+	lhs := new(big.Int).Exp(num, big.NewInt(10), nil)
+	return lhs.Cmp(new(big.Int).Lsh(big.NewInt(1), uint(e))) <= 0
 }
 
 func minimalHashProof(difficulty int32) float64 {

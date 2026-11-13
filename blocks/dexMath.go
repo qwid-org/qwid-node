@@ -159,3 +159,15 @@ func dexOrderAmounts(operation int, coins, tokens, coinPool, tokenPool int64, to
 	}
 	return 0, 0, 0, fmt.Errorf("wrong operation on dex")
 }
+
+// dexCoversReserved reports whether a sender holding balance can take a DEX
+// order moving amountCoin (negative: pays) and still cover reserved - what its
+// other transactions of the same block will debit when the block's transfers
+// are applied (audit 2026-11-12 F-TX-04). An order that pays the sender is
+// always covered.
+func dexCoversReserved(balance, amountCoin, reserved int64) bool {
+	if amountCoin >= 0 {
+		return true
+	}
+	return balance+amountCoin >= reserved
+}

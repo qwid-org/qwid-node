@@ -343,19 +343,73 @@ func registerPubKey(pk common.PubKey, height int64, voidable bool) error {
 		}
 		replaced = pubkeys.RegistrationRecord(pk.Address)
 	}
+	// The key is bound to ANOTHER identity (audit 2026-11-12 F-KEY-01). A
+	// voidable registration is one made on another key's signature, without a
+	// signature of this key: it cannot take a key from where it is, and is
+	// dropped - the transaction stays in the block. (Verify refuses it against
+	// the parent state; this is the case of both registrations in one block.)
+	// Any other registration is signed with the key itself and takes it over.
+	var takenFrom *common.Address
+	if !held {
+		if prev, err := pubkeys.LoadPubKey(pk.Address.GetBytes()); err == nil &&
+			!bytes.Equal(prev.MainAddress.GetBytes(), pk.MainAddress.GetBytes()) {
+			if voidable {
+				logger.GetLogger().Printf("key %s stays with identity %s: the registration by %s carries no signature of the key",
+					pk.Address.GetHex(), prev.MainAddress.GetHex(), pk.MainAddress.GetHex())
+				return nil
+			}
+			from := prev.MainAddress
+			takenFrom = &from
+			replaced = pubkeys.RegistrationRecord(pk.Address)
+		}
+	}
 	if err := StorePubKey(pk); err != nil {
 		return err
 	}
 	if err := StorePubKeyInPatriciaTrie(pk); err != nil {
 		return err
 	}
-	// Not best effort, unlike the journal: a key without its record would
-	// count as registered at genesis and pass every as-of check.
 	if err := pubkeys.StoreRegistration(pk.Address, height, voidable); err != nil {
 		return err
 	}
+	if takenFrom != nil {
+		journalPubKeyTakeover(height, pk.Address, pk.MainAddress, *takenFrom, replaced)
+		return nil
+	}
 	journalPubKeyRegistration(height, pk.Address, pk.MainAddress, replaced)
 	return nil
+}
+
+// takeoverMark separates a takeover journal entry (main, mark, previous
+// identity, previous registration record) from the two older shapes, which are
+// 20, 28 or 29 bytes long.
+const takeoverMark = 0xFF
+
+func journalPubKeyTakeover(height int64, derived, mainAddr, prevMain common.Address, prevRec []byte) {
+	v := append(append([]byte{}, mainAddr.GetBytes()...), takeoverMark)
+	v = append(append(v, prevMain.GetBytes()...), prevRec...)
+	if err := database.MainDB.Put(pubKeyJournalKey(height, derived), v); err != nil {
+		logger.GetLogger().Printf("WARNING: could not journal the takeover of key %s at height %d: %v",
+			derived.GetHex(), height, err)
+	}
+}
+
+// undoPubKeyTakeover gives a key back to the identity it was taken from.
+func undoPubKeyTakeover(derived, mainAddr, prevMain common.Address, prevRec []byte) {
+	removeFromKeyList(derived, mainAddr)
+	if pk, err := pubkeys.LoadPubKey(derived.GetBytes()); err == nil {
+		pk.MainAddress = prevMain
+		if serr := StorePubKey(pk); serr != nil {
+			logger.GetLogger().Println("cannot restore the binding of", derived.GetHex(), ":", serr)
+		}
+	}
+	if len(prevRec) > 0 {
+		if err := pubkeys.RestoreRegistrationRecord(derived, prevRec); err != nil {
+			logger.GetLogger().Println("cannot restore the registration record of", derived.GetHex(), ":", err)
+		}
+	} else {
+		_ = pubkeys.DeleteRegistrationHeight(derived)
+	}
 }
 
 // pubKeyJournalKey builds the registration-journal key for one derived address
@@ -412,6 +466,13 @@ func UnregisterPubKeysAtHeight(height int64) {
 // undoPubKeyRegistration reverses one journalled registration: a new key is
 // unregistered, a revived one gets back the record it had while voided.
 func undoPubKeyRegistration(derived common.Address, journalled []byte) {
+	if len(journalled) >= 2*common.AddressLength+1 && journalled[common.AddressLength] == takeoverMark {
+		var mainAddr, prevMain common.Address
+		copy(mainAddr.ByteValue[:], journalled[:common.AddressLength])
+		copy(prevMain.ByteValue[:], journalled[common.AddressLength+1:2*common.AddressLength+1])
+		undoPubKeyTakeover(derived, mainAddr, prevMain, journalled[2*common.AddressLength+1:])
+		return
+	}
 	if replaced := journalled[common.AddressLength:]; len(replaced) > 0 {
 		if err := pubkeys.RestoreRegistrationRecord(derived, replaced); err != nil {
 			logger.GetLogger().Println("cannot restore the registration record of", derived.GetHex(), ":", err)
@@ -482,7 +543,12 @@ func unregisterPubKey(derived, mainAddr common.Address) {
 	_ = database.MainDB.Delete(append(common.PubKeyMarshalDBPrefix[:], derived.GetBytes()...))
 	pubkeys.InvalidatePubKeyCache(derived.GetBytes())
 	_ = pubkeys.DeleteRegistrationHeight(derived)
+	removeFromKeyList(derived, mainAddr)
+}
 
+// removeFromKeyList drops derived from mainAddr's key list, rebuilding its
+// trie or removing it when no key is left.
+func removeFromKeyList(derived, mainAddr common.Address) {
 	addrs, err := pubkeys.LoadAddresses(mainAddr)
 	if err != nil {
 		return

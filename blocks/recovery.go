@@ -102,10 +102,14 @@ func processRecoveryTransaction(tx transactionsDefinition.Transaction, height, f
 		switch {
 		case acc.TransactionDelay > 0:
 			tx.Height = height
-			transactionsPool.AddEscrowTransaction(tx)
+			if !transactionsPool.AddEscrowTransaction(tx) {
+				return true, fmt.Errorf("%w: commitment change %x", errPendingPoolFull, tx.Hash.GetBytes()[:8])
+			}
 		case acc.MultiSignNumber > 0:
 			tx.Height = height
-			transactionsPool.AddMultiSignTransaction(tx)
+			if !transactionsPool.AddMultiSignTransaction(tx) {
+				return true, fmt.Errorf("%w: commitment change %x", errPendingPoolFull, tx.Hash.GetBytes()[:8])
+			}
 		default:
 			if err := settleCommitment(tx, height, opensAccount(sender, height)); err != nil {
 				return true, err

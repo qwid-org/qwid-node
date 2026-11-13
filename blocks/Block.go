@@ -66,8 +66,7 @@ func (tb Block) GetBytes() []byte {
 }
 
 func (tb Block) GetBytesForHash() []byte {
-	b := tb.BaseBlock.GetBytes()
-	return b
+	return tb.BaseBlock.bytesForHash()
 }
 
 func (tb Block) GetFromBytes(b []byte) (Block, error) {
@@ -106,8 +105,8 @@ func (tb Block) CalcBlockHash() (common.Hash, error) {
 	return hash, nil
 }
 
-func (tb Block) CheckProofOfSynergy() bool {
-	return CheckProofOfSynergy(tb.BaseBlock)
+func (tb Block) CheckProofOfSynergy(parent Block) bool {
+	return CheckLottery(tb, parent) == nil
 }
 
 func (b Block) GetTransactionsHashes(height int64) ([]common.Hash, error) {

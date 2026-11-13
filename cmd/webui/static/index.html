@@ -687,12 +687,16 @@ contract Coin {
     // Can only be called by the contract creator
     function mint(address receiver, int64 amount) public {
         require(msg.sender == minter, "only minter can mint");
+        require(amount &gt; 0, "amount must be positive");
         balances[receiver] += amount;
     }
 
     // Sends an amount of existing coins
     // from any caller to an address
     function transfer(address receiver, int64 amount) public {
+        // A negative amount would pass the balance check below and move
+        // tokens from the receiver to the caller.
+        require(amount &gt; 0, "amount must be positive");
         require(amount &lt;= balances[msg.sender], "insufficient balance");
 
         balances[msg.sender] -= amount;

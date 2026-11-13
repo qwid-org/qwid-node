@@ -141,14 +141,3 @@ func TestLoadEscrowPoolRejectsInvalidSignature(t *testing.T) {
 	// the DB so a restart under the correct scheme can verify and load it.
 	assert.True(t, transactionsDefinition.CheckFromDBPoolTx(common.EscrowPoolDBPrefix[:], tx.GetHash().GetBytes()))
 }
-
-// Pins the decision that reloading a persisted transaction does not apply the
-// pause gate. Reintroducing it makes a restarted node drop pending escrow and
-// multisig entries that still-running nodes keep — a divergence decided by who
-// restarted, which is what persisting them was meant to prevent.
-func TestPersistedTxVerificationIgnoresPauseFlags(t *testing.T) {
-	isPaused, isPaused2 := persistedTxPauseFlags()
-	if isPaused || isPaused2 {
-		t.Fatalf("persisted-transaction verification applies the pause gate (%v, %v)", isPaused, isPaused2)
-	}
-}

@@ -302,38 +302,52 @@ func (fa *frameAssembler) push(r []byte) (payloads [][]byte, violation bool) {
 		r = r[n:]
 	}
 	fa.buf = append(fa.buf, r...)
-	for len(fa.buf) >= frameHeaderLen {
-		if !bytes.Equal(fa.buf[:4], common.MessageInitialization[:]) {
-			logger.GetLogger().Println("wrong MessageInitialization", fa.buf[:4], "should be", common.MessageInitialization[:])
+	// off is how far into fa.buf complete frames have been taken. The buffer
+	// is compacted once, after the loop, and only if something was taken:
+	// copying everything buffered on every read made a frame of n bytes cost
+	// n*n/32KB of copying - 18 GB for a 16 MB frame arriving in 16 KB records
+	// (audit 2026-11-12 F-NET-01). Payloads are copies, so they stay valid
+	// while the buffer is reused.
+	off := 0
+	for len(fa.buf)-off >= frameHeaderLen {
+		head := fa.buf[off:]
+		if !bytes.Equal(head[:4], common.MessageInitialization[:]) {
+			logger.GetLogger().Println("wrong MessageInitialization", head[:4], "should be", common.MessageInitialization[:])
 			fa.broken = true
 			fa.buf = nil
 			return payloads, true
 		}
-		size := int64(binary.BigEndian.Uint32(fa.buf[4:frameHeaderLen]))
+		size := int64(binary.BigEndian.Uint32(head[4:frameHeaderLen]))
 		if size > int64(MaxMessageSizeForTopic(fa.topic)) {
 			logger.GetLogger().Printf("error: too long message received on topic %c%c: %d bytes, cap is %d",
 				fa.topic[0], fa.topic[1], size, MaxMessageSizeForTopic(fa.topic))
 			violation = true
-			rest := fa.buf[frameHeaderLen:]
+			rest := head[frameHeaderLen:]
 			n := min(size, int64(len(rest)))
 			fa.skip = size - n
-			fa.buf = append([]byte(nil), rest[n:]...)
+			off += frameHeaderLen + int(n)
 			continue
 		}
 		if size == 0 {
 			violation = true
-			fa.buf = fa.buf[frameHeaderLen:]
+			off += frameHeaderLen
 			continue
 		}
-		if int64(len(fa.buf)) < frameHeaderLen+size {
+		if int64(len(head)) < frameHeaderLen+size {
 			break
 		}
-		end := frameHeaderLen + size
-		payloads = append(payloads, fa.buf[frameHeaderLen:end:end])
-		fa.buf = fa.buf[end:]
+		end := frameHeaderLen + int(size)
+		payloads = append(payloads, append([]byte(nil), head[frameHeaderLen:end]...))
+		off += end
 	}
-	// Detach the remainder: returned payloads alias the old backing array.
-	fa.buf = append([]byte(nil), fa.buf...)
+	if off > 0 {
+		rest := fa.buf[off:]
+		if len(rest) == 0 {
+			fa.buf = nil // do not pin a large buffer behind an idle connection
+		} else {
+			fa.buf = append(fa.buf[:0], rest...)
+		}
+	}
 	return payloads, violation
 }
 
@@ -394,7 +408,8 @@ func acceptedReceiveLoop(topic [2]byte, key [4]byte, realIP [4]byte, conn net.Co
 				conn.Close()
 				return
 			}
-			continue
+			// The valid frames of the same read are still dispatched, as the
+			// outbound loop does (F-NET-03).
 		}
 		for _, m := range payloads {
 			var head [2]byte

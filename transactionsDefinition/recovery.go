@@ -166,7 +166,11 @@ func (tx *Transaction) verifyRecoveryReveal(hash []byte, sigName, sigName2 strin
 	if !bytes.Equal(pk.Address.GetBytes(), pkAddr.GetBytes()) {
 		return fmt.Errorf("revealed key's address does not derive from it")
 	}
-	if _, err := pubkeys.LoadPubKeyAsOf(pkAddr.GetBytes(), asOf); err == nil {
+	// Registered to the sender already: nothing to recover with it. Registered
+	// to ANOTHER identity does not block the reveal - it is signed with the
+	// revealed key, which whoever bound it elsewhere could not do (F-KEY-01).
+	if stored, err := pubkeys.LoadPubKeyAsOf(pkAddr.GetBytes(), asOf); err == nil &&
+		bytes.Equal(stored.MainAddress.GetBytes(), sender.GetBytes()) {
 		return fmt.Errorf("revealed key is already registered")
 	}
 	height := recoveryHeight(asOf)

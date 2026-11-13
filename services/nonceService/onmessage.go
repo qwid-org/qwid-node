@@ -2,7 +2,9 @@ package nonceServices
 
 import (
 	"bytes"
+	"errors"
 	"runtime/debug"
+	"time"
 
 	"github.com/qwid-org/qwid-node/logger"
 
@@ -243,12 +245,16 @@ func OnMessage(addr [4]byte, m []byte) {
 			transactionsHashes)
 
 		if err != nil {
-			logger.GetLogger().Println(err)
+			// Not our second, or our stake has not matured: the normal case,
+			// once a second - nothing to report.
+			if !errors.Is(err, blocks.ErrNoWinningSecond) && !errors.Is(err, blocks.ErrStakeNotMatured) {
+				logger.GetLogger().Println(err)
+			}
 			return
 
 		}
 
-		if newBlock.CheckProofOfSynergy() {
+		if newBlock.CheckProofOfSynergy(lastBlock) {
 			_, _, err := blocks.CheckBlockTransfers(newBlock, lastBlock, merkleTrie, false)
 			if err == nil {
 				services.BroadcastBlock(newBlock)
@@ -307,6 +313,18 @@ func OnMessage(addr [4]byte, m []byte) {
 				// the sync service, which resolves forks from verified headers.
 				if !bytes.Equal(newBlock.GetHeader().PreviousHash.GetBytes(), lastBlock.BlockHash.GetBytes()) {
 					logger.GetLogger().Println("block does not build on our tip - leaving it to sync")
+					return
+				}
+				// Adoption timing (F-CONS-01): a block from the near future
+				// waits for its second, so stamping ahead buys no head start;
+				// a block stamped long before it arrived was held back, and is
+				// left to sync.
+				if wait, adopt := liveAdoption(newBlock.GetBlockTimeStamp(), common.GetCurrentTimeStampInSecond()); !adopt {
+					logger.GetLogger().Printf("block %d is stamped %ds ago - leaving it to sync", newBlock.GetHeader().Height,
+						common.GetCurrentTimeStampInSecond()-newBlock.GetBlockTimeStamp())
+					return
+				} else if wait > 0 {
+					time.AfterFunc(time.Duration(wait)*time.Second, func() { OnMessage(addr, m) })
 					return
 				}
 				merkleTrie, err := blocks.CheckBaseBlock(newBlock, lastBlock, true)
@@ -395,4 +413,23 @@ func OnMessage(addr [4]byte, m []byte) {
 		}
 	default:
 	}
+}
+
+// liveAdoption decides when a block received live for the next height is
+// processed: now (wait 0), after wait seconds (stamped ahead of our clock but
+// within the tolerance), or not on the live path at all (stamped more than the
+// tolerance ago - it was held back; sync still takes it if its chain is
+// longer). A block beyond the tolerance is processed at once so that
+// validation refuses it.
+func liveAdoption(ts, now int64) (wait int64, adopt bool) {
+	f := common.MaxBlockForwardInTime
+	switch {
+	case ts > now+f:
+		return 0, true
+	case ts > now:
+		return ts - now, true
+	case ts < now-f:
+		return 0, false
+	}
+	return 0, true
 }

@@ -60,7 +60,7 @@ func TestQWID13_ShortDexOptDataIsErrorNotPanic(t *testing.T) {
 				}
 			}()
 			tx := gasSpecTx(t, testAddress(3), 30000, 1, make([]byte, n))
-			if _, _, _, _, _, err := GenerateOptDataDEX(tx, 3); err == nil {
+			if _, _, _, _, _, err := GenerateOptDataDEX(tx, 3, 0); err == nil {
 				t.Fatalf("GenerateOptDataDEX accepted %d-byte OptData; exactly 8 required", n)
 			}
 		}()

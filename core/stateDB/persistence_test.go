@@ -50,8 +50,9 @@ func TestStateMarshalRoundTrip(t *testing.T) {
 	if got.StatesHashes[a][common.Hash{0x01}] != (common.Hash{0x02}) {
 		t.Fatal("storage slot mismatch")
 	}
-	if string(got.States[common.Hash{0x03}]) != string([]byte{0xDE, 0xAD, 0xBE, 0xEF}) {
-		t.Fatalf("states mismatch: %v", got.States[common.Hash{0x03}])
+	// Keccak preimages are not persisted (audit 2026-11-12 F-EVM-01).
+	if len(got.States) != 0 {
+		t.Fatalf("preimages survived the round trip: %v", got.States)
 	}
 	if got.Balances[a][a] != 500 {
 		t.Fatal("token balance mismatch")

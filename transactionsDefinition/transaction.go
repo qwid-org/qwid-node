@@ -455,8 +455,19 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			return false
 		}
 	}
-	if tx.GetData().Amount < 0 && err != nil && n < 512 {
+	// A negative amount is an unstake (delegated account 1..255) or a reward
+	// withdrawal (256..511) and nothing else. Addressed to the DEX it used to
+	// pass, and the pool and the block check then counted it as a CREDIT of
+	// the sender, hiding transfers the sender could not pay (audit 2026-11-12
+	// F-TX-03).
+	if tx.GetData().Amount < 0 && !(err == nil && n > 0 && n < 512) {
 		logger.GetLogger().Println("transaction amount has to be larger or equal 0")
+		return false
+	}
+	// An account is escrow or multisig, never both: such a transaction can
+	// never apply (F-TX-04).
+	if tx.TxData.EscrowTransactionsDelay > 0 && tx.TxData.MultiSignNumber > 0 {
+		logger.GetLogger().Println("an account cannot be made both escrow and multisig")
 		return false
 	}
 	// If operator staking transaction, verify both pubkeys are registered
@@ -713,9 +724,35 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// transaction that carried a key.
 		bootstrapAttempt := false
 		bootstrapSpare := false
+		// foreign: the key is registered, but under ANOTHER identity. Binding a
+		// key needs no proof of holding it when another key of the identity
+		// vouches for it, so anyone could bind somebody else's key to itself -
+		// and, the registry holding one identity per key, keep its owner from
+		// ever registering it: a first registration, a committed spare or a
+		// recovery key seen in the mempool (audit 2026-11-12 F-KEY-01). Such a
+		// binding therefore yields to a registration SIGNED WITH THE KEY ITSELF
+		// (the self-registration and committed-spare paths below), and is
+		// refused where no such proof exists (the vouched path).
+		foreign := false
 		if stored, lerr := pubkeys.LoadPubKeyAsOf(pkAddr.GetBytes(), asOf); lerr == nil {
-			addressMatch = bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes())
-			resolvedFromRegistry = true
+			if bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes()) {
+				addressMatch = true
+				resolvedFromRegistry = true
+			} else {
+				foreign = true
+			}
+		}
+		// The per-identity key limit, here and not only when the block is
+		// applied (F-TX-04): a registration over the limit used to verify and
+		// then invalidate the block that carried it.
+		if !resolvedFromRegistry {
+			if held, herr := pubkeys.LoadAddressesAsOf(senderAddr, asOf); herr == nil && len(held) >= common.MaxKeysPerIdentity {
+				if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+					logger.GetLogger().Printf("Verify: sender %s already holds the maximum %d keys%s",
+						senderAddr.GetHex(), common.MaxKeysPerIdentity, suppressedNote(skipped))
+				}
+				return false
+			}
 		}
 		// Committed spare: a pure registration of exactly the key whose
 		// address the identity committed to, signed by that key itself. The
@@ -727,10 +764,14 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			isCommittedSpare(senderAddr, pkAddr, asOf)
 		if spareReveal {
 			addressMatch = true
-			if primary {
-				effPaused = false
-			} else {
-				effPaused2 = false
+			// The pause exemption rests on the key being unpublished; a key
+			// somebody else already put on the chain is public.
+			if !foreign {
+				if primary {
+					effPaused = false
+				} else {
+					effPaused2 = false
+				}
 			}
 		}
 		if !resolvedFromRegistry && !spareReveal {
@@ -759,6 +800,13 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
 					authorised = true
 				}
+			}
+			if authorised && foreign {
+				if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+					logger.GetLogger().Printf("Verify: key %s is registered to another identity; sender %s can take it only by signing with it%s",
+						pkAddr.GetHex(), senderAddr.GetHex(), suppressedNote(skipped))
+				}
+				return false
 			}
 			// No pause exemption on this path. The stranded-identity escape
 			// hatch (incident 2026-09-08) admitted a registration signed with
@@ -845,7 +893,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// asOf): once registered, the preimage argument is gone and a forger
 		// of the paused scheme could re-sign this registration at will, each
 		// copy burning the victim's gas.
-		if !resolvedFromRegistry && tx.isPureRegistration() && primary == pkPrimary &&
+		if !resolvedFromRegistry && !foreign && tx.isPureRegistration() && primary == pkPrimary &&
 			bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes()) {
 			if primary {
 				effPaused = false

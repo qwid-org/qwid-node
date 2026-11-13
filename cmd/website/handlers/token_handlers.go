@@ -46,10 +46,14 @@ contract Token {
 
     function mint(address receiver, int64 amount) public {
         require(msg.sender == minter);
+        require(amount > 0, "amount must be positive");
         balances[receiver] += amount;
     }
 
     function transfer(address receiver, int64 amount) public {
+        // A negative amount would pass the balance check below and move
+        // tokens from the receiver to the caller.
+        require(amount > 0, "amount must be positive");
         require(amount <= balances[msg.sender]);
         balances[msg.sender] -= amount;
         balances[receiver] += amount;

@@ -243,6 +243,88 @@ func FilterUnbuildableTransactions(txs []transactionsDefinition.Transaction, hei
 	return kept
 }
 
+// ErrLockFromRestrictedAccount marks a locked stake paid into another account
+// by an escrow or multisig account.
+var ErrLockFromRestrictedAccount = errors.New(
+	"escrow and multi-signature accounts cannot pay a locked stake into another account")
+
+// Pending pools a transaction enters when its block is applied.
+const (
+	heldNone = iota
+	heldEscrow
+	heldMultiSig
+)
+
+// heldPoolOf mirrors where ProcessTransaction and processRecoveryTransaction
+// put tx: the escrow pool (an escrow account's transfer or commitment change),
+// the multisig pool (a multisig account's, or an approval), or neither.
+func heldPoolOf(tx transactionsDefinition.Transaction) int {
+	if tx.IsRecoveryBind() || tx.IsRecoveryReveal() {
+		return heldNone
+	}
+	sender := tx.GetSenderAddress()
+	acc, ok := account.GetAccountByAddressBytes(sender.GetBytes())
+	if tx.IsCommitmentRegistration() {
+		switch {
+		case !ok:
+			return heldNone
+		case acc.TransactionDelay > 0:
+			return heldEscrow
+		case acc.MultiSignNumber > 0:
+			return heldMultiSig
+		}
+		return heldNone
+	}
+	if _, isCancellation := tx.CancellationTarget(); isCancellation {
+		return heldNone
+	}
+	target := tx.TxData.Recipient
+	if tx.GetLockedAmount() > 0 {
+		target = tx.TxData.DelegatedAccountForLocking
+	}
+	if _, err := account.IntDelegatedAccountFromAddress(target); err == nil || !ok {
+		return heldNone
+	}
+	approval := !bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash)
+	switch {
+	case acc.TransactionDelay > 0 && !approval:
+		return heldEscrow
+	case acc.MultiSignNumber > 0 && !approval:
+		return heldMultiSig
+	case approval:
+		return heldMultiSig
+	}
+	return heldNone
+}
+
+// errPendingPoolFull: a transfer its block would hold could not be held. The
+// block check refuses such a transaction (CheckBlockTransfers); reaching this
+// at apply time means this node's pools differ from the chain's.
+var errPendingPoolFull = errors.New("pending pool full")
+
+// isThirdPartyLock: a locked stake whose coins go into somebody else's
+// staking account (S4-07).
+func isThirdPartyLock(tx transactionsDefinition.Transaction) bool {
+	return tx.GetLockedAmount() > 0 && !bytes.Equal(tx.TxData.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes())
+}
+
+// thirdPartyLockRefusal: a locked stake into another account moves the
+// sender's coins to that account at once. From an escrow account that skipped
+// the delay and the cancellation window, from a multisig account every
+// approval - whoever held the account's key alone emptied it (audit
+// 2026-11-12 F-TX-01). Such accounts stake for themselves only.
+func thirdPartyLockRefusal(tx transactionsDefinition.Transaction) error {
+	if !isThirdPartyLock(tx) {
+		return nil
+	}
+	sender := tx.GetSenderAddress()
+	acc, exists := account.GetAccountByAddressBytes(sender.GetBytes())
+	if exists && (acc.TransactionDelay > 0 || acc.MultiSignNumber > 0) {
+		return fmt.Errorf("%w (sender %s)", ErrLockFromRestrictedAccount, sender.GetHex())
+	}
+	return nil
+}
+
 func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount int64, sumFee int64, block Block) bool {
 	fee, err := tx.CalcFee()
 	if err != nil {
@@ -282,6 +364,18 @@ func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount in
 		n, err = account.IntDelegatedAccountFromAddress(addressRecipient)
 	}
 	if n > 0 && n < 256 {
+		if err := thirdPartyLockRefusal(tx); err != nil {
+			logger.GetLogger().Println(err, ": CheckStakingTransaction")
+			return false
+		}
+		// The owner's own stake and unstake obey the rules Stake and Unstake
+		// apply - pacing, locks - here already (F-TX-04).
+		if !isThirdPartyLock(tx) {
+			if err := account.StakeChangeRefusal(address.GetBytes(), amount, block.GetHeader().Height, n); err != nil {
+				logger.GetLogger().Println(err, ": CheckStakingTransaction")
+				return false
+			}
+		}
 		// If the sender intends to be an operator, verify both pubkeys are registered
 
 		// Keys as of the parent block (S3-06): the check and apply passes see
@@ -354,6 +448,13 @@ func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount in
 		accStaking := account.GetStakingAccountByAddressBytes(address.GetBytes(), n%256)
 		if !bytes.Equal(accStaking.Address[:], address.GetBytes()) {
 			logger.GetLogger().Println("no staking account found in check staking transaction (rewards)", ": CheckStakingTransaction")
+			return false
+		}
+		// Only a withdrawal exists: ProcessTransaction refuses a zero amount
+		// and a positive one was applied without even charging its fee
+		// (F-TX-02, F-TX-04).
+		if amount >= 0 {
+			logger.GetLogger().Println("a transaction to a reward account must withdraw (negative amount): CheckStakingTransaction")
 			return false
 		}
 		if accStaking.StakingRewards+amount < 0 {
@@ -449,6 +550,9 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 	}
 	if err == nil { // this is delegated account
 		if n > 0 && n < 256 { // this is staking transaction
+			if err := thirdPartyLockRefusal(tx); err != nil {
+				return err
+			}
 
 			if tx.GetLockedAmount() > 0 {
 				if amount >= common.MinStakingUser {
@@ -489,10 +593,7 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 					return err
 				}
 			}
-			err := ProcessMultiSignAndEscrow(tx)
-			if err != nil {
-				return err
-			}
+			applyAccountPolicy(tx)
 		}
 		if n >= 256 && n < 512 { // this is reward withdrawal transaction
 
@@ -535,17 +636,24 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 		// inclusion; the delay counts from this block (tx.Height is reset
 		// to it below). Testing the signer-chosen tx.Height let a key thief
 		// back-date the transfer and skip the cancellation window.
+		// A transfer that cannot be held must not be charged and lost (audit
+		// 2026-11-12 F-POOL-01): it fails, and the block check keeps it out.
 		if senderAcc.TransactionDelay > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
 			tx.Height = height
-			transactionsPool.AddEscrowTransaction(tx)
+			if !transactionsPool.AddEscrowTransaction(tx) {
+				return fmt.Errorf("%w: escrow transfer %x", errPendingPoolFull, tx.Hash.GetBytes()[:8])
+			}
 
 		} else if senderAcc.MultiSignNumber > 0 && bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) {
-			//TODO MultiSignNumber
 			tx.Height = height
-			transactionsPool.AddMultiSignTransaction(tx)
+			if !transactionsPool.AddMultiSignTransaction(tx) {
+				return fmt.Errorf("%w: multisig transfer %x", errPendingPoolFull, tx.Hash.GetBytes()[:8])
+			}
 		} else {
 			if bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash) == false {
-				transactionsPool.AddMultiSignTransaction(tx)
+				if !transactionsPool.AddMultiSignTransaction(tx) {
+					return fmt.Errorf("%w: multisig approval %x", errPendingPoolFull, tx.Hash.GetBytes()[:8])
+				}
 			}
 			// DB-C2: for contract-call txs the EVM already moved Amount as
 			// msg.value; the native path must not move it again. Non-contract
@@ -567,12 +675,21 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 			return err
 		}
 
-		err := ProcessMultiSignAndEscrow(tx)
-		if err != nil {
-			return err
-		}
+		applyAccountPolicy(tx)
 	}
 	return nil
+}
+
+// applyAccountPolicy applies a transaction's escrow/multisig settings. A
+// change that cannot apply - the account already is escrow or multisig, as
+// after an earlier change in the same block - is dropped: the transaction
+// stays in the block, its fee paid and everything else it does done. Failing
+// here used to invalidate the whole block, which every node had already
+// received (audit 2026-11-12 F-TX-04).
+func applyAccountPolicy(tx transactionsDefinition.Transaction) {
+	if err := ProcessMultiSignAndEscrow(tx); err != nil {
+		logger.GetLogger().Printf("transaction %x: account policy not changed: %v", tx.Hash.GetBytes()[:8], err)
+	}
 }
 
 // loadMultiSignMainTx recovers a multisig main transaction from the durable
@@ -634,12 +751,20 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 		}
 	}
 
+	// From here on an approval that cannot take effect is NOT a block error
+	// (audit 2026-11-12 F-TX-04): it stays in the block with its fee paid and
+	// does nothing. Anyone can send an approval naming any hash, and the block
+	// check cannot see what this function finds, so an error here let one
+	// transaction invalidate a block every node had already received.
 	if !mainFound {
 		for _, t := range txs {
 			transactionsPool.RemoveMultiSignTransaction(t.Hash.GetBytes())
 		}
-		return fmt.Errorf("no main transaction %x in multi signature pool or transaction DBs",
-			tx.TxParam.MultiSignTx.GetBytes()[:8])
+		transactionsPool.RemoveMultiSignTransaction(tx.Hash.GetBytes())
+		markVoided(tx.Hash.GetBytes(), height, common.VoidedExpired)
+		logger.GetLogger().Printf("approval %x names no known main transaction %x - ignored",
+			tx.Hash.GetBytes()[:8], tx.TxParam.MultiSignTx.GetBytes()[:8])
+		return nil
 	}
 
 	// remove transactions related to main if more than a week in pool
@@ -652,7 +777,10 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 			// has no more effect than the transfer itself.
 			markVoided(t.Hash.GetBytes(), height, common.VoidedExpired)
 		}
-		return fmt.Errorf("main transaction %x expired in multi signature pool", mainTx.Hash.GetBytes()[:8])
+		transactionsPool.RemoveMultiSignTransaction(tx.Hash.GetBytes())
+		markVoided(tx.Hash.GetBytes(), height, common.VoidedExpired)
+		logger.GetLogger().Printf("main transaction %x expired in multi signature pool - approval ignored", mainTx.Hash.GetBytes()[:8])
+		return nil
 	}
 
 	acc, exist := account.GetAccountByAddressBytes(mainTx.TxParam.Sender.GetBytes())
@@ -710,9 +838,15 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 			}
 			err = AddBalance(address.ByteValue, -amount)
 			if err != nil {
-				// this can happen very rare. Only when escrow is multisign account
-				transactionsPool.RemoveBadTransactionByHash(mainTx.Hash.GetBytes(), height, tree)
-				return err
+				// The account no longer holds the amount: nothing is reserved
+				// when the main transaction is pooled. The transfer is void -
+				// it left the pool above - and the block goes on (F-TX-04).
+				for _, t := range txs {
+					transactionsPool.RemoveMultiSignTransaction(t.Hash.GetBytes())
+				}
+				markVoided(mainTx.Hash.GetBytes(), height, common.VoidedExpired)
+				logger.GetLogger().Printf("multisig transfer %x voided at settlement: %v", mainTx.Hash.GetBytes()[:8], err)
+				return nil
 			}
 
 			// amount is always >= 0, so no error here will be

@@ -198,7 +198,9 @@ func (b *BaseHeader) GetBytes() []byte {
 
 func (bh *BaseHeader) Verify(sigName, sigName2 string, isPaused, isPaused2 bool) bool {
 	signatureBlockHeaderMessage := bh.GetBytesWithoutSignature()
-	if !bytes.Equal(signatureBlockHeaderMessage, bh.SignatureMessage) {
+	// SignatureMessage is the block nonce from height 1 on, checked against the
+	// fields it derives from in CheckLottery; genesis keeps the header bytes.
+	if bh.Height == 0 && !bytes.Equal(signatureBlockHeaderMessage, bh.SignatureMessage) {
 		logger.GetLogger().Println("signatures are different")
 		return false
 	}
@@ -343,6 +345,12 @@ func (bb *BaseBlock) GetBytes() []byte {
 
 // randaoBytes encodes the RANDAO fields: reveal (length-prefixed), commitment,
 // mix.
+// bytesForHash is GetBytes with the header taken without its signature.
+func (bb *BaseBlock) bytesForHash() []byte {
+	full := bb.BaseHeader.GetBytes()
+	return append(bb.BaseHeader.bytesForHash(), bb.GetBytes()[len(full):]...)
+}
+
 func (bb *BaseBlock) randaoBytes() []byte {
 	b := common.BytesToLenAndBytes(bb.RandReveal)
 	b = append(b, bb.RandCommit.GetBytes()...)
@@ -418,8 +426,15 @@ func (bb *BaseBlock) CalcBodyHash() (common.Hash, error) {
 	return common.CalcHashFromBytes(bb.bodyBytes())
 }
 
+// bytesForHash is the header without its signature: the header hash, and with
+// it the block's identity, does not change when the same header is signed once
+// more (audit 2026-11-12 F-CONS-01).
+func (b *BaseHeader) bytesForHash() []byte {
+	return append(b.GetBytesWithoutSignature(), common.BytesToLenAndBytes(b.SignatureMessage)...)
+}
+
 func (b *BaseHeader) CalcHash() (common.Hash, error) {
-	toByte, err := common.CalcHashToByte(b.GetBytes())
+	toByte, err := common.CalcHashToByte(b.bytesForHash())
 	if err != nil {
 		return common.Hash{}, err
 	}

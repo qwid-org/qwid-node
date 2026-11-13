@@ -20,7 +20,7 @@ type persistedStateJSON struct {
 	CodeHashes   map[string]string            `json:"codeHashes"`
 	StatesHashes map[string]map[string]string `json:"statesHashes"`
 	Nonces       map[string]uint64            `json:"nonces"`
-	States       map[string][]byte            `json:"states"`
+	States       map[string][]byte            `json:"states,omitempty"` // read from old snapshots and dropped
 	Balances     map[string]map[string]int64  `json:"balances"`
 	Tokens       map[string]TokenInfo         `json:"tokens"`
 }
@@ -32,7 +32,6 @@ func (sa *StateAccount) Marshal() ([]byte, error) {
 		CodeHashes:   hexAddrKeyHashValMap(sa.CodeHashes),
 		StatesHashes: hexAddrKeyedStorageToJSON(sa.StatesHashes),
 		Nonces:       hexAddrKeyMap(sa.Nonces),
-		States:       hexHashKeyMap(sa.States),
 		Balances:     hexAddrKeyAddrValMap(sa.Balances),
 		Tokens:       hexAddrKeyMap(sa.Tokens),
 	}
@@ -61,9 +60,9 @@ func (sa *StateAccount) Unmarshal(b []byte) error {
 	if sa.Nonces, err = addrKeyMapFromHex(psj.Nonces); err != nil {
 		return fmt.Errorf("decode nonces: %w", err)
 	}
-	if sa.States, err = hashKeyMapFromHex(psj.States); err != nil {
-		return fmt.Errorf("decode states: %w", err)
-	}
+	// Keccak preimages are no longer kept (audit 2026-11-12 F-EVM-01): they
+	// were never read, and a snapshot written before the fix sheds them here.
+	sa.States = map[common.Hash][]byte{}
 	if sa.Balances, err = addrKeyAddrValMapFromHex(psj.Balances); err != nil {
 		return fmt.Errorf("decode balances: %w", err)
 	}

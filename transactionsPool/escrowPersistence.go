@@ -10,27 +10,17 @@ import (
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
-// persistedTxPauseFlags returns the pause flags used when re-verifying a
-// transaction reloaded from the database on restart: none, for either scheme.
-//
-// The reason is consistency, not leniency. Only the DATABASE reload re-verifies;
-// the in-memory pool of a node that has not restarted does not. Applying the
-// pause gate here would therefore make a restarted node drop a pending escrow or
-// multisig entry that every still-running node keeps and settles — the exact
-// consensus divergence this persistence exists to prevent, now triggered by
-// nothing more than who happened to restart.
-//
-// The scheme NAMES still apply, so the signature must still verify under a
-// scheme the node knows. What is dropped is only the liveness gate, matching
-// blocks.historicalProofPauseFlags for embedded oracle proofs.
-func persistedTxPauseFlags() (bool, bool) {
-	return false, false
+// onChain is the reload check of a persisted escrow or multisig entry: a block
+// carried it - its signed original is in the confirmed transaction DB. Its
+// signature is NOT re-verified. It was verified when its block was applied,
+// and re-judging it under the node's scheme of the moment made a node that
+// restarted after a scheme change skip settlements every other node performs
+// (audit 2026-11-12 F-POOL-02).
+func onChain(tx *transactionsDefinition.Transaction) bool {
+	return transactionsDefinition.CheckFromDBPoolTx(common.TransactionDBPrefix[:], tx.GetHash().GetBytes())
 }
 
-var verifyPersistedEscrow = func(tx *transactionsDefinition.Transaction) bool {
-	isPaused, isPaused2 := persistedTxPauseFlags()
-	return tx.Verify(common.SigName(), common.SigName2(), isPaused, isPaused2)
-}
+var verifyPersistedEscrow = onChain
 
 // AddEscrowTransaction adds a delayed transaction to the escrow pool and mirrors
 // it to the database. Escrow transactions can mature up to ~one week after being
@@ -92,7 +82,7 @@ func checkPersistedPendingTx(key, bt []byte, prefixLen int, verify func(*transac
 	}
 	if tx.HashMatchesBody() {
 		if !verify(&tx) {
-			return tx, pendingEntryQuarantine, "signature does not verify under the current scheme"
+			return tx, pendingEntryQuarantine, "no block carried it"
 		}
 		return tx, pendingEntryLoad, ""
 	}
@@ -106,7 +96,7 @@ func checkPersistedPendingTx(key, bt []byte, prefixLen int, verify func(*transac
 		return tx, pendingEntryQuarantine, "differs from its signed original in more than its height"
 	}
 	if !verify(&orig) {
-		return tx, pendingEntryQuarantine, "signature does not verify under the current scheme"
+		return tx, pendingEntryQuarantine, "no block carried it"
 	}
 	return tx, pendingEntryLoad, ""
 }

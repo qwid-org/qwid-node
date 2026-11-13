@@ -199,7 +199,11 @@ func checkDexLimit(operation int, amountCoin, coinLimit int64) error {
 // coins and tokens (negative: pays) and the price to store - coin base units
 // per whole token (dexTokenPrice). All arithmetic is in base units
 // (dexOrderAmounts).
-func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, int64, error) {
+//
+// reserved is what the sender's transactions of the same block still owe when
+// the block's transfers are applied (blockReservedSpend); the order must leave
+// it covered. 0 judges the order on its own, as a preview does.
+func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int, reserved int64) ([]byte, common.Address, int64, int64, int64, error) {
 	// 2 - adding liquidity, 3 - buy trade, 4 -sell trade, 5 - withdraw token, 6 - withdraw KURA (5,6 inactive, just withdraw is selling opposite)
 
 	// OptData is sender-controlled and no earlier layer enforces a DEX shape:
@@ -273,6 +277,13 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 	if senderAccount.Balance+amountCoinInt64 < 0 {
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("not enough coins in account")
 	}
+	// The block check counts fees and amounts, not what an order costs at the
+	// pool's price. An order paid with coins the sender's other transactions
+	// of this block need made one of them fail when applied - and with it the
+	// whole block (audit 2026-11-12 F-TX-04). Such an order is skipped.
+	if !dexCoversReserved(senderAccount.Balance, amountCoinInt64, reserved) {
+		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("not enough coins in account beside the sender's other transactions of the block")
+	}
 	if balanceToken+amountTokenInt64 < 0 {
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("not enough tokens in account")
 	}
@@ -321,11 +332,41 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 	return common.Hex2Bytes(optData), fromAccountAddress, amountCoinInt64, amountTokenInt64, price, nil
 }
 
+// blockReservedSpend sums, per sender, what the block's transactions debit
+// when its transfers are applied, after every contract and DEX execution: the
+// fee of each, and the amount of each that is not a DEX order (an order's
+// coins move with the order itself).
+func blockReservedSpend(bl Block) map[[common.AddressLength]byte]int64 {
+	reserved := map[[common.AddressLength]byte]int64{}
+	for _, th := range bl.GetBlockTransactionsHashes() {
+		t, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], th.GetBytes())
+		if err != nil {
+			t, err = transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], th.GetBytes())
+			if err != nil {
+				continue
+			}
+		}
+		spend, ferr := t.CalcFee()
+		if ferr != nil {
+			continue
+		}
+		if n, derr := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); (derr != nil || n <= 512) && t.TxData.Amount > 0 {
+			spend += t.TxData.Amount
+		}
+		reserved[t.TxParam.Sender.ByteValue] += spend
+	}
+	return reserved
+}
+
 func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map[[common.HashLength]byte]common.Address, map[[common.AddressLength]byte][]byte, map[[common.HashLength]byte][]byte) {
 	addresses := map[[common.HashLength]byte]common.Address{}
 	logs := map[[common.HashLength]byte]string{}
 	rets := map[[common.HashLength]byte][]byte{}
 	optDatas := map[[common.AddressLength]byte][]byte{}
+	// Computed when the first DEX order is met; evmMoved is what contract
+	// calls already took from a sender as msg.value, no longer owed.
+	var reserved map[[common.AddressLength]byte]int64
+	evmMoved := map[[common.AddressLength]byte]int64{}
 	for _, th := range bl.GetBlockTransactionsHashes() {
 		poolprefix := common.TransactionPoolHashesDBPrefix[:]
 		t, err := transactionsDefinition.LoadFromDBPoolTx(poolprefix, th.GetBytes())
@@ -360,7 +401,11 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 		if err == nil && n > 512 { // 514 == operation 2 etc...
 			operation := n - 512
 			//DEX checking transaction
-			dexOptData, fromAddress, coinAmount, tokenAmount, price, err := GenerateOptDataDEX(t, operation)
+			if reserved == nil {
+				reserved = blockReservedSpend(bl)
+			}
+			owed := max(reserved[t.TxParam.Sender.ByteValue]-evmMoved[t.TxParam.Sender.ByteValue], 0)
+			dexOptData, fromAddress, coinAmount, tokenAmount, price, err := GenerateOptDataDEX(t, operation, owed)
 			loggerMain.GetLogger().Printf("Token Price: %v\n", price)
 			if err != nil {
 				// An order that cannot execute against the current state -
@@ -543,6 +588,9 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			dropBadTransaction(t, bl, err)
 			return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
 		}
+		if t.TxData.Amount > 0 {
+			evmMoved[t.TxParam.Sender.ByteValue] += t.TxData.Amount
+		}
 		//TODO we should refund left gas
 		//t.GasUsage -= int64(leftOverGas)
 		t.ContractAddress = address
@@ -579,6 +627,25 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 func randaoFromParent(bl Block) *common.Hash {
 	h := common.BytesToHash(bl.GetHeader().PreviousHash.GetBytes())
 	return &h
+}
+
+// evmExecutionConfig is the interpreter configuration of every EVM run - block
+// execution, DEX token calls and views.
+//
+// Preimage recording is OFF (audit 2026-11-12 F-EVM-01). With it on, every
+// KECCAK256 input was kept in State.States: never read, never pruned, not
+// reverted when the call failed, and written out with every EVM snapshot -
+// 69 MB for one transaction costing 0.137 QWD.
+func evmExecutionConfig(tracer *vm.GVMLogger) vm.Config {
+	jumpTable := vm.GetGenericJumpTable()
+	return vm.Config{
+		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
+		Tracer:                  tracer,
+		NoBaseFee:               true,
+		EnablePreimageRecording: false,
+		JumpTable:               &jumpTable,
+		ExtraEips:               []int{},
+	}
 }
 
 func evmGasBudget(declared int64) uint64 {
@@ -634,16 +701,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
-	jumpTable := vm.GetGenericJumpTable()
-
-	configCtx := vm.Config{
-		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
-		Tracer:                  &logger,
-		NoBaseFee:               true,
-		EnablePreimageRecording: true,
-		JumpTable:               &jumpTable,
-		ExtraEips:               []int{},
-	}
+	configCtx := evmExecutionConfig(&logger)
 	txCtx := vm.TxContext{
 		Origin:   tx.TxParam.Sender,
 		GasPrice: new(big.Int).SetInt64(0),
@@ -754,16 +812,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
-	jumpTable := vm.GetGenericJumpTable()
-
-	configCtx := vm.Config{
-		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
-		Tracer:                  &logger,
-		NoBaseFee:               true,
-		EnablePreimageRecording: true,
-		JumpTable:               &jumpTable,
-		ExtraEips:               []int{},
-	}
+	configCtx := evmExecutionConfig(&logger)
 	txCtx := vm.TxContext{
 		Origin:   tx.TxParam.Sender,
 		GasPrice: new(big.Int).SetInt64(0),
@@ -836,16 +885,7 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
-	jumpTable := vm.GetGenericJumpTable()
-
-	configCtx := vm.Config{
-		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
-		Tracer:                  &logger,
-		NoBaseFee:               true,
-		EnablePreimageRecording: true,
-		JumpTable:               &jumpTable,
-		ExtraEips:               []int{},
-	}
+	configCtx := evmExecutionConfig(&logger)
 	txCtx := vm.TxContext{
 		Origin:   origin,
 		GasPrice: new(big.Int).SetInt64(0),
