@@ -435,6 +435,7 @@ const (
 	refusedUnpayable
 	refusedStore
 	refusedHeld
+	refusedLock
 )
 
 func (a admission) String() string {
@@ -445,6 +446,8 @@ func (a admission) String() string {
 		return "transfer to a delegated account below the minimum staking amount"
 	case refusedUnpayable:
 		return "sender has insufficient funds (fee+amount, including its transactions already pooled)"
+	case refusedLock:
+		return "escrow and multisig accounts cannot create locked stakes"
 	case refusedHeld:
 		return "transaction would be held in the escrow or multisig pool and does not pay its hold fee, or is an approval no signer of a pending transaction may send"
 	case refusedStore:
@@ -492,6 +495,10 @@ func admitToPool(t transactionsDefinition.Transaction) admission {
 	if err := blocks.HeldTxRefusal(t, nil); err != nil {
 		logger.GetLogger().Println("pool admission:", err)
 		return refusedHeld
+	}
+	if err := blocks.LockRefusal(t); err != nil {
+		logger.GetLogger().Println("pool admission:", err)
+		return refusedLock
 	}
 	if !transactionsPool.PoolsTx.AddTransaction(t, t.Hash) {
 		return alreadyKnown

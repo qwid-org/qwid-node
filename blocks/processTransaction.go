@@ -261,7 +261,7 @@ func FilterUnbuildableTransactions(txs []transactionsDefinition.Transaction, hei
 // ErrLockFromRestrictedAccount marks a locked stake paid into another account
 // by an escrow or multisig account.
 var ErrLockFromRestrictedAccount = errors.New(
-	"escrow and multi-signature accounts cannot pay a locked stake into another account")
+	"escrow and multi-signature accounts cannot create locked stakes")
 
 // Pending pools a transaction enters when its block is applied.
 const (
@@ -421,13 +421,16 @@ func isThirdPartyLock(tx transactionsDefinition.Transaction) bool {
 	return tx.GetLockedAmount() > 0 && !bytes.Equal(tx.TxData.Recipient.GetBytes(), tx.TxParam.Sender.GetBytes())
 }
 
-// thirdPartyLockRefusal: a locked stake into another account moves the
-// sender's coins to that account at once. From an escrow account that skipped
-// the delay and the cancellation window, from a multisig account every
-// approval - whoever held the account's key alone emptied it (audit
-// 2026-11-12 F-TX-01). Such accounts stake for themselves only.
-func thirdPartyLockRefusal(tx transactionsDefinition.Transaction) error {
-	if !isThirdPartyLock(tx) {
+// LockRefusal: an escrow or multisig account creates no lock at all (audit
+// 2026-11-12 F-TX-01 and its rest, 2026-11-13). A lock paid into another
+// account moved the coins at once - past the escrow delay and its
+// cancellation window, past every multisig approval. A lock in the account's
+// own stake moves nothing, but released at one base unit a block it froze the
+// coins for good, applied at once all the same: whoever held one key could
+// lock the owner out of its funds. Plain stake and unstake stay allowed; the
+// owner can undo a stake.
+func LockRefusal(tx transactionsDefinition.Transaction) error {
+	if tx.GetLockedAmount() <= 0 {
 		return nil
 	}
 	sender := tx.GetSenderAddress()
@@ -477,7 +480,7 @@ func CheckStakingTransaction(tx transactionsDefinition.Transaction, sumAmount in
 		n, err = account.IntDelegatedAccountFromAddress(addressRecipient)
 	}
 	if n > 0 && n < 256 {
-		if err := thirdPartyLockRefusal(tx); err != nil {
+		if err := LockRefusal(tx); err != nil {
 			logger.GetLogger().Println(err, ": CheckStakingTransaction")
 			return false
 		}
@@ -663,7 +666,7 @@ func ProcessTransaction(tx transactionsDefinition.Transaction, height int64, blo
 	}
 	if err == nil { // this is delegated account
 		if n > 0 && n < 256 { // this is staking transaction
-			if err := thirdPartyLockRefusal(tx); err != nil {
+			if err := LockRefusal(tx); err != nil {
 				return err
 			}
 
