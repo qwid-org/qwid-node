@@ -404,6 +404,7 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	// Room left in the pending pools for what this block will hold
 	// (F-POOL-01). Settlements in the block are not counted: refusing near
 	// the limit is safe, holding beyond it lost the transfer.
+	held := newHeldBlockState()
 	heldRoom := map[int]int{
 		heldEscrow:   transactionsPool.PoolTxEscrow.FreeSlots(),
 		heldMultiSig: transactionsPool.PoolTxMultiSign.FreeSlots(),
@@ -523,6 +524,14 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 				}
 				continue
 			}
+			if err := HeldTxRefusal(poolTx, held); err != nil {
+				transactionsPool.RemoveBadTransactionByHash(hash, block.GetHeader().Height, tree)
+				if badTxErr == nil {
+					badTxErr = err
+				}
+				continue
+			}
+			held.note(poolTx)
 			heldRoom[pool]--
 		}
 		if pk := poolTx.TxData.Pubkey; len(pk.GetBytes()) > 0 {
@@ -689,7 +698,17 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	return reward, totalFee, nil
 }
 
-func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.MerkleTree) error {
+// ProcessBlockTransfers applies the block's transfers and rewards. It returns
+// the unused hold fees paid back to settled multisig transactions (F-POOL-01):
+// they leave the fees the chain holds, so the caller lowers the block's
+// BlockFee by them.
+func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.MerkleTree) (int64, error) {
+	takeHoldRefunds()
+	err := processBlockTransfers(block, reward, tree)
+	return takeHoldRefunds(), err
+}
+
+func processBlockTransfers(block Block, reward int64, tree *transactionsPool.MerkleTree) error {
 	// Escrow settlement runs at the END of this function, not the start
 	// (QWID-2026-37). It moves balances and then removes the escrow entry from
 	// the pool and its DB mirror; running it first meant that when a LATER
@@ -809,9 +828,11 @@ func RemoveAllTransactionsRelatedToBlock(newBlock Block) {
 	}
 }
 
-func EvaluateSmartContracts(bl *Block) bool {
+// EvaluateSmartContracts executes bl's contract and DEX transactions on top of
+// lastBlock; contracts read the price lastBlock established (F-CONS-02).
+func EvaluateSmartContracts(bl *Block, lastBlock Block) bool {
 	height := (*bl).GetHeader().Height
-	if ok, logs, addresses, codes, _ := EvaluateSCForBlock(*bl); ok {
+	if ok, logs, addresses, codes, _ := EvaluateSCForBlock(bl.withContractPrice(lastBlock)); ok {
 		StateMutex.Lock()
 		State.SetSnapShotNum(height, State.Snapshot())
 		for _, a := range addresses {
@@ -918,7 +939,7 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	}
 	newBlock.BlockFee = totalFee + lastBlock.BlockFee
 
-	if EvaluateSmartContracts(newBlock) == false {
+	if EvaluateSmartContracts(newBlock, lastBlock) == false {
 		return fmt.Errorf("evaluation of smart contracts in block fails: CheckBlockAndTransactions")
 	}
 
@@ -1057,7 +1078,7 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	newBlock.BlockFee = totalFee + lastBlock.BlockFee
 
 	phase = time.Now()
-	if EvaluateSmartContracts(newBlock) == false {
+	if EvaluateSmartContracts(newBlock, lastBlock) == false {
 		return fmt.Errorf("evaluation of smart contracts in block fails: CheckBlockAndTransferFunds")
 	}
 	tSC = time.Since(phase)
@@ -1104,10 +1125,11 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	if err != nil {
 		return err
 	}
-	err = ProcessBlockTransfers(*newBlock, reward, merkleTrie)
+	refunds, err := ProcessBlockTransfers(*newBlock, reward, merkleTrie)
 	if err != nil {
 		return err
 	}
+	newBlock.BlockFee -= refunds
 	applyRecoveryMaintenance(*newBlock, lastBlock)
 	tProcess = time.Since(phase)
 	phase = time.Now()

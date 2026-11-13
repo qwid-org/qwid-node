@@ -51,6 +51,10 @@ var (
 	OraclesHeightDistance          int64   = 6            // one minute on average
 	VotingHeightDistance           int64   = 60           // 60 => ten minute on average
 	MaxTransactionDelay            int64   = 60480        // one week
+	// HeldTxFeePerWeek is what holding one slot of the escrow or multisig pool
+	// for MaxTransactionDelay blocks costs, on top of the ordinary fee, pro
+	// rata for shorter holds (audit 2026-11-13, F-POOL-01). 1 QWD.
+	HeldTxFeePerWeek int64 = 100_000_000
 	// MaxTransactionAgeBlocks bounds how far below the including block a
 	// transaction's Height may lie (S4-01): wallets stamp the current tip, so a
 	// transaction older than this (or one claiming a height above its block) is
@@ -138,6 +142,15 @@ var (
 	// raising MaxTransactionsPerBlock cannot silently reintroduce the stall.
 	MaxMsgSizeNonce int32 = int32(MaxTransactionsPerBlock)*int32(HashLength) + MaxMsgSizeSmall
 	MaxMsgSizeSync  int32 = 16777216 // 16MB  — Sync (block-header batches, ~3.2MB real max)
+	// MaxTxMessageBytes is the byte budget of one transaction-topic message
+	// (tx gossip, st and bx answers): senders split longer batches. One
+	// transaction is at most a few MB (data bounded by gas, signature by 64KB,
+	// output logs by the EVM log gas), so a batch always fits.
+	MaxTxMessageBytes int = 12 << 20
+	// MaxMsgSizeTx caps a transaction-topic frame: the budget plus headroom. It
+	// used to be the global 151MB - memory a peer could make us hold for every
+	// half-sent frame, on every connection (audit 2026-11-13, F-NET-01).
+	MaxMsgSizeTx int32 = 16<<20 + MaxMsgSizeSmall
 	MaxMsgSizeRPC   int32 = 1048576  // 1MB   — RPC (localhost-bound)
 
 	// Per-IP rate limits — DoS hardening.

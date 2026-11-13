@@ -21,6 +21,7 @@ import (
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
 	"github.com/qwid-org/qwid-node/voting"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 func OnMessage(addr [4]byte, m []byte) {
@@ -120,6 +121,13 @@ func OnMessage(addr [4]byte, m []byte) {
 		if !claimNonce(nonceHash, nonceHeight, h) { // S2-08: concurrent duplicate
 			return
 		}
+		var self common.Address
+		if w := wallet.GetActiveWallet(); w != nil {
+			self = w.MainAddress
+		}
+		if !acceptNonceFrom(mainAddress, self, transaction.TxParam.SendingTime, common.GetCurrentTimeStampInSecond(), nonceHeight, h) {
+			return
+		}
 		//delMy := common.GetDelegatedAccount()
 		//if addr != tcpip.MyIP && bytes.Equal(txDelAcc.GetBytes(), delMy.GetBytes()) && addr != [4]byte{0, 0, 0, 0} {
 		//	MyIP2 = addr
@@ -170,6 +178,11 @@ func OnMessage(addr [4]byte, m []byte) {
 			return
 		}
 
+		// Not our second (or our stake has not matured): nothing to build. A
+		// few hashes, checked before the pool is peeked and a merkle tree built.
+		if !services.ProducerMayTry(lastBlock, nonceHeight) {
+			return
+		}
 		rawTxs := transactionsPool.PoolsTx.PeekTransactions(int(common.MaxTransactionsPerBlock), nonceHeight)
 		// Filter out transactions that are already confirmed in the blockchain.
 		// Under concurrent load, the memory pool can still hold transactions that

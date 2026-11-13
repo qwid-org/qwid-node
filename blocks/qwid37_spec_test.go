@@ -47,7 +47,7 @@ func TestQWID37_FailedBlockDoesNotSettleEscrow(t *testing.T) {
 	bl.BaseBlock.BaseHeader.Height = maturity
 	bl.TransactionsHashes = []common.Hash{missing}
 
-	if err := ProcessBlockTransfers(bl, 0, nil); err == nil {
+	if _, err := ProcessBlockTransfers(bl, 0, nil); err == nil {
 		t.Fatal("a block with an unresolvable transaction was applied successfully")
 	}
 	// The matured escrow must still be pending, and no money may have moved.

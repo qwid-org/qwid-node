@@ -319,6 +319,12 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 
 	tx.GasUsage = tx.GasUsageEstimate()
 	tx.Height = st.Height
+	// An escrow or multisig sender pays for the pool slot (F-POOL-01).
+	if err := transactionsDefinition.ApplyHoldFeeFromAccount(&tx,
+		clientrpc.Call(SignMessage(append([]byte("ACCT"), tx.TxParam.Sender.GetBytes()...)))); err != nil {
+		JsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if err := tx.CalcHashAndSet(); err != nil {
 		JsonError(w, "Failed to calculate hash", http.StatusInternalServerError)

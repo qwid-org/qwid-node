@@ -35,6 +35,22 @@ var (
 // nodes (liveAdoption), so older tickets are of no use.
 const producerLookbackSeconds = 5
 
+// ProducerMayTry reports whether this node holds a winning ticket for height
+// now - the cheap check before a candidate block is assembled.
+func ProducerMayTry(lastBlock blocks.Block, height int64) bool {
+	w := wallet.GetActiveWallet()
+	if w == nil {
+		return false
+	}
+	delID, err := account.IntDelegatedAccountFromAddress(common.GetDelegatedAccount())
+	if err != nil || !blocks.ProducerStakeMatured(delID, height) {
+		return false
+	}
+	now := common.GetCurrentTimeStampInSecond()
+	_, _, ok := blocks.WinningSecond(lastBlock, w.MainAddress, common.GetDelegatedAccount(), height, now-producerLookbackSeconds, now)
+	return ok
+}
+
 func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	lastBlock blocks.Block,
 	merkleTrie *transactionsPool.MerkleTree,

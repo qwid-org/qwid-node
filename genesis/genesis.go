@@ -489,7 +489,7 @@ func InitGenesis(processTransactions bool) {
 
 		}
 		reward := account.GetReward(common.InitSupply)
-		err = blocks.ProcessBlockTransfers(genesisBlock, reward, merkleTrie)
+		_, err = blocks.ProcessBlockTransfers(genesisBlock, reward, merkleTrie)
 		if err != nil {
 			logger.GetLogger().Fatalf("cannot process transactions in genesis block %v", err)
 		}

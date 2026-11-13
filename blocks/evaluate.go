@@ -711,7 +711,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	// Inside the lock (S6-02): the precompiles read package-level values, and
 	// every EVM run - block execution and RPC views alike - holds StateMutex,
 	// so no concurrent run can replace them before this one reads them.
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
+	vm.SetQwidOracles(bl.contractOraclePrice(), bl.BaseBlock.RandOracle)
 
 	VM = vm.NewEVM(blockCtx, txCtx, &State, evmChainConfig(), configCtx)
 	defer VM.Cancel()
@@ -822,7 +822,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	// Inside the lock (S6-02): the precompiles read package-level values, and
 	// every EVM run - block execution and RPC views alike - holds StateMutex,
 	// so no concurrent run can replace them before this one reads them.
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
+	vm.SetQwidOracles(bl.contractOraclePrice(), bl.BaseBlock.RandOracle)
 
 	//nonce := new(big.Int).SetInt64(int64(tx.TxParam.Nonce))
 
@@ -895,7 +895,7 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	// Inside the lock (S6-02): the precompiles read package-level values, and
 	// every EVM run - block execution and RPC views alike - holds StateMutex,
 	// so no concurrent run can replace them before this one reads them.
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
+	vm.SetQwidOracles(bl.contractOraclePrice(), bl.BaseBlock.RandOracle)
 	VM = vm.NewEVM(blockCtx, txCtx, &State, evmChainConfig(), configCtx)
 	defer VM.Cancel()
 
@@ -950,7 +950,10 @@ func GetBalance(coin common.Address, owner common.Address) (int64, error) {
 	var bl Block
 	var err error
 
-	bl, err = LoadBlock(h - 1)
+	// The tip: while a block is applied it is that block's parent, so a token
+	// contract reading the price in balanceOf sees the price block execution
+	// serves (the parent's, F-CONS-02); between blocks it is the latest.
+	bl, err = LoadBlock(h)
 	if err != nil {
 		loggerMain.GetLogger().Println(err)
 		return 0, err

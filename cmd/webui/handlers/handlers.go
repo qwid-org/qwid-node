@@ -708,6 +708,12 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 
 	tx.GasUsage = tx.GasUsageEstimate()
 	tx.Height = st.Height
+	// An escrow or multisig sender pays for the pool slot (F-POOL-01).
+	if err := transactionsDefinition.ApplyHoldFeeFromAccount(&tx,
+		clientrpc.Call(SignMessage(append([]byte("ACCT"), tx.TxParam.Sender.GetBytes()...)))); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if err := tx.CalcHashAndSet(); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to calculate hash: %v", err), http.StatusInternalServerError)
@@ -2229,6 +2235,12 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 
 	tx.Height = st.Height
 	tx.GasUsage = tx.GasUsageEstimate()
+	// An escrow or multisig sender pays for the pool slot (F-POOL-01).
+	if err := transactionsDefinition.ApplyHoldFeeFromAccount(&tx,
+		clientrpc.Call(SignMessage(append([]byte("ACCT"), tx.TxParam.Sender.GetBytes()...)))); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if err := tx.CalcHashAndSet(); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to calculate hash: %v", err), http.StatusInternalServerError)

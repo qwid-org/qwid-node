@@ -420,6 +420,10 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		if err != nil || n <= 0 || n >= 256 || tx.GetData().Amount != 0 {
 			return false
 		}
+		if serr := nonceShapeError(*tx); serr != nil {
+			logger.GetLogger().Println("Verify: nonce:", serr)
+			return false
+		}
 	case txKindGenesis:
 		if tx.Height != 0 {
 			return false
@@ -929,6 +933,45 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	}
 	//logger.GetLogger().Println(sigName, sigName2, isPausedTmp, isPaused2Tmp)
 	return wallet.Verify(b, signature.GetBytes(), pkb, sigName, sigName2, effPaused, effPaused2)
+}
+
+// nonceShapeError: a validator nonce has exactly one shape - OptData is the
+// height, the parent hash, the price, a zero rand slot and, optionally, the two
+// length-prefixed votes with nothing after them; the nonce number, gas, key and
+// every policy field are zero. Its free fields used to let one validator sign
+// any number of distinct nonces for one height, each a block candidate to every
+// receiver (audit 2026-11-13).
+func nonceShapeError(tx Transaction) error {
+	const head = 8 + common.HashLength + 16
+	d := tx.TxData
+	if tx.TxParam.Nonce != 0 || tx.GasPrice != 0 || tx.GasUsage != 0 {
+		return fmt.Errorf("nonce number and gas must be zero")
+	}
+	if len(d.Pubkey.GetBytes()) != 0 || d.LockedAmount != 0 || d.ReleasePerBlock != 0 || d.EscrowTransactionsDelay != 0 ||
+		d.MultiSignNumber != 0 || len(d.MultiSignAddresses) != 0 ||
+		!bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength)) {
+		return fmt.Errorf("a nonce carries no key and no account policy")
+	}
+	if len(d.OptData) < head {
+		return fmt.Errorf("nonce data too short: %d", len(d.OptData))
+	}
+	if !bytes.Equal(d.OptData[head-8:head], make([]byte, 8)) {
+		return fmt.Errorf("the nonce's rand slot must be zero")
+	}
+	if len(d.OptData) == head {
+		return nil
+	}
+	_, rest, err := common.BytesWithLenToBytes(d.OptData[head:])
+	if err != nil {
+		return fmt.Errorf("nonce vote 1: %w", err)
+	}
+	if _, rest, err = common.BytesWithLenToBytes(rest); err != nil {
+		return fmt.Errorf("nonce vote 2: %w", err)
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("%d bytes after the nonce's votes", len(rest))
+	}
+	return nil
 }
 
 // pureShape: no amount, no data, no escrow, multisig or locking settings -

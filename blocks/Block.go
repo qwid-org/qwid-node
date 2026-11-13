@@ -14,6 +14,33 @@ type Block struct {
 	TransactionsHashes []common.Hash `json:"transactions_hashes"`
 	BlockHash          common.Hash   `json:"block_hash"`
 	BlockFee           int64         `json:"block_fee"`
+
+	// contractPrice is the price oracle value this block's contracts read: the
+	// parent's (withContractPrice). Not serialized, not hashed - set for block
+	// execution only. A block loaded or built without it serves its own price,
+	// which is what a view call wants: the price the NEXT block's contracts read.
+	contractPrice    int64
+	hasContractPrice bool
+}
+
+// withContractPrice returns bl with its contracts reading the price parent
+// established (audit 2026-11-13, F-CONS-02 proposal 1). A producer decides
+// whether its own block establishes a price, and orders its transactions;
+// with its own block's price it could trade on a contract at a price it had
+// just frozen. The parent's price was fixed by someone else, before.
+func (bl Block) withContractPrice(parent Block) Block {
+	bl.contractPrice = parent.BaseBlock.PriceOracle
+	bl.hasContractPrice = true
+	return bl
+}
+
+// contractOraclePrice is what the 0x100 precompile serves during bl's
+// execution: the parent's price for block execution, bl's own otherwise.
+func (bl Block) contractOraclePrice() int64 {
+	if bl.hasContractPrice {
+		return bl.contractPrice
+	}
+	return bl.BaseBlock.PriceOracle
 }
 
 // GetString returns a string representation of Block.

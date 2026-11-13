@@ -350,6 +350,24 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 		}
 	}
 
+	safeDispatch(operation, reply, func() { dispatch(operation, byt, reply) })
+	return nil
+}
+
+// safeDispatch runs one RPC handler and turns a panic into an error reply.
+// net/rpc does not recover, so a panic in any handler stopped the whole node
+// (audit 2026-11-12 F-RPC-01).
+func safeDispatch(operation string, reply *[]byte, run func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.GetLogger().Printf("RPC %s handler panicked: %v", operation, r)
+			*reply = []byte("internal error in " + operation)
+		}
+	}()
+	run()
+}
+
+func dispatch(operation string, byt []byte, reply *[]byte) {
 	switch operation {
 	case "STAT":
 		handleSTAT(byt, reply)
@@ -398,7 +416,6 @@ func (l *Listener) Send(lineBeg []byte, reply *[]byte) error {
 	default:
 		*reply = []byte("Invalid operation")
 	}
-	return nil
 }
 
 func handleWALL(line []byte, reply *[]byte) {
@@ -644,14 +661,15 @@ func handleGTBL(byt []byte, reply *[]byte) {
 }
 
 func handleLTKN(line []byte, reply *[]byte) {
+	// Copied under the lock: the map is the live state's, and a token
+	// registered meanwhile used to be a concurrent map read and write (F-RPC-01).
+	newAccs := map[string]stateDB.TokenInfo{}
 	blocks.StateMutex.RLock()
-	accs := blocks.State.GetAllRegisteredTokens()
+	for k, v := range blocks.State.GetAllRegisteredTokens() {
+		newAccs[hex.EncodeToString(k[:])] = v
+	}
 	blocks.StateMutex.RUnlock()
-	if len(accs) > 0 {
-		newAccs := map[string]stateDB.TokenInfo{}
-		for k, v := range accs {
-			newAccs[hex.EncodeToString(k[:])] = v
-		}
+	if len(newAccs) > 0 {
 		am, err := json.Marshal(newAccs)
 		if err != nil {
 			*reply = []byte(fmt.Sprint(err))

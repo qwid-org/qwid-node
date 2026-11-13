@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/qwid-org/qwid-node/account"
+	"github.com/qwid-org/qwid-node/blocks"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/message"
@@ -370,12 +371,10 @@ func OnMessage(addr [4]byte, m []byte) {
 					txs = append(txs, t)
 				}
 			}
-			transactionMsg, err := GenerateTransactionMsg(txs, []byte("tx"), topic)
-			if err != nil {
-				logger.GetLogger().Println("cannot generate transaction msg", err)
-			}
-			if !Send(addr, transactionMsg.GetBytes()) {
-				logger.GetLogger().Println("could not send transaction in sync")
+			for _, transactionMsg := range GenerateTransactionMsgs(txs, []byte("tx"), topic) {
+				if !Send(addr, transactionMsg.GetBytes()) {
+					logger.GetLogger().Println("could not send transaction in sync")
+				}
 			}
 			logger.GetLogger().Println("SENT transaction is sync st to ", addr[:])
 		}
@@ -400,24 +399,22 @@ func OnMessage(addr [4]byte, m []byte) {
 				txs = append(txs, t)
 			}
 			logger.GetLogger().Println("  Found", len(txs), "transactions to send")
-			transactionMsg, err := GenerateTransactionMsg(txs, []byte("bx"), topic)
-			if err != nil {
-				logger.GetLogger().Println("cannot generate transaction msg", err)
-			}
-			out := transactionMsg.GetBytes()
-			// Large answers CAN go out flate-compressed as a bz message (~25%
-			// less wire bytes); disabled by default, enabled with
-			// COMPRESS_BX=true on the serving node. Receivers always accept bz.
-			if common.CompressBx && len(out) > compressBxThreshold {
-				if zb, zerr := compressToBz(out, topic); zerr == nil {
-					logger.GetLogger().Printf("bt answer compressed: %d -> %d bytes", len(out), len(zb))
-					out = zb
+			for _, transactionMsg := range GenerateTransactionMsgs(txs, []byte("bx"), topic) {
+				out := transactionMsg.GetBytes()
+				// Large answers CAN go out flate-compressed as a bz message (~25%
+				// less wire bytes); disabled by default, enabled with
+				// COMPRESS_BX=true on the serving node. Receivers always accept bz.
+				if common.CompressBx && len(out) > compressBxThreshold {
+					if zb, zerr := compressToBz(out, topic); zerr == nil {
+						logger.GetLogger().Printf("bt answer compressed: %d -> %d bytes", len(out), len(zb))
+						out = zb
+					}
 				}
-			}
-			if !Send(addr, out) {
-				logger.GetLogger().Println("could not send transaction is sync bt - Send failed")
-			} else {
-				logger.GetLogger().Println("SENT transaction is sync bt to ", addr[:], "count:", len(txs))
+				if !Send(addr, out) {
+					logger.GetLogger().Println("could not send transaction is sync bt - Send failed")
+				} else {
+					logger.GetLogger().Println("SENT transaction is sync bt to ", addr[:], "count:", len(txs))
+				}
 			}
 		}
 	default:
@@ -437,6 +434,7 @@ const (
 	refusedBelowMinStaking
 	refusedUnpayable
 	refusedStore
+	refusedHeld
 )
 
 func (a admission) String() string {
@@ -447,6 +445,8 @@ func (a admission) String() string {
 		return "transfer to a delegated account below the minimum staking amount"
 	case refusedUnpayable:
 		return "sender has insufficient funds (fee+amount, including its transactions already pooled)"
+	case refusedHeld:
+		return "transaction would be held in the escrow or multisig pool and does not pay its hold fee, or is an approval no signer of a pending transaction may send"
 	case refusedStore:
 		return "the node could not store the transaction"
 	}
@@ -486,6 +486,12 @@ func admitToPool(t transactionsDefinition.Transaction) admission {
 	cost := fee + t.TxData.Amount
 	if !sok || transactionsPool.PoolsTx.PendingSpend(senderAddr.GetBytes())+cost > sacc.Balance {
 		return refusedUnpayable
+	}
+	// The block check's rules for held transactions (F-POOL-01), so the pool
+	// holds nothing a block must refuse.
+	if err := blocks.HeldTxRefusal(t, nil); err != nil {
+		logger.GetLogger().Println("pool admission:", err)
+		return refusedHeld
 	}
 	if !transactionsPool.PoolsTx.AddTransaction(t, t.Hash) {
 		return alreadyKnown

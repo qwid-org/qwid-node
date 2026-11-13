@@ -209,6 +209,21 @@ func FilterUnbuildableTransactions(txs []transactionsDefinition.Transaction, hei
 			}
 			continue
 		}
+		// A held transaction that does not pay for its slot is refused by every
+		// block check, and the account's delay cannot change: evict it. An
+		// approval whose transaction is not pending yet waits in the pool.
+		if heldPoolOf(tx) != heldNone {
+			if err := HeldTxRefusal(tx, nil); err != nil {
+				if tx.IsApproval() {
+					if _, ok := pendingMultiSigMain(tx.TxParam.MultiSignTx, nil, false); !ok {
+						continue
+					}
+				}
+				logger.GetLogger().Printf("dropping held transaction %s from pool: %v", tx.Hash.GetHex(), err)
+				transactionsPool.PoolsTx.RemoveTransactionByHash(tx.Hash.GetBytes())
+				continue
+			}
+		}
 		// A deployment from an escrow or multisig account can never execute and
 		// the account cannot be converted back, so this is permanent: drop it
 		// rather than let it fail validation on every block attempt.
@@ -250,51 +265,149 @@ var ErrLockFromRestrictedAccount = errors.New(
 
 // Pending pools a transaction enters when its block is applied.
 const (
-	heldNone = iota
-	heldEscrow
-	heldMultiSig
+	heldNone     = transactionsDefinition.HeldNone
+	heldEscrow   = transactionsDefinition.HeldEscrow
+	heldMultiSig = transactionsDefinition.HeldMultiSig
 )
 
-// heldPoolOf mirrors where ProcessTransaction and processRecoveryTransaction
-// put tx: the escrow pool (an escrow account's transfer or commitment change),
-// the multisig pool (a multisig account's, or an approval), or neither.
+// heldPoolOf is transactionsDefinition.HeldPoolOf with the sender's account.
 func heldPoolOf(tx transactionsDefinition.Transaction) int {
-	if tx.IsRecoveryBind() || tx.IsRecoveryReveal() {
-		return heldNone
-	}
 	sender := tx.GetSenderAddress()
 	acc, ok := account.GetAccountByAddressBytes(sender.GetBytes())
-	if tx.IsCommitmentRegistration() {
-		switch {
-		case !ok:
-			return heldNone
-		case acc.TransactionDelay > 0:
-			return heldEscrow
-		case acc.MultiSignNumber > 0:
-			return heldMultiSig
+	return transactionsDefinition.HeldPoolOf(tx, acc, ok)
+}
+
+// heldBlockState is what a block check knows of the multisig transactions and
+// approvals of the block so far.
+type heldBlockState struct {
+	mains     map[common.Hash]transactionsDefinition.Transaction
+	approvals map[[2 * common.HashLength]byte]bool // main hash || approver
+}
+
+func newHeldBlockState() *heldBlockState {
+	return &heldBlockState{
+		mains:     map[common.Hash]transactionsDefinition.Transaction{},
+		approvals: map[[2 * common.HashLength]byte]bool{},
+	}
+}
+
+func approvalKey(main common.Hash, approver common.Address) (k [2 * common.HashLength]byte) {
+	copy(k[:common.HashLength], main.GetBytes())
+	copy(k[common.HashLength:], approver.GetBytes())
+	return k
+}
+
+// pendingMultiSigMain finds the pending multisig transaction an approval names:
+// in the multisig pool, earlier in the same block, or - at pool admission
+// only - still waiting in the main pool for its block.
+func pendingMultiSigMain(hash common.Hash, st *heldBlockState, admission bool) (transactionsDefinition.Transaction, bool) {
+	if st != nil {
+		if m, ok := st.mains[hash]; ok {
+			return m, true
 		}
-		return heldNone
 	}
-	if _, isCancellation := tx.CancellationTarget(); isCancellation {
-		return heldNone
+	if m, ok := transactionsPool.PoolTxMultiSign.GetTransactionByHash(hash.GetBytes()); ok && !m.IsApproval() {
+		return m, true
 	}
-	target := tx.TxData.Recipient
-	if tx.GetLockedAmount() > 0 {
-		target = tx.TxData.DelegatedAccountForLocking
+	if admission {
+		if m, ok := transactionsPool.PoolsTx.GetTransactionByHash(hash.GetBytes()); ok && !m.IsApproval() {
+			return m, true
+		}
 	}
-	if _, err := account.IntDelegatedAccountFromAddress(target); err == nil || !ok {
-		return heldNone
+	return transactionsDefinition.Transaction{}, false
+}
+
+// HeldTxRefusal says why tx, which a block would hold in a pending pool, may
+// not be included (st: the block so far; nil at pool admission), or nil
+// (audit 2026-11-13, F-POOL-01):
+//   - it pays the hold fee for the slots it will hold (RequiredHoldFee);
+//   - an approval names a pending multisig transaction - already in the
+//     multisig pool or earlier in this block - comes from one of that
+//     account's signers, repeats its recipient, and is that signer's first
+//     approval of it. Anyone could send approvals before, each a pool slot.
+func HeldTxRefusal(tx transactionsDefinition.Transaction, st *heldBlockState) error {
+	sender := tx.GetSenderAddress()
+	acc, ok := account.GetAccountByAddressBytes(sender.GetBytes())
+	pool := transactionsDefinition.HeldPoolOf(tx, acc, ok)
+	if pool == heldNone {
+		return nil
 	}
-	approval := !bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), ZerosHash)
-	switch {
-	case acc.TransactionDelay > 0 && !approval:
-		return heldEscrow
-	case acc.MultiSignNumber > 0 && !approval:
-		return heldMultiSig
-	case approval:
-		return heldMultiSig
+	hold := transactionsDefinition.RequiredHoldFee(tx, acc, ok)
+	if !transactionsDefinition.PaysHoldFee(tx, hold) {
+		fee, _ := tx.CalcFee()
+		return fmt.Errorf("transaction %x is held in a pending pool and pays %d, needs %d (the minimum plus %d for holding)",
+			tx.Hash.GetBytes()[:8], fee, tx.MinGasUsage()+hold, hold)
 	}
-	return heldNone
+	if !tx.IsApproval() {
+		return nil
+	}
+	main, found := pendingMultiSigMain(tx.TxParam.MultiSignTx, st, st == nil)
+	if !found {
+		return fmt.Errorf("approval %x names no pending multisig transaction", tx.Hash.GetBytes()[:8])
+	}
+	owner, ok := account.GetAccountByAddressBytes(main.TxParam.Sender.GetBytes())
+	signer := false
+	for _, a := range owner.MultiSignAddresses {
+		if a == sender.ByteValue {
+			signer = true
+			break
+		}
+	}
+	if !ok || !signer {
+		return fmt.Errorf("approval %x comes from %s, no signer of %s", tx.Hash.GetBytes()[:8], sender.GetHex(), main.TxParam.Sender.GetHex())
+	}
+	if !bytes.Equal(tx.TxData.Recipient.GetBytes(), main.TxData.Recipient.GetBytes()) {
+		return fmt.Errorf("approval %x names another recipient than its transaction", tx.Hash.GetBytes()[:8])
+	}
+	key := approvalKey(main.Hash, sender)
+	if st != nil && st.approvals[key] {
+		return fmt.Errorf("approval %x repeats one earlier in the block", tx.Hash.GetBytes()[:8])
+	}
+	for _, e := range transactionsPool.PoolTxMultiSign.PeekTransactions(common.MaxTransactionInPool, common.GetInt64FromByte(main.Hash.GetBytes())) {
+		if e.IsApproval() && e.TxParam.MultiSignTx == main.Hash && e.TxParam.Sender.ByteValue == sender.ByteValue {
+			return fmt.Errorf("%s already approved %x", sender.GetHex(), main.Hash.GetBytes()[:8])
+		}
+	}
+	return nil
+}
+
+// note records an accepted held transaction in the block state.
+func (st *heldBlockState) note(tx transactionsDefinition.Transaction) {
+	if tx.IsApproval() {
+		st.approvals[approvalKey(tx.TxParam.MultiSignTx, tx.GetSenderAddress())] = true
+		return
+	}
+	if heldPoolOf(tx) == heldMultiSig {
+		st.mains[tx.Hash] = tx
+	}
+}
+
+// holdRefunds sums the unused hold fees returned while the current block is
+// applied (ProcessBlockTransfers); they leave the fees the chain holds.
+var holdRefunds int64
+
+func takeHoldRefunds() int64 {
+	r := holdRefunds
+	holdRefunds = 0
+	return r
+}
+
+// refundUnusedHold returns to a settled multisig transaction's sender the part
+// of its hold fee for the window it did not use - if it paid one.
+func refundUnusedHold(mainTx transactionsDefinition.Transaction, acc account.Account, height int64) {
+	hold := transactionsDefinition.RequiredHoldFee(mainTx, acc, true)
+	if hold <= 0 || !transactionsDefinition.PaysHoldFee(mainTx, hold) {
+		return
+	}
+	elapsed := min(max(height-mainTx.GetHeight(), 0), common.MaxTransactionInMultiSigPool)
+	refund := transactionsDefinition.MultiSigHoldSlots(acc) *
+		(common.HoldFee(common.MaxTransactionInMultiSigPool) - common.HoldFee(elapsed))
+	if refund <= 0 {
+		return
+	}
+	if err := AddBalance(mainTx.TxParam.Sender.ByteValue, refund); err == nil {
+		holdRefunds += refund
+	}
 }
 
 // errPendingPoolFull: a transfer its block would hold could not be held. The
@@ -831,6 +944,8 @@ func ProcessTransactionsMultiSign(tx transactionsDefinition.Transaction, height 
 			return fmt.Errorf("transaction should not be executed, should be delayed %v", mainTx.Hash.GetHex())
 		} else {
 			transactionsPool.RemoveMultiSignTransaction(mainTx.Hash.GetBytes())
+			// The window not used is paid back (F-POOL-01).
+			refundUnusedHold(mainTx, acc, height)
 			if mainTx.IsCommitmentRegistration() {
 				// Approved: the commitment change takes effect, its maturity
 				// counting from here.
