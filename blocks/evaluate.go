@@ -14,7 +14,6 @@ import (
 	loggerMain "github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
-	"math"
 	"math/big"
 	"sync"
 )
@@ -176,75 +175,6 @@ func CommitEVMStateIfChanged(height int64) error {
 	return State.Store(height)
 }
 
-// constantProductPrice returns the exact constant-product (x*y=k) average
-// execution price coinPool/(tokenPool - amountToken), rounded to roundDecimals,
-// or 0 when the pools/denominator are non-positive (e.g. a buy of the whole
-// token pool, which is not allowed). amountToken is SIGNED: >0 for a buy (tokens
-// leave the pool), <0 for a sell (tokens enter the pool). Using amountToken
-// (not the old 2*amountToken) makes swaps exact x*y=k (AC-H6): the price
-// diverges only as a trade approaches the full pool, never at half the pool.
-func constantProductPrice(coinPool, tokenPool, amountToken float64, roundDecimals int) float64 {
-	denom := tokenPool - amountToken
-	if coinPool > 0 && denom > 0 {
-		return common.RoundToken(coinPool/denom, roundDecimals)
-	}
-	return 0
-}
-
-// scaleToInt64 converts a whole-unit float amount to base units (amount * 10^decimals),
-// returning ok=false when the result would not fit in an int64. This avoids the
-// non-portable `int64(hugeFloat)` conversion (implementation-defined in Go when the
-// value overflows), which would otherwise make DEX pricing non-deterministic across
-// architectures near the full-pool boundary (AC-H6).
-func scaleToInt64(amount float64, decimals int) (int64, bool) {
-	scaled := amount * math.Pow10(decimals)
-	if math.IsNaN(scaled) || math.IsInf(scaled, 0) || math.Abs(scaled) >= float64(math.MaxInt64) {
-		return 0, false
-	}
-	return int64(scaled), true
-}
-
-// scaleTokenPrice converts a whole-unit price into the int64 the DEX account
-// stores, scaling by 10^(coinDecimals+tokenDecimals).
-//
-// This value is serialised into consensus state (account/dexAccount.go), so an
-// implementation-defined `int64(hugeFloat)` here is not merely a wrong number:
-// amd64 yields the minimum int64 and arm64 saturates to the maximum, so two
-// nodes on different architectures would write different state for the same
-// block and fork. The multiplier is the SUM of the decimals, which leaves very
-// little headroom — 10^16 for an 8-decimal token, so any price at or above
-// ~922 overflows.
-//
-// The two decimal counts are widened to int before being added. The callers'
-// original expression added them as uint8, which wraps above 247.
-func scaleTokenPrice(price float64, coinDecimals, tokenDecimals uint8) (int64, bool) {
-	return scaleToInt64(price, int(coinDecimals)+int(tokenDecimals))
-}
-
-// dexPoolShare returns amount/pool as a fraction, or 0 when the pool side is
-// empty. Dividing by a zero pool produced NaN (0/0) or Inf (x/0), and the bare
-// int64(NaN)/int64(Inf) that followed is implementation-defined — amd64 yields
-// the minimum int64, arm64 saturates to the maximum — so two architectures
-// wrote different LP balances for the same block and forked (QWID-2026-24).
-func dexPoolShare(amount, pool int64) float64 {
-	if pool <= 0 {
-		return 0
-	}
-	return float64(amount) / float64(pool)
-}
-
-// checkedRoundToken rounds v to the given decimals and converts to int64,
-// returning ok=false on NaN/Inf/overflow so the caller can skip a hostile or
-// degenerate value rather than write implementation-defined garbage into
-// consensus DEX state (QWID-2026-24).
-func checkedRoundToken(v float64, decimals int) (int64, bool) {
-	r := common.RoundToken(v, decimals)
-	if math.IsNaN(r) || math.IsInf(r, 0) || math.Abs(r) >= float64(math.MaxInt64) {
-		return 0, false
-	}
-	return int64(r), true
-}
-
 // ErrDexLimitExceeded marks a DEX order whose signed price limit the trade
 // would break (S7-07). Such an order is skipped, not a block error.
 var ErrDexLimitExceeded = errors.New("dex price limit exceeded")
@@ -264,7 +194,16 @@ func checkDexLimit(operation int, amountCoin, coinLimit int64) error {
 	return nil
 }
 
-func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([]byte, common.Address, int64, int64, float64, error) {
+// GenerateOptDataDEX prices a DEX order against the current pool and returns
+// the token transfer to run, who it is from, what the sender receives in
+// coins and tokens (negative: pays) and the price to store - coin base units
+// per whole token (dexTokenPrice). All arithmetic is in base units
+// (dexOrderAmounts).
+//
+// reserved is what the sender's transactions of the same block still owe when
+// the block's transfers are applied (blockReservedSpend); the order must leave
+// it covered. 0 judges the order on its own, as a preview does.
+func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int, reserved int64) ([]byte, common.Address, int64, int64, int64, error) {
 	// 2 - adding liquidity, 3 - buy trade, 4 -sell trade, 5 - withdraw token, 6 - withdraw KURA (5,6 inactive, just withdraw is selling opposite)
 
 	// OptData is sender-controlled and no earlier layer enforces a DEX shape:
@@ -285,9 +224,6 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 	}
 
 	accDex := account.GetDexAccountByAddressBytes(tokenAddress.GetBytes())
-	poolPrice := float64(0)
-	price := 0.0
-	var amountCoinInt64, amountTokenInt64 int64
 	balanceToken, err := GetBalance(tx.ContractAddress, sender)
 	if err != nil {
 		return nil, common.Address{}, 0, 0, 0, err
@@ -301,76 +237,13 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("no token with a given address")
 	}
 
-	tokenPoolAmount := account.Int64toFloat64ByDecimals(accDex.TokenPool, ti.Decimals)
-	coinPoolAmount := account.Int64toFloat64(accDex.CoinPool)
-	amountTokenFloat := account.Int64toFloat64ByDecimals(amountToken, ti.Decimals)
-	amountCoinFloat := account.Int64toFloat64ByDecimals(tx.TxData.Amount, common.Decimals)
-
-	if coinPoolAmount > 0 && tokenPoolAmount > 0 {
-		poolPrice = common.RoundToken(coinPoolAmount/tokenPoolAmount, int(common.Decimals+ti.Decimals))
-	}
-
 	// dex account where all tokens liquidity are stored
 	dex := common.GetDexAccountAddress()
 
-	switch operation {
-	case 2: // add liquidity
-		c, okC := scaleToInt64(-amountCoinFloat, int(common.Decimals))
-		tkn, okT := scaleToInt64(-amountTokenFloat, int(ti.Decimals))
-		if !okC || !okT {
-			return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex add liquidity: amount does not fit in int64")
-		}
-		amountCoinInt64, amountTokenInt64 = c, tkn
-		price = common.RoundToken(amountCoinFloat/amountTokenFloat, int(common.Decimals+ti.Decimals))
-	case 5: // withdraw token
-		if poolPrice > 0 {
-			price = poolPrice
-			amount := common.RoundCoin(poolPrice * amountTokenFloat)
-			c, okC := scaleToInt64(amount, int(common.Decimals))
-			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
-			if !okC || !okT {
-				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex withdraw token: amount does not fit in int64")
-			}
-			amountCoinInt64, amountTokenInt64 = c, tkn
-		}
-	case 6: // withdraw Coin
-		if poolPrice > 0 {
-			price = poolPrice
-			amount := common.RoundToken(1.0/poolPrice*amountCoinFloat, int(ti.Decimals))
-			tkn, okT := scaleToInt64(amount, int(ti.Decimals))
-			c, okC := scaleToInt64(amountCoinFloat, int(common.Decimals))
-			if !okC || !okT {
-				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex withdraw coin: amount does not fit in int64")
-			}
-			amountTokenInt64, amountCoinInt64 = tkn, c
-		}
-	case 3: //buy
-		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
-		if price > 0 {
-			amount := common.RoundCoin(-price * amountTokenFloat)
-			c, okC := scaleToInt64(amount, int(common.Decimals))
-			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
-			if !okC || !okT {
-				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex trade: amount does not fit in int64")
-			}
-			amountCoinInt64 = c
-			amountTokenInt64 = tkn
-		}
-	case 4: //sell
-		amountTokenFloat *= -1
-		price = constantProductPrice(coinPoolAmount, tokenPoolAmount, amountTokenFloat, int(common.Decimals+ti.Decimals))
-		if price > 0 {
-			amount := common.RoundCoin(-price * amountTokenFloat)
-			c, okC := scaleToInt64(amount, int(common.Decimals))
-			tkn, okT := scaleToInt64(amountTokenFloat, int(ti.Decimals))
-			if !okC || !okT {
-				return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex trade: amount does not fit in int64")
-			}
-			amountCoinInt64 = c
-			amountTokenInt64 = tkn
-		}
-	default:
-		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("wrong operation on dex")
+	amountCoinInt64, amountTokenInt64, price, err := dexOrderAmounts(operation, tx.TxData.Amount, amountToken,
+		accDex.CoinPool, accDex.TokenPool, ti.Decimals)
+	if err != nil {
+		return nil, common.Address{}, 0, 0, 0, err
 	}
 
 	// S7-07: the sender's price limit, signed with the order. amountCoinInt64
@@ -380,15 +253,6 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 	// poison every block that carries it.
 	if err := checkDexLimit(operation, amountCoinInt64, coinLimit); err != nil {
 		return nil, common.Address{}, 0, 0, 0, err
-	}
-
-	// Reject here, while we can still refuse the transaction. EvaluateSCForBlock
-	// scales this same price into accDex.TokenPrice when the block is applied,
-	// and its only failure mode is rejecting the whole block — which would let
-	// one crafted transaction kill every block carrying it. Validating at
-	// transaction level means the value provably fits by the time it is stored.
-	if _, ok := scaleTokenPrice(price, common.Decimals, ti.Decimals); !ok {
-		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("dex: token price %v does not fit in int64 at %d decimals", price, int(common.Decimals)+int(ti.Decimals))
 	}
 
 	senderAccount, exist := account.GetAccountByAddressBytes(tx.TxParam.Sender.GetBytes())
@@ -412,6 +276,13 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 
 	if senderAccount.Balance+amountCoinInt64 < 0 {
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("not enough coins in account")
+	}
+	// The block check counts fees and amounts, not what an order costs at the
+	// pool's price. An order paid with coins the sender's other transactions
+	// of this block need made one of them fail when applied - and with it the
+	// whole block (audit 2026-11-12 F-TX-04). Such an order is skipped.
+	if !dexCoversReserved(senderAccount.Balance, amountCoinInt64, reserved) {
+		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("not enough coins in account beside the sender's other transactions of the block")
 	}
 	if balanceToken+amountTokenInt64 < 0 {
 		return nil, common.Address{}, 0, 0, 0, fmt.Errorf("not enough tokens in account")
@@ -461,11 +332,41 @@ func GenerateOptDataDEX(tx transactionsDefinition.Transaction, operation int) ([
 	return common.Hex2Bytes(optData), fromAccountAddress, amountCoinInt64, amountTokenInt64, price, nil
 }
 
+// blockReservedSpend sums, per sender, what the block's transactions debit
+// when its transfers are applied, after every contract and DEX execution: the
+// fee of each, and the amount of each that is not a DEX order (an order's
+// coins move with the order itself).
+func blockReservedSpend(bl Block) map[[common.AddressLength]byte]int64 {
+	reserved := map[[common.AddressLength]byte]int64{}
+	for _, th := range bl.GetBlockTransactionsHashes() {
+		t, err := transactionsDefinition.LoadFromDBPoolTx(common.TransactionPoolHashesDBPrefix[:], th.GetBytes())
+		if err != nil {
+			t, err = transactionsDefinition.LoadFromDBPoolTx(common.TransactionDBPrefix[:], th.GetBytes())
+			if err != nil {
+				continue
+			}
+		}
+		spend, ferr := t.CalcFee()
+		if ferr != nil {
+			continue
+		}
+		if n, derr := account.IntDelegatedAccountFromAddress(t.TxData.Recipient); (derr != nil || n <= 512) && t.TxData.Amount > 0 {
+			spend += t.TxData.Amount
+		}
+		reserved[t.TxParam.Sender.ByteValue] += spend
+	}
+	return reserved
+}
+
 func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map[[common.HashLength]byte]common.Address, map[[common.AddressLength]byte][]byte, map[[common.HashLength]byte][]byte) {
 	addresses := map[[common.HashLength]byte]common.Address{}
 	logs := map[[common.HashLength]byte]string{}
 	rets := map[[common.HashLength]byte][]byte{}
 	optDatas := map[[common.AddressLength]byte][]byte{}
+	// Computed when the first DEX order is met; evmMoved is what contract
+	// calls already took from a sender as msg.value, no longer owed.
+	var reserved map[[common.AddressLength]byte]int64
+	evmMoved := map[[common.AddressLength]byte]int64{}
 	for _, th := range bl.GetBlockTransactionsHashes() {
 		poolprefix := common.TransactionPoolHashesDBPrefix[:]
 		t, err := transactionsDefinition.LoadFromDBPoolTx(poolprefix, th.GetBytes())
@@ -500,7 +401,11 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 		if err == nil && n > 512 { // 514 == operation 2 etc...
 			operation := n - 512
 			//DEX checking transaction
-			dexOptData, fromAddress, coinAmount, tokenAmount, price, err := GenerateOptDataDEX(t, operation)
+			if reserved == nil {
+				reserved = blockReservedSpend(bl)
+			}
+			owed := max(reserved[t.TxParam.Sender.ByteValue]-evmMoved[t.TxParam.Sender.ByteValue], 0)
+			dexOptData, fromAddress, coinAmount, tokenAmount, price, err := GenerateOptDataDEX(t, operation, owed)
 			loggerMain.GetLogger().Printf("Token Price: %v\n", price)
 			if err != nil {
 				// An order that cannot execute against the current state -
@@ -561,7 +466,7 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			ba := [common.AddressLength]byte{}
 			copy(ba[:], t.ContractAddress.GetBytes())
 			StateMutex.RLock()
-			ti, ok := State.Tokens[ba]
+			_, ok := State.Tokens[ba]
 			StateMutex.RUnlock()
 			if !ok {
 				loggerMain.GetLogger().Println("no token with a given address")
@@ -571,16 +476,8 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 
 			accDex := account.GetDexAccountByAddressBytes(t.ContractAddress.GetBytes())
 
-			// GenerateOptDataDEX above already refused any price that does not
-			// fit, so this cannot fail. Guarded anyway, and on failure the stored
-			// price is left untouched rather than rejecting the block: a
-			// deterministic skip cannot fork the chain, whereas returning false
-			// here would make one transaction invalidate the entire block.
-			if scaledPrice, ok := scaleTokenPrice(price, common.Decimals, ti.Decimals); ok {
-				accDex.TokenPrice = scaledPrice
-			} else {
-				loggerMain.GetLogger().Printf("WARNING: dex token price %v does not fit in int64; keeping the previous stored price", price)
-			}
+			// Coin base units per whole token (dexTokenPrice): always fits.
+			accDex.TokenPrice = price
 
 			if operation == 2 || operation > 4 { // no sell or buy
 				balances := accDex.Balances
@@ -595,18 +492,16 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 				}
 				accDex.Balances = balances
 			} else {
-				// Guarded shares (zero when the pool side is empty) and
-				// checked conversions, so a degenerate pool cannot inject
-				// NaN/Inf into consensus LP balances (QWID-2026-24).
-				coinPercentTmp := dexPoolShare(-coinAmount, accDex.CoinPool)
-				tokenPercentTmp := dexPoolShare(-tokenAmount, accDex.TokenPool)
-
+				// Every provider's share moves with the pool, in whole base
+				// units (dexShareDelta); an empty pool side moves nothing and
+				// a share that cannot be represented is left alone
+				// (QWID-2026-24).
 				for addr, acc := range accDex.Balances {
 					balances := accDex.Balances[addr]
-					if tv, ok := checkedRoundToken(tokenPercentTmp*float64(acc.TokenBalance), int(ti.Decimals)); ok {
+					if tv, ok := dexShareDelta(acc.TokenBalance, -tokenAmount, accDex.TokenPool); ok {
 						balances.TokenBalance += tv
 					}
-					if cv, ok := checkedRoundToken(coinPercentTmp*float64(acc.CoinBalance), int(common.Decimals)); ok {
+					if cv, ok := dexShareDelta(acc.CoinBalance, -coinAmount, accDex.CoinPool); ok {
 						balances.CoinBalance += cv
 					}
 					accDex.Balances[addr] = balances
@@ -653,13 +548,23 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 				}
 				input = stateDB.DecimalsFunc
 				output, _, _, _, _, err = GetViewFunctionReturns(address, input, bl)
+				// A token that declares more decimals than an int64 amount
+				// can carry (or a value that is no number of decimals at
+				// all) is not registered: the DEX could not account for it.
+				// The low byte of the word used to be taken as it came.
 				var decimals uint8
+				decimalsOK := true
 				if err == nil {
-					decimals = uint8(common.GetUintFromSCByte(common.Hex2Bytes(output)))
+					decimals, decimalsOK = tokenDecimalsFromWord(common.Hex2Bytes(output))
 				}
-				StateMutex.Lock()
-				State.RegisterNewToken(address, name, symbol, decimals)
-				StateMutex.Unlock()
+				if decimalsOK {
+					StateMutex.Lock()
+					State.RegisterNewToken(address, name, symbol, decimals)
+					StateMutex.Unlock()
+				} else {
+					loggerMain.GetLogger().Printf("token %s not registered for the DEX: its decimals() is not a number up to %d",
+						address.GetHex(), MaxTokenDecimals)
+				}
 			}
 		}
 		if err != nil {
@@ -682,6 +587,9 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 			// carry it again.
 			dropBadTransaction(t, bl, err)
 			return false, logs, map[[common.HashLength]byte]common.Address{}, map[[common.AddressLength]byte][]byte{}, map[[common.HashLength]byte][]byte{}
+		}
+		if t.TxData.Amount > 0 {
+			evmMoved[t.TxParam.Sender.ByteValue] += t.TxData.Amount
 		}
 		//TODO we should refund left gas
 		//t.GasUsage -= int64(leftOverGas)
@@ -719,6 +627,25 @@ func EvaluateSCForBlock(bl Block) (bool, map[[common.HashLength]byte]string, map
 func randaoFromParent(bl Block) *common.Hash {
 	h := common.BytesToHash(bl.GetHeader().PreviousHash.GetBytes())
 	return &h
+}
+
+// evmExecutionConfig is the interpreter configuration of every EVM run - block
+// execution, DEX token calls and views.
+//
+// Preimage recording is OFF (audit 2026-11-12 F-EVM-01). With it on, every
+// KECCAK256 input was kept in State.States: never read, never pruned, not
+// reverted when the call failed, and written out with every EVM snapshot -
+// 69 MB for one transaction costing 0.137 QWD.
+func evmExecutionConfig(tracer *vm.GVMLogger) vm.Config {
+	jumpTable := vm.GetGenericJumpTable()
+	return vm.Config{
+		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
+		Tracer:                  tracer,
+		NoBaseFee:               true,
+		EnablePreimageRecording: false,
+		JumpTable:               &jumpTable,
+		ExtraEips:               []int{},
+	}
 }
 
 func evmGasBudget(declared int64) uint64 {
@@ -774,16 +701,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
-	jumpTable := vm.GetGenericJumpTable()
-
-	configCtx := vm.Config{
-		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
-		Tracer:                  &logger,
-		NoBaseFee:               true,
-		EnablePreimageRecording: true,
-		JumpTable:               &jumpTable,
-		ExtraEips:               []int{},
-	}
+	configCtx := evmExecutionConfig(&logger)
 	txCtx := vm.TxContext{
 		Origin:   tx.TxParam.Sender,
 		GasPrice: new(big.Int).SetInt64(0),
@@ -793,7 +711,7 @@ func EvaluateSC(tx transactionsDefinition.Transaction, bl Block) (logs string, r
 	// Inside the lock (S6-02): the precompiles read package-level values, and
 	// every EVM run - block execution and RPC views alike - holds StateMutex,
 	// so no concurrent run can replace them before this one reads them.
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
+	vm.SetQwidOracles(bl.contractOraclePrice(), bl.BaseBlock.RandOracle)
 
 	VM = vm.NewEVM(blockCtx, txCtx, &State, evmChainConfig(), configCtx)
 	defer VM.Cancel()
@@ -894,16 +812,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
-	jumpTable := vm.GetGenericJumpTable()
-
-	configCtx := vm.Config{
-		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
-		Tracer:                  &logger,
-		NoBaseFee:               true,
-		EnablePreimageRecording: true,
-		JumpTable:               &jumpTable,
-		ExtraEips:               []int{},
-	}
+	configCtx := evmExecutionConfig(&logger)
 	txCtx := vm.TxContext{
 		Origin:   tx.TxParam.Sender,
 		GasPrice: new(big.Int).SetInt64(0),
@@ -913,7 +822,7 @@ func EvaluateSCDex(tokenAddress common.Address, sender common.Address, optData [
 	// Inside the lock (S6-02): the precompiles read package-level values, and
 	// every EVM run - block execution and RPC views alike - holds StateMutex,
 	// so no concurrent run can replace them before this one reads them.
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
+	vm.SetQwidOracles(bl.contractOraclePrice(), bl.BaseBlock.RandOracle)
 
 	//nonce := new(big.Int).SetInt64(int64(tx.TxParam.Nonce))
 
@@ -976,16 +885,7 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 		Random: randaoFromParent(bl),
 	}
 	logger := vm.CreateGVMLogger()
-	jumpTable := vm.GetGenericJumpTable()
-
-	configCtx := vm.Config{
-		Debug:                   false, // S6-01: per-opcode tracing slowed every execution ~170x
-		Tracer:                  &logger,
-		NoBaseFee:               true,
-		EnablePreimageRecording: true,
-		JumpTable:               &jumpTable,
-		ExtraEips:               []int{},
-	}
+	configCtx := evmExecutionConfig(&logger)
 	txCtx := vm.TxContext{
 		Origin:   origin,
 		GasPrice: new(big.Int).SetInt64(0),
@@ -995,7 +895,7 @@ func GetViewFunctionReturns(contractAddr common.Address, OptData []byte, bl Bloc
 	// Inside the lock (S6-02): the precompiles read package-level values, and
 	// every EVM run - block execution and RPC views alike - holds StateMutex,
 	// so no concurrent run can replace them before this one reads them.
-	vm.SetQwidOracles(bl.BaseBlock.PriceOracle, bl.BaseBlock.RandOracle)
+	vm.SetQwidOracles(bl.contractOraclePrice(), bl.BaseBlock.RandOracle)
 	VM = vm.NewEVM(blockCtx, txCtx, &State, evmChainConfig(), configCtx)
 	defer VM.Cancel()
 
@@ -1050,7 +950,10 @@ func GetBalance(coin common.Address, owner common.Address) (int64, error) {
 	var bl Block
 	var err error
 
-	bl, err = LoadBlock(h - 1)
+	// The tip: while a block is applied it is that block's parent, so a token
+	// contract reading the price in balanceOf sees the price block execution
+	// serves (the parent's, F-CONS-02); between blocks it is the latest.
+	bl, err = LoadBlock(h)
 	if err != nil {
 		loggerMain.GetLogger().Println(err)
 		return 0, err
@@ -1062,7 +965,12 @@ func GetBalance(coin common.Address, owner common.Address) (int64, error) {
 		return 0, err
 	}
 	if output != "" {
-		bal := common.GetInt64FromSCByte(common.Hex2Bytes(output))
+		// The whole 256-bit word: a balance beyond int64 is refused, not
+		// wrapped into a negative or truncated number.
+		bal, ok := common.Int64FromSCWord(common.Hex2Bytes(output))
+		if !ok {
+			return 0, fmt.Errorf("token %s: balance of %s does not fit in int64", coin.GetHex(), owner.GetHex())
+		}
 		return bal, nil
 	} else {
 		return 0, nil

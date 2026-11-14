@@ -105,10 +105,15 @@ func TestProcessTransactionsMultiSignRecoversMainFromDB(t *testing.T) {
 	}
 }
 
-// TestProcessTransactionsMultiSignStillFailsWhenTrulyAbsent: when the main tx
-// is nowhere to be found the error must stand (with the hash named) - applying
-// blind would be worse than stopping.
-func TestProcessTransactionsMultiSignStillFailsWhenTrulyAbsent(t *testing.T) {
+// TestProcessTransactionsMultiSignIgnoresApprovalOfNothing: an approval whose
+// main transaction is in no pool and no transaction DB approves nothing. It
+// is not a block error (audit 2026-11-12 F-TX-04): anyone can send such an
+// approval, the block check cannot tell, and an error here invalidated a
+// block every node had already received. A main transaction that IS on the
+// chain is always in the confirmed DB of a node that applied its block, so
+// nothing genuine is skipped; a node that lost it would differ in balances
+// and stop at the next block's state root.
+func TestProcessTransactionsMultiSignIgnoresApprovalOfNothing(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
 
@@ -131,7 +136,10 @@ func TestProcessTransactionsMultiSignStillFailsWhenTrulyAbsent(t *testing.T) {
 	missing := common.Hash{}
 	missing[0] = 0xFF
 	conf := msTestTx(t, 3, missing)
-	if err := ProcessTransactionsMultiSign(conf, 120, nil); err == nil {
-		t.Fatal("a main tx missing from every source must stay an error")
+	if err := ProcessTransactionsMultiSign(conf, 120, nil); err != nil {
+		t.Fatalf("an approval of a transaction that exists nowhere failed the block: %v", err)
+	}
+	if transactionsPool.PoolTxMultiSign.HasTransaction(conf.GetHash().GetBytes()) {
+		t.Fatal("the approval of nothing stayed in the multisig pool")
 	}
 }

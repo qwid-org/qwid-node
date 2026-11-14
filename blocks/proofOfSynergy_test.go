@@ -151,30 +151,7 @@ func TestValidDifficulty(t *testing.T) {
 func TestCheckProofOfSynergy(t *testing.T) {
 	logger.InitLogger()
 	defer logger.CloseLogger()
-
-	t.Run("zero hash with low difficulty passes", func(t *testing.T) {
-		bb := BaseBlock{
-			BaseHeader: BaseHeader{
-				Difficulty: 1,
-			},
-			BlockHeaderHash: common.Hash{},
-		}
-		result := CheckProofOfSynergy(bb)
-		assert.True(t, result)
-	})
-
-	t.Run("all-ones hash with max difficulty fails", func(t *testing.T) {
-		var h common.Hash
-		for i := range h {
-			h[i] = 0xff
-		}
-		bb := BaseBlock{
-			BaseHeader: BaseHeader{
-				Difficulty: 0xff00,
-			},
-			BlockHeaderHash: h,
-		}
-		result := CheckProofOfSynergy(bb)
-		assert.False(t, result)
-	})
+	// The lottery is decided on the block nonce, not on BlockHeaderHash
+	// (F-CONS-01): see lottery_test.go. Genesis has no lottery.
+	assert.NoError(t, CheckLottery(Block{}, Block{}))
 }

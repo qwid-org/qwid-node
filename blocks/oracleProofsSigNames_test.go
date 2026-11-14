@@ -93,14 +93,16 @@ func TestSigNamesAtProofHeightUsesConfigAtSigningHeight(t *testing.T) {
 	assert.Equal(t, "MAYO-5", s2)
 }
 
-// Pins the decision that re-verifying an already-embedded oracle proof does not
-// apply the pause gate. Reintroducing it re-judges committed history by today's
-// policy and halts the chain at the first block carrying a proof signed under a
-// since-paused scheme — which is exactly how it failed once.
-func TestHistoricalProofVerificationIgnoresPauseFlags(t *testing.T) {
-	isPaused, isPaused2 := historicalProofPauseFlags()
-	if isPaused || isPaused2 {
-		t.Fatalf("historical proof verification applies the pause gate (%v, %v); a signature valid when it was made must stay valid",
-			isPaused, isPaused2)
+// Pins what the pause gate on embedded proofs covers (audit 2026-11-12
+// F-CONS-06): a paused PRIMARY in the containing block's parent, nothing else.
+// Gating the derived secondary re-judges the proofs of the era when both
+// schemes were live and halts the chain at the first block carrying one -
+// which is exactly how it failed once.
+func TestProofPauseGateLeavesTheSecondaryAlone(t *testing.T) {
+	logger.InitLogger()
+	defer logger.CloseLogger()
+	live := blockWithEnc(10, encConfigBytes(t, "Falcon-512", 897, 1281, 752), encConfigBytes(t, "MAYO-5", 5554, 40, 964))
+	if p, s := proofPauseFlags(live); p || s {
+		t.Fatalf("pause flags under a live primary = %v %v, want none", p, s)
 	}
 }

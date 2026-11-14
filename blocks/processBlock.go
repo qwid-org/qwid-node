@@ -33,8 +33,13 @@ func validateBlockTimestamp(newBlock Block, lastBlock Block, shouldCheck bool) e
 		return fmt.Errorf("timestamp must increase")
 	}
 
-	// 2. Not too far in future (allow 30s clock skew)
-	if shouldCheck && (blockTime > currTime+common.MaxBlockForwardInTime) {
+	// 2. Not too far in the future, on EVERY path. The sync path used to skip
+	// this and accept blocks up to MaxBlockTimeInterval ahead of the clock; a
+	// later timestamp lowers the difficulty, so a syncing node could be fed a
+	// chain built faster than the real one (audit 2026-11-12). A historical
+	// block is in the past and always passes.
+	_ = shouldCheck
+	if blockTime > currTime+common.MaxBlockForwardInTime {
 		return fmt.Errorf("timestamp too far in future")
 	}
 
@@ -69,6 +74,10 @@ func VerifyStakeDependent(newBlock, lastBlock Block) error {
 		newBlock.GetHeader().OperatorAccount,
 	) {
 		return fmt.Errorf("block producer is not an eligible top-128 staking node")
+	}
+	if blockHeight > 0 && !ProducerStakeMatured(mustDelegatedAccountID(newBlock.GetHeader().DelegatedAccount), blockHeight) {
+		return fmt.Errorf("%w: the producer's delegated account needs the node minimum staked for %d blocks",
+			ErrStakeNotMatured, common.MinNumberOfBlocksInStake)
 	}
 	if err := AuthorizeOracleProofSigners(newBlock.BaseBlock.OracleProofs); err != nil {
 		return fmt.Errorf("oracle proof authorization fails: %w", err)
@@ -137,9 +146,9 @@ func CheckBaseBlock(newBlock Block, lastBlock Block, forceShouldCheck bool) (*tr
 		logger.GetLogger().Println("lastBlock.BlockHash", lastBlock.BlockHash.GetHex(), newBlock.GetHeader().PreviousHash.GetHex())
 		return nil, fmt.Errorf("last block hash not match to one stored in new block")
 	}
-	// needs to check block and process
-	if newBlock.CheckProofOfSynergy() == false {
-		return nil, fmt.Errorf("proof of synergy fails of block")
+	// The block nonce wins the lottery (F-CONS-01).
+	if err := CheckLottery(newBlock, lastBlock); err != nil {
+		return nil, err
 	}
 	hash, err := newBlock.CalcBlockHash()
 	if err != nil {
@@ -277,9 +286,35 @@ func checkPauseLeavesRegisteredKey(newBlock, lastBlock Block, slot []byte, prima
 	if err != nil {
 		return err
 	}
-	if _, kerr := pubkeys.LoadPubKeyWithPrimaryOfLength(op, !primary, becomesActive.PubKeyLength); kerr != nil {
-		return fmt.Errorf("refusing to pause %q: the scheme %q that becomes active has no registered key for operator %s - register it first, then pause",
-			cur.SigName, becomesActive.SigName, op.GetHex())
+	// Read as of the parent, like every consensus rule (P-07), and count only
+	// a key this very pause does not void (P-01): a spare vouched for by the
+	// scheme being paused less than a maturity period ago is gone after this
+	// block.
+	if !pubkeys.HasKeySurvivingBreakAt(op, !primary, becomesActive.PubKeyLength, lastBlock.GetHeader().Height, newBlock.GetHeader().Height) {
+		return fmt.Errorf("refusing to pause %q: operator %s has no key of %q, the scheme that becomes active, that outlives the pause - "+
+			"a spare registered with a signature of the paused scheme within the last %d blocks is voided by it; commit to the spare when opening the account, or register it earlier",
+			cur.SigName, op.GetHex(), becomesActive.SigName, common.RecoveryCommitMaturityBlocks)
+	}
+	return nil
+}
+
+// checkOneRevealPerIdentity refuses a block carrying more than one reveal
+// (commitment or address) of the same identity (P-06). Each is verified
+// against the parent state, where they all open the same commitment; only the
+// first can apply, and the others used to fail in the apply pass, after
+// ProcessBlockPubKey had registered the block's keys. Honest producers never
+// build such a block (FilterUnbuildableTransactions).
+func checkOneRevealPerIdentity(txs []transactionsDefinition.Transaction) error {
+	seen := map[[common.AddressLength]byte]bool{}
+	for _, tx := range txs {
+		if !tx.IsRecoveryReveal() {
+			continue
+		}
+		s := tx.GetSenderAddress()
+		if seen[s.ByteValue] {
+			return fmt.Errorf("block carries more than one recovery reveal of %s", s.GetHex())
+		}
+		seen[s.ByteValue] = true
 	}
 	return nil
 }
@@ -355,6 +390,25 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	// unchanged, only pool hygiene improves, so the next production attempt builds
 	// a clean block from the surviving good transactions.
 	var badTxErr error
+	// An account's own stake/unstake operations are paced
+	// (MinNumberOfBlocksInStake): a second one in the same block always fails
+	// when applied, so it is refused here (audit 2026-11-12 F-TX-04).
+	type stakeOp struct {
+		sender [common.AddressLength]byte
+		n      int
+	}
+	ownStakeOps := map[stakeOp]bool{}
+	// Keys each sender adds in this block, against the per-identity limit:
+	// each registration is verified against the parent alone (F-TX-04).
+	newKeys := map[[common.AddressLength]byte]map[[common.AddressLength]byte]bool{}
+	// Room left in the pending pools for what this block will hold
+	// (F-POOL-01). Settlements in the block are not counted: refusing near
+	// the limit is safe, holding beyond it lost the transfer.
+	held := newHeldBlockState()
+	heldRoom := map[int]int{
+		heldEscrow:   transactionsPool.PoolTxEscrow.FreeSlots(),
+		heldMultiSig: transactionsPool.PoolTxMultiSign.FreeSlots(),
+	}
 	// Name the pass. This function runs twice for every block — once to verify
 	// it and once to apply it — and the two lines were identical, so a healthy
 	// block looked like it was being processed twice.
@@ -426,6 +480,9 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 		}
 		loaded = append(loaded, poolTx)
 	}
+	if err := checkOneRevealPerIdentity(loaded); err != nil {
+		return 0, 0, err
+	}
 
 	// Phase 2: verify every signature as of the parent block. Pool bodies are
 	// bound to their hashes (S3-01) but not authenticated: gossip verified
@@ -456,6 +513,48 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 				badTxErr = fmt.Errorf("transaction %x height %d outside the window for block %d", hash[:8], poolTx.GetHeight(), block.GetHeader().Height)
 			}
 			continue
+		}
+
+		if pool := heldPoolOf(poolTx); pool != heldNone {
+			if heldRoom[pool] <= 0 {
+				transactionsPool.RemoveBadTransactionByHash(hash, block.GetHeader().Height, tree)
+				if badTxErr == nil {
+					badTxErr = fmt.Errorf("transaction %x would be held in a full %s pool",
+						hash[:8], map[int]string{heldEscrow: "escrow", heldMultiSig: "multisig"}[pool])
+				}
+				continue
+			}
+			if err := HeldTxRefusal(poolTx, held); err != nil {
+				transactionsPool.RemoveBadTransactionByHash(hash, block.GetHeader().Height, tree)
+				if badTxErr == nil {
+					badTxErr = err
+				}
+				continue
+			}
+			held.note(poolTx)
+			heldRoom[pool]--
+		}
+		if pk := poolTx.TxData.Pubkey; len(pk.GetBytes()) > 0 {
+			sender := poolTx.GetSenderAddress()
+			if pkAddr, aerr := common.PubKeyToAddress(pk.GetBytes(), pk.Primary); aerr == nil &&
+				!pubkeys.IsRegisteredUnder(sender, pkAddr) {
+				held := 0
+				if cur, lerr := pubkeys.LoadAddressesAsOf(sender, lastBlock.GetHeader().Height); lerr == nil {
+					held = len(cur)
+				}
+				if newKeys[sender.ByteValue] == nil {
+					newKeys[sender.ByteValue] = map[[common.AddressLength]byte]bool{}
+				}
+				newKeys[sender.ByteValue][pkAddr.ByteValue] = true
+				if held+len(newKeys[sender.ByteValue]) > common.MaxKeysPerIdentity {
+					transactionsPool.RemoveBadTransactionByHash(hash, block.GetHeader().Height, tree)
+					if badTxErr == nil {
+						badTxErr = fmt.Errorf("transaction %x registers a key beyond the %d keys of %s",
+							hash[:8], common.MaxKeysPerIdentity, sender.GetHex())
+					}
+					continue
+				}
+			}
 		}
 
 		fee, feeErr := poolTx.CalcFee()
@@ -504,6 +603,17 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 			}
 		} else {
 			n, err = account.IntDelegatedAccountFromAddress(recipientAddress)
+		}
+		if err == nil && n > 0 && n < 256 && !isThirdPartyLock(poolTx) {
+			op := stakeOp{sender: address.ByteValue, n: n}
+			if ownStakeOps[op] {
+				transactionsPool.RemoveBadTransactionByHash(poolTx.Hash.GetBytes(), block.GetHeader().Height, tree)
+				if badTxErr == nil {
+					badTxErr = fmt.Errorf("second staking operation of %s on delegated account %d in one block: CheckBlockTransfers", address.GetHex(), n)
+				}
+				continue
+			}
+			ownStakeOps[op] = true
 		}
 		if err == nil && n < 512 { // delegated account
 			stakingAcc := account.GetStakingAccountByAddressBytes(address.GetBytes(), n%256)
@@ -588,7 +698,17 @@ func CheckBlockTransfers(block Block, lastBlock Block, tree *transactionsPool.Me
 	return reward, totalFee, nil
 }
 
-func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.MerkleTree) error {
+// ProcessBlockTransfers applies the block's transfers and rewards. It returns
+// the unused hold fees paid back to settled multisig transactions (F-POOL-01):
+// they leave the fees the chain holds, so the caller lowers the block's
+// BlockFee by them.
+func ProcessBlockTransfers(block Block, reward int64, tree *transactionsPool.MerkleTree) (int64, error) {
+	takeHoldRefunds()
+	err := processBlockTransfers(block, reward, tree)
+	return takeHoldRefunds(), err
+}
+
+func processBlockTransfers(block Block, reward int64, tree *transactionsPool.MerkleTree) error {
 	// Escrow settlement runs at the END of this function, not the start
 	// (QWID-2026-37). It moves balances and then removes the escrow entry from
 	// the pool and its DB mirror; running it first meant that when a LATER
@@ -708,9 +828,11 @@ func RemoveAllTransactionsRelatedToBlock(newBlock Block) {
 	}
 }
 
-func EvaluateSmartContracts(bl *Block) bool {
+// EvaluateSmartContracts executes bl's contract and DEX transactions on top of
+// lastBlock; contracts read the price lastBlock established (F-CONS-02).
+func EvaluateSmartContracts(bl *Block, lastBlock Block) bool {
 	height := (*bl).GetHeader().Height
-	if ok, logs, addresses, codes, _ := EvaluateSCForBlock(*bl); ok {
+	if ok, logs, addresses, codes, _ := EvaluateSCForBlock(bl.withContractPrice(lastBlock)); ok {
 		StateMutex.Lock()
 		State.SetSnapShotNum(height, State.Snapshot())
 		for _, a := range addresses {
@@ -817,7 +939,7 @@ func CheckBlockAndTransactions(newBlock *Block, lastBlock Block, merkleTrie *tra
 	}
 	newBlock.BlockFee = totalFee + lastBlock.BlockFee
 
-	if EvaluateSmartContracts(newBlock) == false {
+	if EvaluateSmartContracts(newBlock, lastBlock) == false {
 		return fmt.Errorf("evaluation of smart contracts in block fails: CheckBlockAndTransactions")
 	}
 
@@ -956,7 +1078,7 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	newBlock.BlockFee = totalFee + lastBlock.BlockFee
 
 	phase = time.Now()
-	if EvaluateSmartContracts(newBlock) == false {
+	if EvaluateSmartContracts(newBlock, lastBlock) == false {
 		return fmt.Errorf("evaluation of smart contracts in block fails: CheckBlockAndTransferFunds")
 	}
 	tSC = time.Since(phase)
@@ -1003,10 +1125,11 @@ func CheckBlockAndTransferFunds(newBlock *Block, lastBlock Block, merkleTrie *tr
 	if err != nil {
 		return err
 	}
-	err = ProcessBlockTransfers(*newBlock, reward, merkleTrie)
+	refunds, err := ProcessBlockTransfers(*newBlock, reward, merkleTrie)
 	if err != nil {
 		return err
 	}
+	newBlock.BlockFee -= refunds
 	applyRecoveryMaintenance(*newBlock, lastBlock)
 	tProcess = time.Since(phase)
 	phase = time.Now()

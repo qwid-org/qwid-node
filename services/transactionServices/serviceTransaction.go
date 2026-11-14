@@ -44,6 +44,37 @@ func GenerateTransactionMsg(txs []transactionsDefinition.Transaction, mesgHead [
 	return n, nil
 }
 
+// chunkTransactions splits txs into batches of at most MaxTxMessageBytes of
+// encoded transactions (a single larger transaction goes alone). An empty
+// input is one empty batch - the keepalive.
+func chunkTransactions(txs []transactionsDefinition.Transaction) [][]transactionsDefinition.Transaction {
+	out := [][]transactionsDefinition.Transaction{}
+	var cur []transactionsDefinition.Transaction
+	size := 0
+	for _, tx := range txs {
+		n := len(tx.GetBytes()) + 4
+		if len(cur) > 0 && size+n > common.MaxTxMessageBytes {
+			out = append(out, cur)
+			cur, size = nil, 0
+		}
+		cur = append(cur, tx)
+		size += n
+	}
+	return append(out, cur)
+}
+
+// GenerateTransactionMsgs is GenerateTransactionMsg cut to the transaction
+// topic's byte budget: one message per batch (audit 2026-11-13).
+func GenerateTransactionMsgs(txs []transactionsDefinition.Transaction, mesgHead []byte, topic [2]byte) []message.TransactionsMessage {
+	chunks := chunkTransactions(txs)
+	msgs := make([]message.TransactionsMessage, 0, len(chunks))
+	for _, c := range chunks {
+		m, _ := GenerateTransactionMsg(c, mesgHead, topic)
+		msgs = append(msgs, m)
+	}
+	return msgs
+}
+
 func GenerateTransactionMsgGT(txsHashes [][]byte, mesgHead []byte, topic [2]byte) (message.TransactionsMessage, error) {
 
 	bm := message.BaseMessage{
@@ -110,8 +141,11 @@ func broadcastTransactionsMsgInLoop() {
 		newTxs := selectNewTransactions(txs, seen) // NP-H10: send only the delta
 		if len(newTxs) > 0 {
 			topic := [2]byte{'T', 'T'}
-			n, err := GenerateTransactionMsg(newTxs, []byte("tx"), topic)
-			if err == nil {
+			for _, chunk := range chunkTransactions(newTxs) {
+				n, err := GenerateTransactionMsg(chunk, []byte("tx"), topic)
+				if err != nil {
+					continue
+				}
 				peers := tcpip.GetPeersConnected(tcpip.TransactionTopic)
 				// With no peer on the transaction topic this loop sends nothing
 				// and says nothing, so locally submitted transactions sit in the
@@ -142,7 +176,7 @@ func broadcastTransactionsMsgInLoop() {
 				// considered them already sent, so anything submitted during an
 				// outage stayed pending until manually resubmitted.
 				if delivered {
-					for _, tx := range newTxs {
+					for _, tx := range chunk {
 						seen[tx.GetHash()] = struct{}{}
 					}
 					sentAnything = true
@@ -184,14 +218,11 @@ func SendTransactionMsg(ip [4]byte, topic [2]byte) bool {
 		return true
 	}
 	txs := transactionsPool.PoolsTx.PeekTransactions(int(common.MaxTransactionsPerBlock), 0)
-	n, err := GenerateTransactionMsg(txs, []byte("tx"), topic)
-	if err != nil {
-		logger.GetLogger().Println(err)
-		return false
-	}
-	if !Send(ip, n.GetBytes()) {
-		logger.GetLogger().Println("could not send standard transaction")
-		return false
+	for _, n := range GenerateTransactionMsgs(txs, []byte("tx"), topic) {
+		if !Send(ip, n.GetBytes()) {
+			logger.GetLogger().Println("could not send standard transaction")
+			return false
+		}
 	}
 	return true
 }

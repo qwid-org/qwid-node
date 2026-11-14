@@ -66,7 +66,7 @@ func TestUnexecutableDexOrderDoesNotInvalidateBlock(t *testing.T) {
 	tx.ContractAddress.ByteValue[19] = 0xEE // no such token
 	k.sign(t, &tx)
 	blk := childOf(last, pooled(t, tx)...)
-	if !EvaluateSmartContracts(&blk) {
+	if !EvaluateSmartContracts(&blk, last) {
 		t.Fatal("an unexecutable DEX order invalidated the whole block")
 	}
 }

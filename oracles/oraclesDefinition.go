@@ -183,49 +183,26 @@ func ParsePriceData(priceData []byte) (map[uint8]PriceOracle, []int64, int64, er
 // Stake comes from the current snapshot, which block application keeps at the
 // parent's.
 func VerifyPriceOracle(height int64, totalStaked int64, priceBlock int64, priceData []byte, fallback int64) bool {
-
-	_, prices, staked, err := ParsePriceData(priceData)
+	parsed, _, staked, err := ParsePriceData(priceData)
 	if err != nil {
 		return false
 	}
-
 	if staked <= 2*totalStaked/3 {
 		return priceBlock == fallback
 	}
-
-	if len(prices) > 2 {
-		sort.Slice(prices, func(i, j int) bool { return prices[i] < prices[j] })
-		prices = prices[1 : len(prices)-1] // Remove min and max
-	}
-
-	if len(prices) == 0 {
+	price, err := stakeWeightedMedian(parsed)
+	if err != nil {
 		return false
 	}
-
-	// Calculate median price
-	price := Median(prices)
-
 	return price == priceBlock
 }
 
+// CalculatePriceOracle is the price of the submissions this node holds for
+// height, computed exactly as a block's price is (PriceFromData).
 func CalculatePriceOracle(height int64, totalStaked int64) (int64, []byte, error) {
-	priceData, prices, staked := GeneratePriceData(height)
-
-	if staked <= 2*totalStaked/3 {
-		return 0, priceData, errors.New("in price, there is not enough staked value for 2/3")
-	}
-
-	if len(prices) > 2 {
-		sort.Slice(prices, func(i, j int) bool { return prices[i] < prices[j] })
-		prices = prices[1 : len(prices)-1] // Remove min and max
-	}
-
-	if len(prices) == 0 {
-		return 0, priceData, errors.New("not enough prices propositions after removing min and max")
-	}
-
-	// Directly calculate median from (possibly) filtered prices
-	return Median(prices), priceData, nil
+	priceData, _, _ := GeneratePriceData(height)
+	price, err := PriceFromData(priceData, totalStaked)
+	return price, priceData, err
 }
 
 func Median(prices []int64) int64 {
@@ -240,25 +217,69 @@ func Median(prices []int64) int64 {
 }
 
 // PriceFromData computes a block's price from its oracle data exactly as
-// VerifyPriceOracle checks it: stake from the current (parent) snapshot,
-// min and max dropped, median of the rest. An error means the price cannot
-// be established and the block carries 0.
+// VerifyPriceOracle checks it: stake from the current (parent) snapshot, the
+// stake-weighted median of the submissions. An error means the price cannot
+// be established and the block carries the parent's forward.
 func PriceFromData(priceData []byte, totalStaked int64) (int64, error) {
-	_, prices, staked, err := ParsePriceData(priceData)
+	parsed, _, staked, err := ParsePriceData(priceData)
 	if err != nil {
 		return 0, err
 	}
 	if staked <= 2*totalStaked/3 {
 		return 0, errors.New("in price, there is not enough staked value for 2/3")
 	}
-	if len(prices) > 2 {
-		sort.Slice(prices, func(i, j int) bool { return prices[i] < prices[j] })
-		prices = prices[1 : len(prices)-1]
+	return stakeWeightedMedian(parsed)
+}
+
+// stakeWeightedMedian is the chain price (audit 2026-11-12 F-CONS-02): the
+// submissions ordered by price, the price at which the stake behind them
+// passes half. Where exactly half the stake lies at or below one price, it is
+// the midpoint of that price and the next.
+//
+// Each delegated account used to count once - drop the lowest and the
+// highest, take the median of the rest - so a few minimum-stake accounts
+// outvoted the stake: four accounts with 1.3% of it set the price against
+// three holding the rest. Weighted, moving the price outside what honest stake
+// reported takes about half of the embedded stake. That also bounds what a
+// producer gains by leaving out proofs (up to a third of the stake may be
+// missing): the price stays among the honest reports. With equal stakes the
+// result is the former one - trimming one value at each end never moved a
+// median.
+func stakeWeightedMedian(subs map[uint8]PriceOracle) (int64, error) {
+	type entry struct {
+		id           uint8
+		price, stake int64
 	}
-	if len(prices) == 0 {
-		return 0, errors.New("not enough prices propositions after removing min and max")
+	entries := make([]entry, 0, len(subs))
+	total := int64(0)
+	for id, po := range subs {
+		if po.Staked <= 0 {
+			continue
+		}
+		entries = append(entries, entry{id, po.Price, po.Staked})
+		total += po.Staked
 	}
-	return Median(prices), nil
+	if total <= 0 {
+		return 0, errors.New("no staked price submissions")
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].price != entries[j].price {
+			return entries[i].price < entries[j].price
+		}
+		return entries[i].id < entries[j].id
+	})
+	cum := int64(0)
+	for i, e := range entries {
+		cum += e.stake
+		if cum > total-cum {
+			return e.price, nil
+		}
+		if cum == total-cum {
+			next := entries[i+1].price
+			return e.price + (next-e.price)/2, nil
+		}
+	}
+	return entries[len(entries)-1].price, nil
 }
 
 // DropSubmissionsAbove forgets price submissions and their proofs from heights

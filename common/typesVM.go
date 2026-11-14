@@ -128,12 +128,40 @@ func GetUintFromSCByte(bs []byte) uint {
 	return uint(binary.BigEndian.Uint64(bs[3*8 : 32]))
 }
 
-// GetInt64FromSCByte: same contract-controlled input, same rule as above.
+// Int64FromSCWord reads a 32-byte ABI word returned by a contract as a
+// non-negative amount. ok is false when the word is short or its value does
+// not fit in int64 - the whole word is read, never just its low bytes: a
+// balance of 2^63 used to come back negative and anything from 2^64 up lost
+// its top bits (audit 2026-11-12).
+func Int64FromSCWord(bs []byte) (int64, bool) {
+	if len(bs) < 32 {
+		return 0, false
+	}
+	for _, b := range bs[:24] {
+		if b != 0 {
+			return 0, false
+		}
+	}
+	v := binary.BigEndian.Uint64(bs[24:32])
+	if v > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(v), true
+}
+
+// GetInt64FromSCByte is Int64FromSCWord for display: a short word reads as
+// zero (QWID-2026-09) and a value beyond int64 as the largest int64, never as
+// a negative or truncated number. Consensus code uses Int64FromSCWord and
+// refuses such a value.
 func GetInt64FromSCByte(bs []byte) int64 {
 	if len(bs) < 32 {
 		return 0
 	}
-	return int64(binary.BigEndian.Uint64(bs[3*8 : 32]))
+	v, ok := Int64FromSCWord(bs)
+	if !ok {
+		return math.MaxInt64
+	}
+	return v
 }
 
 func GetInt64ToBytesSC(value int64) []byte {

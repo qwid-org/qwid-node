@@ -165,8 +165,11 @@ func TestGenesisTransactionsVerifyExplicitly(t *testing.T) {
 func TestNonceShapedTransferIsNotFree(t *testing.T) {
 	k := registeredStageBKey(t)
 	tx := transactionsDefinition.Transaction{
-		TxParam: transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: k.addr, SendingTime: 1, Nonce: 3},
-		TxData:  transactionsDefinition.TxData{Recipient: common.GetDelegatedAccountAddress(5), OptData: make([]byte, 4096)},
+		// The one shape a nonce may have (audit 2026-11-13): header, zero rand
+		// slot, two empty votes, nonce number and gas zero.
+		TxParam: transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: k.addr, SendingTime: 1},
+		TxData: transactionsDefinition.TxData{Recipient: common.GetDelegatedAccountAddress(5),
+			OptData: append(make([]byte, 8+common.HashLength+16), 0, 0, 0, 0, 0, 0, 0, 0)},
 		Height:  common.GetHeight(),
 	}
 	k.sign(t, &tx)

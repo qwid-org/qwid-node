@@ -204,11 +204,18 @@ func TestBlockCalcBlockHash(t *testing.T) {
 		assert.NotEqual(t, h1, h2)
 	})
 
-	t.Run("GetBytesForHash returns same as BaseBlock.GetBytes", func(t *testing.T) {
+	// The block's identity does not depend on its signature (F-CONS-01): the
+	// same block signed once more is the same block.
+	t.Run("block hash ignores the header signature", func(t *testing.T) {
 		bl := buildMinimalBlock()
-		forHash := bl.GetBytesForHash()
-		baseBlockBytes := bl.BaseBlock.GetBytes()
-		assert.True(t, bytes.Equal(forHash, baseBlockBytes))
+		h1, _ := bl.CalcBlockHash()
+		other := bl
+		sig := append([]byte{}, bl.BaseBlock.BaseHeader.Signature.GetBytes()...)
+		sig[len(sig)-1] ^= 0xff
+		other.BaseBlock.BaseHeader.Signature, _ = common.GetSignatureFromBytes(sig, bl.GetHeader().OperatorAccount)
+		h2, _ := other.CalcBlockHash()
+		assert.Equal(t, h1, h2)
+		assert.False(t, bytes.Equal(bl.GetBytes(), other.GetBytes()), "the wire form still carries the signature")
 	})
 }
 

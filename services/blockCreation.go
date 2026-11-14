@@ -30,6 +30,27 @@ var (
 	SendMutexSync      sync.RWMutex
 )
 
+// producerLookbackSeconds: how far back a producer looks for its winning
+// second. A block stamped much earlier than it arrives is left to sync by live
+// nodes (liveAdoption), so older tickets are of no use.
+const producerLookbackSeconds = 5
+
+// ProducerMayTry reports whether this node holds a winning ticket for height
+// now - the cheap check before a candidate block is assembled.
+func ProducerMayTry(lastBlock blocks.Block, height int64) bool {
+	w := wallet.GetActiveWallet()
+	if w == nil {
+		return false
+	}
+	delID, err := account.IntDelegatedAccountFromAddress(common.GetDelegatedAccount())
+	if err != nil || !blocks.ProducerStakeMatured(delID, height) {
+		return false
+	}
+	now := common.GetCurrentTimeStampInSecond()
+	_, _, ok := blocks.WinningSecond(lastBlock, w.MainAddress, common.GetDelegatedAccount(), height, now-producerLookbackSeconds, now)
+	return ok
+}
+
 func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	lastBlock blocks.Block,
 	merkleTrie *transactionsPool.MerkleTree,
@@ -68,20 +89,23 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	reward := account.GetReward(lastBlock.GetBlockSupply())
 	supply := lastBlock.GetBlockSupply() + reward
 
-	// Derive difficulty from the block's own committed timestamp relative to the
-	// parent so validators can recompute and verify it (see blocks.ValidDifficulty).
-	blockTimeStamp := common.GetCurrentTimeStampInSecond()
-	// Validators reject a block not strictly later than its parent
-	// (validateBlockTimestamp) and penalise its sender, so a block built in
-	// the same second as its parent got honest producers banned (audit
-	// F3-04). Wait for the next round instead.
-	if lastBlock.GetHeader().Height >= 1 && blockTimeStamp <= lastBlock.GetBlockTimeStamp() {
-		return blocks.Block{}, fmt.Errorf("parent block %d is not older than this second - not producing yet", lastBlock.GetHeader().Height)
+	// Proof-of-synergy (whitepaper 3.3.3, audit 2026-11-12 F-CONS-01): one
+	// ticket per second. Take the earliest winning second of the last
+	// producerLookbackSeconds - never one ahead of our clock: validators accept
+	// up to MaxBlockForwardInTime of skew, an honest producer uses none. The
+	// difficulty follows from the chosen second (blocks.ValidDifficulty), and a
+	// second after the parent's is the only kind offered (audit F3-04).
+	delID, derr := account.IntDelegatedAccountFromAddress(common.GetDelegatedAccount())
+	if derr != nil || !blocks.ProducerStakeMatured(delID, heightTransaction) {
+		return blocks.Block{}, blocks.ErrStakeNotMatured
 	}
-	ti := blockTimeStamp - lastBlock.GetBlockTimeStamp()
-	bblock := lastBlock.GetBaseBlock()
-	diff := blocks.AdjustDifficulty(bblock.BaseHeader.Difficulty, ti)
-	sendingTimeMessage := common.GetByteInt64(nonceTx[0].GetParam().SendingTime)
+	now := common.GetCurrentTimeStampInSecond()
+	blockTimeStamp, diff, won := blocks.WinningSecond(lastBlock, myWallet.MainAddress, common.GetDelegatedAccount(),
+		heightTransaction, now-producerLookbackSeconds, now)
+	if !won {
+		return blocks.Block{}, blocks.ErrNoWinningSecond
+	}
+	nonceMessage := blocks.NonceMessage(blockTimeStamp, myWallet.MainAddress, common.GetDelegatedAccount(), lastBlock, heightTransaction)
 	rootMerkleTrie := common.Hash{}
 	rootMerkleTrie.Set(merkleTrie.GetRootHash())
 	// The body is fixed BEFORE the header is signed: the signature now covers
@@ -91,7 +115,7 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	// recompute them.
 	// Only proofs whose signers still operate their delegated accounts: a
 	// stale one would get every candidate rejected (AuthorizedOracleProofs).
-	oracleProofs := blocks.AuthorizedOracleProofs(oracles.GenerateOracleProofs(heightTransaction))
+	oracleProofs := blocks.AuthorizedOracleProofs(oracles.GenerateOracleProofs(heightTransaction), lastBlock)
 	priceOracleData, err := blocks.OracleDataFromProofs(oracleProofs)
 	if err != nil {
 		return blocks.Block{}, err
@@ -152,7 +176,7 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 		Encryption1:      encryption1,
 		Encryption2:      encryption2,
 		Signature:        common.Signature{},
-		SignatureMessage: sendingTimeMessage,
+		SignatureMessage: nonceMessage,
 	}
 	// Never sign a header with a key peers cannot verify: only a registered key
 	// of a live scheme. A header cannot carry its pubkey, and a node holding no
@@ -163,12 +187,11 @@ func CreateBlockFromNonceMessage(nonceTx []transactionsDefinition.Transaction,
 	if !ok {
 		return blocks.Block{}, fmt.Errorf("not producing: this node holds no registered key of a live signature scheme")
 	}
-	sign, signatureBlockHeaderMessage, err := bh.Sign(signPrimary)
+	sign, _, err := bh.Sign(signPrimary)
 	if err != nil {
 		return blocks.Block{}, err
 	}
 	bh.Signature = sign
-	bh.SignatureMessage = signatureBlockHeaderMessage
 	bhHash, err := bh.CalcHash()
 	if err != nil {
 		return blocks.Block{}, err

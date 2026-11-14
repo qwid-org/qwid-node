@@ -10,12 +10,8 @@ import (
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 )
 
-var verifyPersistedMultiSign = func(tx *transactionsDefinition.Transaction) bool {
-	// See persistedTxPauseFlags in escrowPersistence.go for why the pause gate
-	// is deliberately not applied to transactions reloaded from the database.
-	isPaused, isPaused2 := persistedTxPauseFlags()
-	return tx.Verify(common.SigName(), common.SigName2(), isPaused, isPaused2)
-}
+// Reload check: see onChain in escrowPersistence.go (F-POOL-02).
+var verifyPersistedMultiSign = onChain
 
 // MultiSignPoolKeyFor returns the grouping key the multisig pool orders by: a
 // main transaction (MultiSignTx unset) groups under its own hash, a

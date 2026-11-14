@@ -125,7 +125,12 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 	var hash [common.HashLength]byte
 	copy(hash[:], tx.GetHash().GetBytes())
 	tp.rwmutex.Lock()
-	if numBans, exists := tp.bannedTransactions[hash]; exists {
+	// Bans gate ADMISSION to the main pool only. The escrow and multisig pools
+	// hold transfers a block has already put on the chain; a node's own bans
+	// (in memory, raised on its own failed block attempts, gone after a
+	// restart) must not decide whether it settles them (audit 2026-11-12
+	// F-POOL-02).
+	if numBans, exists := tp.bannedTransactions[hash]; exists && tp.typePool == 0 {
 		// Refuse once the ban count passes MaxNumberOfTxBans. Previously this
 		// compared against NumberWhenWillBan (100) while BanTransactionByHash
 		// deleted the counter at MaxNumberOfTxBans (50), so the count could
@@ -200,6 +205,13 @@ func (tp *TransactionPool) AddTransaction(tx transactionsDefinition.Transaction,
 // New transactions, signed under the new scheme, re-enter via gossip. Only the
 // main unconfirmed pool is cleared this way — the escrow/multisig pools hold
 // already-included transactions awaiting settlement and must NOT be dropped.
+// FreeSlots reports how many more entries the pool takes.
+func (tp *TransactionPool) FreeSlots() int {
+	tp.rwmutex.RLock()
+	defer tp.rwmutex.RUnlock()
+	return max(tp.maxTransactions-tp.priorityQueue.Len(), 0)
+}
+
 func (tp *TransactionPool) Clear() int {
 	tp.rwmutex.Lock()
 	defer tp.rwmutex.Unlock()

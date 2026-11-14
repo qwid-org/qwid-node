@@ -1,8 +1,14 @@
 package handlers
 
 import (
+	"bufio"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The contact form used to post through smtp.gmail.com to a hard-coded
@@ -107,5 +113,117 @@ func TestBuildContactMessageWithoutSubject(t *testing.T) {
 
 	if !strings.Contains(msg, "Subject: [QWID Contact] New message\r\n") {
 		t.Errorf("empty subject not replaced with a default\n%s", msg)
+	}
+}
+
+func listenLocal(t *testing.T) net.Listener {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return l
+}
+
+func localMailConfig(l net.Listener) mailConfig {
+	host, port, _ := net.SplitHostPort(l.Addr().String())
+	return mailConfig{Host: host, Port: port, To: "support@qwid.org", From: "support@qwid.org"}
+}
+
+// W3: a server that accepts and then says nothing used to hold the request
+// forever. The send now gives up at its deadline.
+func TestSendMailGivesUpOnSilentServer(t *testing.T) {
+	l := listenLocal(t)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close() // hold the connection open, never greet
+		}
+	}()
+	start := time.Now()
+	err := sendMailWithTimeout(localMailConfig(l), nil, []byte("x"), 200*time.Millisecond)
+	if err == nil {
+		t.Fatal("a silent server was reported as a successful send")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("send took %v, the deadline was 200ms", d)
+	}
+}
+
+// The bounded sender still speaks SMTP: a minimal server receives the message.
+func TestSendMailDeliversToWorkingServer(t *testing.T) {
+	l := listenLocal(t)
+	got := make(chan string, 1)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		r := bufio.NewReader(c)
+		fmt.Fprint(c, "220 test ESMTP\r\n")
+		var data strings.Builder
+		inData := false
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if inData {
+				if line == ".\r\n" {
+					inData = false
+					fmt.Fprint(c, "250 queued\r\n")
+					continue
+				}
+				data.WriteString(line)
+				continue
+			}
+			switch cmd := strings.ToUpper(strings.TrimSpace(line)); {
+			case strings.HasPrefix(cmd, "EHLO"):
+				fmt.Fprint(c, "250-test\r\n250 8BITMIME\r\n")
+			case cmd == "DATA":
+				inData = true
+				fmt.Fprint(c, "354 go\r\n")
+			case cmd == "QUIT":
+				fmt.Fprint(c, "221 bye\r\n")
+				got <- data.String()
+				return
+			default:
+				fmt.Fprint(c, "250 ok\r\n")
+			}
+		}
+	}()
+	if err := sendMailWithTimeout(localMailConfig(l), nil, []byte("Subject: hi\r\n\r\nhello"), 2*time.Second); err != nil {
+		t.Fatalf("send to a working server failed: %v", err)
+	}
+	if body := <-got; !strings.Contains(body, "hello") {
+		t.Fatalf("server received %q", body)
+	}
+}
+
+// Only a few sends run at once; the next request is refused at once instead
+// of queueing another goroutine and socket behind a slow SMTP server.
+func TestContactRefusedWhileAllSendSlotsAreBusy(t *testing.T) {
+	t.Setenv("SMTP_USER", "user")
+	t.Setenv("SMTP_PASS", "pass")
+	t.Setenv("SMTP_HOST", "127.0.0.1")
+	t.Setenv("SMTP_PORT", "1") // never reached
+	for i := 0; i < cap(contactSendSlots); i++ {
+		contactSendSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for len(contactSendSlots) > 0 {
+			<-contactSendSlots
+		}
+	})
+	body := `{"name":"A","email":"a@b.c","message":"hi"}`
+	rec := httptest.NewRecorder()
+	SendContact(rec, httptest.NewRequest(http.MethodPost, "/api/contact", strings.NewReader(body)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503 while every send slot is busy", rec.Code)
 	}
 }

@@ -223,7 +223,8 @@ func MaxMessageSizeForTopic(topic [2]byte) int32 {
 		// MaxMsgSizeNonce.
 		return common.MaxMsgSizeNonce
 	case TransactionTopic:
-		return common.MaxMessageSizeBytes
+		// Senders cut transaction batches to MaxTxMessageBytes.
+		return common.MaxMsgSizeTx
 	case SyncTopic:
 		return common.MaxMsgSizeSync
 	case RPCTopic:

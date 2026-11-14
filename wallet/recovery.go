@@ -61,11 +61,13 @@ func (w *Wallet) FindRecoveryIndex(c common.Address, limit uint32) (uint32, erro
 	return 0, fmt.Errorf("commitment %s is not one of this wallet's first %d", c.GetHex(), limit)
 }
 
-// OpeningCommitments are what the registration opening an account carries:
-// Recipient = the ADDRESS of the wallet's key in the other slot than the one
-// registered (the spare, whose public key stays unpublished until needed), and
-// OptData = the recovery commitment C_0 (nil without a recovery phrase). ok is
-// false once the identity has commitments: later registrations leave them.
+// OpeningCommitments are what the registration opening an account commits to:
+// the ADDRESS of the wallet's key in the other slot than the one registered
+// (the spare, whose public key stays unpublished until needed), and the
+// recovery commitment C_0 (nil without a recovery phrase). The caller turns
+// them into the transaction's Recipient and OptData with
+// transactionsDefinition.CommitmentRegistration. ok is false once the
+// identity has commitments: later registrations leave them.
 func (w *Wallet) OpeningCommitments(keys RegisteredKeys, registerPrimary bool) (spare common.Address, recovery []byte, ok bool) {
 	if keys.HasCommitments() {
 		return common.Address{}, nil, false

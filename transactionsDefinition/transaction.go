@@ -420,6 +420,10 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		if err != nil || n <= 0 || n >= 256 || tx.GetData().Amount != 0 {
 			return false
 		}
+		if serr := nonceShapeError(*tx); serr != nil {
+			logger.GetLogger().Println("Verify: nonce:", serr)
+			return false
+		}
 	case txKindGenesis:
 		if tx.Height != 0 {
 			return false
@@ -455,8 +459,19 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			return false
 		}
 	}
-	if tx.GetData().Amount < 0 && err != nil && n < 512 {
+	// A negative amount is an unstake (delegated account 1..255) or a reward
+	// withdrawal (256..511) and nothing else. Addressed to the DEX it used to
+	// pass, and the pool and the block check then counted it as a CREDIT of
+	// the sender, hiding transfers the sender could not pay (audit 2026-11-12
+	// F-TX-03).
+	if tx.GetData().Amount < 0 && !(err == nil && n > 0 && n < 512) {
 		logger.GetLogger().Println("transaction amount has to be larger or equal 0")
+		return false
+	}
+	// An account is escrow or multisig, never both: such a transaction can
+	// never apply (F-TX-04).
+	if tx.TxData.EscrowTransactionsDelay > 0 && tx.TxData.MultiSignNumber > 0 {
+		logger.GetLogger().Println("an account cannot be made both escrow and multisig")
 		return false
 	}
 	// If operator staking transaction, verify both pubkeys are registered
@@ -561,6 +576,16 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	}
 	if tx.IsRecoveryBind() {
 		if err := tx.verifyRecoveryBindShape(); err != nil {
+			logger.GetLogger().Println("Verify:", err)
+			return false
+		}
+	}
+	// The commitment address takes commitment registrations only (P-05); a
+	// multisig approval of one repeats its recipient and is judged as an
+	// approval.
+	if bytes.Equal(tx.TxData.Recipient.GetBytes(), common.RecoveryCommitAddress.GetBytes()) &&
+		bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength)) {
+		if err := tx.verifyCommitmentShape(); err != nil {
 			logger.GetLogger().Println("Verify:", err)
 			return false
 		}
@@ -703,9 +728,35 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// transaction that carried a key.
 		bootstrapAttempt := false
 		bootstrapSpare := false
+		// foreign: the key is registered, but under ANOTHER identity. Binding a
+		// key needs no proof of holding it when another key of the identity
+		// vouches for it, so anyone could bind somebody else's key to itself -
+		// and, the registry holding one identity per key, keep its owner from
+		// ever registering it: a first registration, a committed spare or a
+		// recovery key seen in the mempool (audit 2026-11-12 F-KEY-01). Such a
+		// binding therefore yields to a registration SIGNED WITH THE KEY ITSELF
+		// (the self-registration and committed-spare paths below), and is
+		// refused where no such proof exists (the vouched path).
+		foreign := false
 		if stored, lerr := pubkeys.LoadPubKeyAsOf(pkAddr.GetBytes(), asOf); lerr == nil {
-			addressMatch = bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes())
-			resolvedFromRegistry = true
+			if bytes.Equal(stored.MainAddress.GetBytes(), senderAddr.GetBytes()) {
+				addressMatch = true
+				resolvedFromRegistry = true
+			} else {
+				foreign = true
+			}
+		}
+		// The per-identity key limit, here and not only when the block is
+		// applied (F-TX-04): a registration over the limit used to verify and
+		// then invalidate the block that carried it.
+		if !resolvedFromRegistry {
+			if held, herr := pubkeys.LoadAddressesAsOf(senderAddr, asOf); herr == nil && len(held) >= common.MaxKeysPerIdentity {
+				if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+					logger.GetLogger().Printf("Verify: sender %s already holds the maximum %d keys%s",
+						senderAddr.GetHex(), common.MaxKeysPerIdentity, suppressedNote(skipped))
+				}
+				return false
+			}
 		}
 		// Committed spare: a pure registration of exactly the key whose
 		// address the identity committed to, signed by that key itself. The
@@ -717,10 +768,14 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 			isCommittedSpare(senderAddr, pkAddr, asOf)
 		if spareReveal {
 			addressMatch = true
-			if primary {
-				effPaused = false
-			} else {
-				effPaused2 = false
+			// The pause exemption rests on the key being unpublished; a key
+			// somebody else already put on the chain is public.
+			if !foreign {
+				if primary {
+					effPaused = false
+				} else {
+					effPaused2 = false
+				}
 			}
 		}
 		if !resolvedFromRegistry && !spareReveal {
@@ -749,6 +804,13 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 					addressMatch = bytes.Equal(pk.MainAddress.GetBytes(), senderAddr.GetBytes())
 					authorised = true
 				}
+			}
+			if authorised && foreign {
+				if ok, skipped := shouldLogVerifyFailure(senderAddr); ok {
+					logger.GetLogger().Printf("Verify: key %s is registered to another identity; sender %s can take it only by signing with it%s",
+						pkAddr.GetHex(), senderAddr.GetHex(), suppressedNote(skipped))
+				}
+				return false
 			}
 			// No pause exemption on this path. The stranded-identity escape
 			// hatch (incident 2026-09-08) admitted a registration signed with
@@ -835,7 +897,7 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 		// asOf): once registered, the preimage argument is gone and a forger
 		// of the paused scheme could re-sign this registration at will, each
 		// copy burning the victim's gas.
-		if !resolvedFromRegistry && tx.isPureRegistration() && primary == pkPrimary &&
+		if !resolvedFromRegistry && !foreign && tx.isPureRegistration() && primary == pkPrimary &&
 			bytes.Equal(pkAddr.GetBytes(), senderAddr.GetBytes()) {
 			if primary {
 				effPaused = false
@@ -871,6 +933,45 @@ func (tx *Transaction) verify(kind txKind, sigName, sigName2 string, isPausedTmp
 	}
 	//logger.GetLogger().Println(sigName, sigName2, isPausedTmp, isPaused2Tmp)
 	return wallet.Verify(b, signature.GetBytes(), pkb, sigName, sigName2, effPaused, effPaused2)
+}
+
+// nonceShapeError: a validator nonce has exactly one shape - OptData is the
+// height, the parent hash, the price, a zero rand slot and, optionally, the two
+// length-prefixed votes with nothing after them; the nonce number, gas, key and
+// every policy field are zero. Its free fields used to let one validator sign
+// any number of distinct nonces for one height, each a block candidate to every
+// receiver (audit 2026-11-13).
+func nonceShapeError(tx Transaction) error {
+	const head = 8 + common.HashLength + 16
+	d := tx.TxData
+	if tx.TxParam.Nonce != 0 || tx.GasPrice != 0 || tx.GasUsage != 0 {
+		return fmt.Errorf("nonce number and gas must be zero")
+	}
+	if len(d.Pubkey.GetBytes()) != 0 || d.LockedAmount != 0 || d.ReleasePerBlock != 0 || d.EscrowTransactionsDelay != 0 ||
+		d.MultiSignNumber != 0 || len(d.MultiSignAddresses) != 0 ||
+		!bytes.Equal(tx.TxParam.MultiSignTx.GetBytes(), make([]byte, common.HashLength)) {
+		return fmt.Errorf("a nonce carries no key and no account policy")
+	}
+	if len(d.OptData) < head {
+		return fmt.Errorf("nonce data too short: %d", len(d.OptData))
+	}
+	if !bytes.Equal(d.OptData[head-8:head], make([]byte, 8)) {
+		return fmt.Errorf("the nonce's rand slot must be zero")
+	}
+	if len(d.OptData) == head {
+		return nil
+	}
+	_, rest, err := common.BytesWithLenToBytes(d.OptData[head:])
+	if err != nil {
+		return fmt.Errorf("nonce vote 1: %w", err)
+	}
+	if _, rest, err = common.BytesWithLenToBytes(rest); err != nil {
+		return fmt.Errorf("nonce vote 2: %w", err)
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("%d bytes after the nonce's votes", len(rest))
+	}
+	return nil
 }
 
 // pureShape: no amount, no data, no escrow, multisig or locking settings -

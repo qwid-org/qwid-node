@@ -656,7 +656,7 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 		if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused &&
 			bytes.Equal(ar.GetBytes(), MainWallet.MainAddress.GetBytes()) {
 			if spare, rec, ok := openingCommitments(registerPrimary); ok {
-				ar, scData = spare, rec
+				ar, scData = transactionsDefinition.CommitmentRegistration(spare, rec)
 			}
 		}
 	}
@@ -708,6 +708,12 @@ func SendTransaction(w http.ResponseWriter, r *http.Request) {
 
 	tx.GasUsage = tx.GasUsageEstimate()
 	tx.Height = st.Height
+	// An escrow or multisig sender pays for the pool slot (F-POOL-01).
+	if err := transactionsDefinition.ApplyHoldFeeFromAccount(&tx,
+		clientrpc.Call(SignMessage(append([]byte("ACCT"), tx.TxParam.Sender.GetBytes()...)))); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if err := tx.CalcHashAndSet(); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to calculate hash: %v", err), http.StatusInternalServerError)
@@ -1395,9 +1401,10 @@ func registrationSignPrimary(registerPrimary, defaultPrimary bool) bool {
 	return chosen
 }
 
-// openingCommitments: the registration that opens an account points at the
-// spare key's ADDRESS (Recipient) and carries the recovery commitment C_0
-// (OptData), so the spare's public key stays unpublished until it is needed.
+// openingCommitments: the registration that opens an account goes to the
+// commitment address and carries the spare key's ADDRESS and the recovery
+// commitment C_0 (transactionsDefinition.CommitmentRegistration), so the
+// spare's public key stays unpublished until it is needed.
 // ok=false when the identity already has commitments - or when the node
 // cannot say, in which case it stays a plain self-registration.
 func openingCommitments(registerPrimary bool) (spare common.Address, recovery []byte, ok bool) {
@@ -1492,8 +1499,9 @@ func planRegistration(usePrimaryEncryption bool) (pk common.PubKey, registerPrim
 
 // RegistrationRecipient tells the send form what to put in Recipient when
 // the operator ticks "Include Public Key": the wallet's own address, which
-// SendTransaction swaps for the first recovery commitment when the identity
-// has none yet (registrationRecipient) - one rule, applied at send time, so
+// SendTransaction swaps for the commitment address (with the spare's address
+// and the recovery commitment as data) when the identity has no commitments
+// yet - one rule, applied at send time, so
 // the form never needs to know commitments exist. The note says which it is.
 func RegistrationRecipient(w http.ResponseWriter, r *http.Request) {
 	if !walletReady() {
@@ -2227,6 +2235,12 @@ func ExecuteDex(w http.ResponseWriter, r *http.Request) {
 
 	tx.Height = st.Height
 	tx.GasUsage = tx.GasUsageEstimate()
+	// An escrow or multisig sender pays for the pool slot (F-POOL-01).
+	if err := transactionsDefinition.ApplyHoldFeeFromAccount(&tx,
+		clientrpc.Call(SignMessage(append([]byte("ACCT"), tx.TxParam.Sender.GetBytes()...)))); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if err := tx.CalcHashAndSet(); err != nil {
 		jsonError(w, fmt.Sprintf("Failed to calculate hash: %v", err), http.StatusInternalServerError)

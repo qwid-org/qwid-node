@@ -105,6 +105,11 @@ func SampleTransaction(w *wallet.Wallet) transactionsDefinition.Transaction {
 		GasUsage:  0,
 	}
 	t.GasUsage = t.GasUsageEstimate()
+	// An escrow or multisig sender pays for the pool slot (F-POOL-01).
+	clientrpc.InRPC <- SignMessage(append([]byte("ACCT"), sender.GetBytes()...))
+	if err := transactionsDefinition.ApplyHoldFeeFromAccount(&t, <-clientrpc.OutRPC); err != nil {
+		return transactionsDefinition.Transaction{}
+	}
 
 	clientrpc.InRPC <- SignMessage([]byte("STAT"))
 	var reply []byte

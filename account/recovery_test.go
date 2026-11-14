@@ -20,7 +20,7 @@ func z() [common.AddressLength]byte { return [common.AddressLength]byte{} }
 // address comes from - apply at once: there is nothing earlier to protect.
 func TestFirstCommitmentsApplyImmediately(t *testing.T) {
 	var a Account
-	a.SetCommitments(c(7), c(1), 100)
+	a.SetCommitments(c(7), c(1), 100, true)
 	if a.EffectiveSpareCommit(100) != c(7) || a.EffectiveRecoveryCommit(100) != c(1) {
 		t.Fatal("the opening commitments did not apply immediately")
 	}
@@ -29,8 +29,8 @@ func TestFirstCommitmentsApplyImmediately(t *testing.T) {
 // Every later change waits RecoveryCommitMaturityBlocks.
 func TestLaterCommitmentsMatureAfterD(t *testing.T) {
 	var a Account
-	a.SetCommitments(c(7), c(1), 50)
-	a.SetCommitments(c(8), c(2), 100)
+	a.SetCommitments(c(7), c(1), 50, true)
+	a.SetCommitments(c(8), c(2), 100, true)
 	if a.EffectiveSpareCommit(100+D-1) != c(7) || a.EffectiveRecoveryCommit(100+D-1) != c(1) {
 		t.Fatal("a change applied before maturing")
 	}
@@ -41,9 +41,9 @@ func TestLaterCommitmentsMatureAfterD(t *testing.T) {
 
 func TestLatestCommitWinsAndRestartsClock(t *testing.T) {
 	var a Account
-	a.SetCommitments(c(7), c(1), 50)
-	a.SetCommitments(c(8), c(2), 100)
-	a.SetCommitments(c(9), c(3), 200) // overwrite before maturity
+	a.SetCommitments(c(7), c(1), 50, true)
+	a.SetCommitments(c(8), c(2), 100, true)
+	a.SetCommitments(c(9), c(3), 200, true) // overwrite before maturity
 	if a.EffectiveSpareCommit(100+D) != c(7) || a.EffectiveRecoveryCommit(100+D) != c(1) {
 		t.Fatal("an overwritten change still matured")
 	}
@@ -54,9 +54,9 @@ func TestLatestCommitWinsAndRestartsClock(t *testing.T) {
 
 func TestMaturedCommitStaysActiveWhileNextIsPending(t *testing.T) {
 	var a Account
-	a.SetCommitments(c(7), c(1), 50)
-	a.SetCommitments(c(8), c(2), 100)
-	a.SetCommitments(c(9), c(3), 100+D+5) // the first change matured before this
+	a.SetCommitments(c(7), c(1), 50, true)
+	a.SetCommitments(c(8), c(2), 100, true)
+	a.SetCommitments(c(9), c(3), 100+D+5, true) // the first change matured before this
 	if a.EffectiveSpareCommit(100+D+6) != c(8) || a.EffectiveRecoveryCommit(100+D+6) != c(2) {
 		t.Fatal("a matured change was lost when a newer one was set")
 	}
@@ -66,8 +66,8 @@ func TestMaturedCommitStaysActiveWhileNextIsPending(t *testing.T) {
 // phrase points at a spare key but has no recovery secret to commit to.
 func TestZeroLeavesACommitmentUnchanged(t *testing.T) {
 	var a Account
-	a.SetCommitments(c(7), c(1), 50)
-	a.SetCommitments(c(8), z(), 100)
+	a.SetCommitments(c(7), c(1), 50, true)
+	a.SetCommitments(c(8), z(), 100, true)
 	if a.EffectiveSpareCommit(100+D) != c(8) || a.EffectiveRecoveryCommit(100+D) != c(1) {
 		t.Fatal("a zero recovery commitment cleared the existing one")
 	}
@@ -75,8 +75,8 @@ func TestZeroLeavesACommitmentUnchanged(t *testing.T) {
 
 func TestConsumeIsImmediate(t *testing.T) {
 	var a Account
-	a.SetCommitments(c(7), c(1), 50)
-	a.SetCommitments(c(8), c(2), 100)
+	a.SetCommitments(c(7), c(1), 50, true)
+	a.SetCommitments(c(8), c(2), 100, true)
 	a.ConsumeRecoveryCommit(c(9))
 	if a.EffectiveRecoveryCommit(101) != c(9) || a.RecoveryPendingCommit != z() {
 		t.Fatal("consume did not set next immediately and clear the pending one")
@@ -159,5 +159,19 @@ func TestBindsSurviveSnapshotRoundTrip(t *testing.T) {
 	}
 	if back.Height != 77 || back.RecoveryBinds[[32]byte{3}] != at.RecoveryBinds[[32]byte{3}] {
 		t.Fatalf("binds lost in snapshot: %+v", back)
+	}
+}
+
+// P-02: an account that is not being opened - a key of it was already public -
+// gets no immediate commitments, even its first: they mature, and a scheme
+// break before then voids them.
+func TestFirstCommitmentsOutsideOpeningMature(t *testing.T) {
+	var a Account
+	a.SetCommitments(c(7), c(1), 100, false)
+	if a.EffectiveSpareCommit(100+D-1) != z() || a.EffectiveRecoveryCommit(100+D-1) != z() {
+		t.Fatal("commitments set outside the opening applied before maturing")
+	}
+	if a.EffectiveSpareCommit(100+D) != c(7) || a.EffectiveRecoveryCommit(100+D) != c(1) {
+		t.Fatal("commitments set outside the opening did not mature")
 	}
 }

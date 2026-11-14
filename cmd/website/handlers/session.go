@@ -61,6 +61,7 @@ func (s *SessionStore) Get(token string) *Session {
 		return nil
 	}
 	if time.Since(sess.LastAccess) > sessionTimeout {
+		wipeSessionWallet(sess) // like Delete and the cleanup loop (audit 2026-11-12)
 		delete(s.sessions, token)
 		return nil
 	}

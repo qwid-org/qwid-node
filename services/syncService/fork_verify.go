@@ -55,6 +55,10 @@ func verifyCompetingBlock(block blocks.Block, index int64) forkVerdict {
 	if !bytes.Equal(header.PreviousHash.GetBytes(), parent.BlockHash.GetBytes()) {
 		return forkDeeper
 	}
+	// A rewind deletes blocks: the competitor must also have won its lottery.
+	if blocks.CheckLottery(block, parent) != nil {
+		return forkInvalid
+	}
 	return forkVerified
 }
 
@@ -95,4 +99,23 @@ func merkleRoot(hashes []common.Hash) []byte {
 		return common.EmptyHash().GetBytes()
 	}
 	return nodes[0].Data
+}
+
+// betterTipAtOurHeight: a peer's block at our own height h, on our parent,
+// that wins the equal-height order (earlier second, smaller ticket, smaller
+// hash) and verifies. Without it two blocks won in the same second split the
+// network until one side grew longer.
+func betterTipAtOurHeight(peer blocks.Block, h int64) bool {
+	if h < 1 {
+		return false
+	}
+	ours, err := blocks.LoadBlock(h)
+	if err != nil || bytes.Equal(ours.BlockHash.GetBytes(), peer.BlockHash.GetBytes()) {
+		return false
+	}
+	parent, err := blocks.LoadBlock(h - 1)
+	if err != nil || !blocks.BetterAtEqualHeight(peer, ours, parent) {
+		return false
+	}
+	return verifyCompetingBlock(peer, h) == forkVerified
 }

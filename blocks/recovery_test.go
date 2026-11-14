@@ -7,6 +7,7 @@ import (
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
 	"github.com/qwid-org/qwid-node/logger"
+	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
 	"github.com/qwid-org/qwid-node/transactionsPool"
 )
@@ -98,7 +99,7 @@ func (f recoveryFixture) bindFor(t *testing.T, secret []byte, newKey common.Addr
 	t.Helper()
 	tag, _ := common.RecoveryTag(secret)
 	payload, _ := common.RecoveryPayload(f.owner.addr, newKey, f.next, secret)
-	return account.AddRecoveryBind(common.RecoveryBindKey(f.owner.addr, tag), account.RecoveryBind{
+	return account.AddRecoveryBind(common.RecoveryBindKey(f.owner.addr, tag, payload), account.RecoveryBind{
 		Identity: f.owner.addr.ByteValue, Payload: payload, Height: common.GetHeight() + 1 - age,
 	})
 }
@@ -153,17 +154,28 @@ func TestRevealRejectsExpiredBind(t *testing.T) {
 	}
 }
 
-// The attacker sees S in the mempool and binds its own key: too late, the
-// first bind per tag wins and its payload names the owner's key.
+// The attacker sees S in the owner's reveal in the mempool and binds its own
+// key. That bind is valid - it was made with S - but it is new: it cannot be
+// revealed for RecoveryBindDelayBlocks, and the owner's reveal, whose bind
+// already matured, consumes the commitment first.
 func TestMempoolCopyOfSecretCannotRedirectTheReveal(t *testing.T) {
 	f := newRecoveryFixture(t)
 	f.bindFor(t, f.secret, f.newKey.addr, common.RecoveryBindDelayBlocks)
 	attacker := freshPrimaryKey(t)
-	if f.bindFor(t, f.secret, attacker.addr, common.RecoveryBindExpiryBlocks) {
-		t.Fatal("a second bind for the same tag replaced the first")
+	if !f.bindFor(t, f.secret, attacker.addr, 0) {
+		t.Fatal("setup: the attacker's bind was not stored")
 	}
-	if verifyNow(f.reveal(t, f.secret, attacker, attacker)) {
-		t.Fatal("the attacker's key was registered with the owner's secret")
+	theft := f.reveal(t, f.secret, attacker, attacker)
+	if verifyNow(theft) {
+		t.Fatal("a bind made after the secret became public was revealed at once")
+	}
+	if err := ProcessTransaction(f.reveal(t, f.secret, f.newKey, f.newKey), common.GetHeight()+1, 0); err != nil {
+		t.Fatal(err)
+	}
+	// However long the attacker waits now, the secret opens nothing.
+	acc := account.Accounts.AllAccounts[f.owner.addr.ByteValue]
+	if c, _ := common.RecoveryCommitment(f.secret); acc.EffectiveRecoveryCommit(1<<40) == c.ByteValue {
+		t.Fatal("the owner's reveal left the revealed commitment in force")
 	}
 }
 
@@ -236,6 +248,12 @@ func TestOpeningCommitmentsApplyWithoutCreatingAccounts(t *testing.T) {
 	spare := secondaryKey(t)
 	c, _ := common.RecoveryCommitment(recoverySecret(5))
 	reg := commitmentRegistration(t, owner, spare.addr, &c, 31)
+	// The account is opened by this block: its keys were not public before.
+	for _, k := range []common.Address{owner.addr, owner.spare.addr} {
+		if err := pubkeys.StoreRegistrationHeight(k, 100); err != nil {
+			t.Fatal(err)
+		}
+	}
 	before := balanceOf(t, owner.addr)
 	if err := ProcessTransaction(reg, 100, 0); err != nil {
 		t.Fatal(err)
@@ -254,7 +272,9 @@ func TestOpeningCommitmentsApplyWithoutCreatingAccounts(t *testing.T) {
 	}
 }
 
-func TestBindApplyKeepsTheFirst(t *testing.T) {
+// Binds of one tag with different payloads sit side by side (P-03); repeating
+// a bind keeps the first, so its age cannot be reset.
+func TestBindApplyKeepsEachPayloadsFirst(t *testing.T) {
 	payer := registeredStageBKey(t)
 	fund(payer.addr)
 	id := testAddress(0x77)
@@ -268,15 +288,19 @@ func TestBindApplyKeepsTheFirst(t *testing.T) {
 		signIn(t, &tx, payer, true)
 		return tx
 	}
-	if err := ProcessTransaction(mk(1, 1), 100, 0); err != nil {
-		t.Fatal(err)
+	for i, step := range []struct {
+		payload byte
+		height  int64
+	}{{1, 100}, {2, 101}, {1, 102}} {
+		if err := ProcessTransaction(mk(step.payload, int64(i+1)), step.height, 0); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := ProcessTransaction(mk(2, 2), 101, 0); err != nil {
-		t.Fatal(err)
-	}
-	b, ok := account.GetRecoveryBind(common.RecoveryBindKey(id, [32]byte{1}))
-	if !ok || b.Payload != ([32]byte{1}) || b.Height != 100 {
-		t.Fatalf("first bind not kept: %+v", b)
+	for payload, height := range map[byte]int64{1: 100, 2: 101} {
+		b, ok := account.GetRecoveryBind(common.RecoveryBindKey(id, [32]byte{1}, [32]byte{payload}))
+		if !ok || b.Payload != ([32]byte{payload}) || b.Height != height {
+			t.Fatalf("bind with payload %d: %+v (stored %v), want it from height %d", payload, b, ok, height)
+		}
 	}
 }
 
@@ -292,7 +316,8 @@ func TestRevealConsumesCommitmentAndBind(t *testing.T) {
 		t.Fatal("reveal did not install the next commitment")
 	}
 	tag, _ := common.RecoveryTag(f.secret)
-	if _, ok := account.GetRecoveryBind(common.RecoveryBindKey(f.owner.addr, tag)); ok {
+	payload, _ := common.RecoveryPayload(f.owner.addr, f.newKey.addr, f.next, f.secret)
+	if _, ok := account.GetRecoveryBind(common.RecoveryBindKey(f.owner.addr, tag, payload)); ok {
 		t.Fatal("consumed bind kept")
 	}
 }
@@ -374,17 +399,18 @@ func TestMaintenanceVoidsPendingOnlyOnBreakage(t *testing.T) {
 // delay and the chance to cancel, a multisig account its approvals. It used to
 // be set at inclusion for every account, its maturity counted from there.
 
-// commitmentRegistration re-registers owner's primary key with Recipient = the
-// spare key's address and, if recovery is given, the recovery commitment in
-// OptData.
+// commitmentRegistration re-registers owner's primary key as a commitment
+// registration: the spare key's address and, if given, the recovery
+// commitment.
 func commitmentRegistration(t *testing.T, owner stageBKey, spare common.Address, recovery *common.Address, nonce int64) transactionsDefinition.Transaction {
 	t.Helper()
 	reg := pureRegistration(t, owner.addr, enclosed(t, owner, owner.addr, true), owner, true)
 	reg.TxParam.Nonce = nonce
-	reg.TxData.Recipient = spare
+	var rec []byte
 	if recovery != nil {
-		reg.TxData.OptData = recovery.GetBytes()
+		rec = recovery.GetBytes()
 	}
+	reg.TxData.Recipient, reg.TxData.OptData = transactionsDefinition.CommitmentRegistration(spare, rec)
 	signIn(t, &reg, owner, true)
 	return reg
 }
@@ -436,8 +462,11 @@ func TestEscrowCommitmentAppliesWhenTheDelayEnds(t *testing.T) {
 		t.Fatal("the commitment applied before the escrow delay ended")
 	}
 	_ = ProcessTransactionsEscrow(110, nil)
-	if p := spareCommitAt(owner.addr, 110); p != c.ByteValue {
-		t.Fatalf("after the delay the commitment is %x, want it in force from 110 (the account's first)", p)
+	if p := spareCommitAt(owner.addr, 110+common.RecoveryCommitMaturityBlocks-1); p != ([common.AddressLength]byte{}) {
+		t.Fatal("a settled escrow commitment applied before maturing")
+	}
+	if p := spareCommitAt(owner.addr, 110+common.RecoveryCommitMaturityBlocks); p != c.ByteValue {
+		t.Fatalf("the settled commitment is %x, want it to mature counting from 110", p)
 	}
 	if _, exists := account.GetAccountByAddressBytes(c.GetBytes()); exists {
 		t.Fatal("settlement created an account for the commitment address")
@@ -480,7 +509,7 @@ func TestMultiSignCommitmentNeedsItsApprovals(t *testing.T) {
 	}
 	approval := transactionsDefinition.Transaction{
 		TxParam: transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: signer, SendingTime: 1, Nonce: 24, MultiSignTx: reg.Hash},
-		TxData:  transactionsDefinition.TxData{Recipient: c},
+		TxData:  transactionsDefinition.TxData{Recipient: common.RecoveryCommitAddress, OptData: reg.TxData.OptData},
 		Height:  101, GasPrice: 1, GasUsage: 1,
 	}
 	if err := approval.CalcHashAndSet(); err != nil {
@@ -492,8 +521,11 @@ func TestMultiSignCommitmentNeedsItsApprovals(t *testing.T) {
 	if err := ProcessTransactionsMultiSign(approval, 101, nil); err != nil {
 		t.Fatal(err)
 	}
-	if p := spareCommitAt(owner.addr, 101); p != c.ByteValue {
-		t.Fatalf("after the approval the commitment is %x, want it in force from 101 (the account's first)", p)
+	if p := spareCommitAt(owner.addr, 101+common.RecoveryCommitMaturityBlocks-1); p != ([common.AddressLength]byte{}) {
+		t.Fatal("an approved commitment applied before maturing")
+	}
+	if p := spareCommitAt(owner.addr, 101+common.RecoveryCommitMaturityBlocks); p != c.ByteValue {
+		t.Fatalf("the approved commitment is %x, want it to mature counting from 101", p)
 	}
 }
 
@@ -580,7 +612,7 @@ func (o addressOpening) bind(t *testing.T, oldPub []byte, newKey common.Address,
 	t.Helper()
 	tag, _ := common.RecoveryTag(oldPub)
 	payload, _ := common.AddressOpenPayload(o.id, newKey, o.next, o.spare, oldPub)
-	return account.AddRecoveryBind(common.RecoveryBindKey(o.id, tag), account.RecoveryBind{
+	return account.AddRecoveryBind(common.RecoveryBindKey(o.id, tag, payload), account.RecoveryBind{
 		Identity: o.id.ByteValue, Payload: payload, Height: common.GetHeight() + 1 - age,
 	})
 }
@@ -617,7 +649,8 @@ func TestAddressRevealOpensAnUnregisteredAccount(t *testing.T) {
 		t.Fatal("the opening did not install the account's commitments")
 	}
 	tag, _ := common.RecoveryTag(o.old.pub)
-	if _, ok := account.GetRecoveryBind(common.RecoveryBindKey(o.id, tag)); ok {
+	payload, _ := common.AddressOpenPayload(o.id, o.newKey.addr, o.next, o.spare, o.old.pub)
+	if _, ok := account.GetRecoveryBind(common.RecoveryBindKey(o.id, tag, payload)); ok {
 		t.Fatal("the consumed bind was kept")
 	}
 }
@@ -652,18 +685,265 @@ func TestAddressRevealOnlyForAccountsWithoutKeys(t *testing.T) {
 	}
 }
 
-// Someone who sees the old key in the owner's reveal binds too late: the first
-// bind names the owner's new key.
-func TestAddressRevealFirstBindWins(t *testing.T) {
+// Someone who sees the old key and its signature in the owner's reveal can
+// bind a key of its own, but the signature covers the owner's new key: it
+// opens the account for nobody else.
+func TestAddressRevealSignatureNamesTheNewKey(t *testing.T) {
 	o := newAddressOpening(t)
 	o.bind(t, o.old.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	ownersSig := o.oldSignature(t, o.old)
 	attacker := secondaryKey(t)
-	if o.bind(t, o.old.pub, attacker.addr, common.RecoveryBindExpiryBlocks) {
-		t.Fatal("a second bind for the same old key replaced the first")
-	}
 	o2 := o
 	o2.newKey = attacker
-	if verifyNow(o2.reveal(t, o.old, o2.oldSignature(t, o.old), attacker)) {
-		t.Fatal("the attacker's key opened the account")
+	if !o2.bind(t, o.old.pub, attacker.addr, common.RecoveryBindExpiryBlocks) {
+		t.Fatal("setup: the attacker's bind was not stored")
+	}
+	if verifyNow(o2.reveal(t, o.old, ownersSig, attacker)) {
+		t.Fatal("the attacker's key opened the account with the owner's signature")
+	}
+}
+
+// P-03: the tag of an address opening is the hash of the old public key, which
+// may be known to others. A bind made with it ahead of the owner must not keep
+// the owner out.
+func TestAddressRevealIsNotBlockedByAnEarlierBind(t *testing.T) {
+	o := newAddressOpening(t)
+	squatter := secondaryKey(t)
+	o.bind(t, o.old.pub, squatter.addr, common.RecoveryBindExpiryBlocks)
+	o.bind(t, o.old.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	if !verifyNow(o.reveal(t, o.old, o.oldSignature(t, o.old), o.newKey)) {
+		t.Fatal("an earlier bind with the same old key blocked the owner's opening")
+	}
+}
+
+// P-02: "first commitments apply at once" is only safe when the account is
+// being opened - no key of it was public before this block, so nobody could
+// have forged a signature. An identity whose key was already registered (a
+// validator holding both keys and no commitments) gets no such shortcut: a
+// forger of the not-yet-paused scheme would otherwise plant its own
+// commitments in force, where the break's voiding cannot reach them.
+func TestFirstCommitmentsOfAPublishedKeyMature(t *testing.T) {
+	owner := registeredStageBKey(t) // keys registered at height 0
+	fund(owner.addr)
+	spare := secondaryKey(t)
+	c, _ := common.RecoveryCommitment(recoverySecret(5))
+	reg := commitmentRegistration(t, owner, spare.addr, &c, 31)
+	if err := ProcessTransaction(reg, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	acc, _ := account.GetAccountByAddressBytes(owner.addr.GetBytes())
+	var zero [common.AddressLength]byte
+	if acc.EffectiveSpareCommit(100) != zero || acc.EffectiveRecoveryCommit(100) != zero {
+		t.Fatal("commitments of an identity with a published key applied at once")
+	}
+	at := 100 + common.RecoveryCommitMaturityBlocks
+	if acc.EffectiveSpareCommit(at) != spare.addr.ByteValue || acc.EffectiveRecoveryCommit(at) != c.ByteValue {
+		t.Fatal("the commitments did not mature")
+	}
+	if n := account.VoidPendingRecoveryCommits(101); n != 1 {
+		t.Fatalf("a scheme break voided %d accounts' commitments, want 1", n)
+	}
+	acc, _ = account.GetAccountByAddressBytes(owner.addr.GetBytes())
+	if acc.HasCommitments() {
+		t.Fatal("commitments set before a scheme break survived it")
+	}
+}
+
+// bindTx is a bind transaction as it travels: anyone funded may send one.
+func bindTx(t *testing.T, payer stageBKey, identity common.Address, tag, payload [32]byte, nonce int64) transactionsDefinition.Transaction {
+	t.Helper()
+	tx := transactionsDefinition.Transaction{
+		TxParam: transactionsDefinition.TxParam{ChainID: common.GetChainID(), Sender: payer.addr, SendingTime: 1, Nonce: nonce},
+		TxData: transactionsDefinition.TxData{Recipient: common.RecoveryBindAddress,
+			OptData: transactionsDefinition.BuildRecoveryBindOptData(identity, tag, payload)},
+		Height: common.GetHeight(), GasPrice: 1, GasUsage: 1_000_000,
+	}
+	signIn(t, &tx, payer, true)
+	return tx
+}
+
+// P-03: the tag of a bind is public the moment the bind is in the mempool, so
+// anyone can land a bind with the same identity and tag and a payload of its
+// own first. That must not block the owner: the reveal is matched with the
+// bind that carries ITS payload, and a payload made without the secret matches
+// no reveal at all.
+func TestFrontRunBindDoesNotBlockTheReveal(t *testing.T) {
+	f := newRecoveryFixture(t)
+	acc := account.Accounts.AllAccounts[f.owner.addr.ByteValue]
+	payer := registeredStageBKey(t)
+	account.Accounts.AllAccounts[payer.addr.ByteValue] = account.Account{Address: payer.addr.ByteValue, Balance: 1_000_000_000}
+	account.Accounts.AllAccounts[f.owner.addr.ByteValue] = acc
+
+	tag, _ := common.RecoveryTag(f.secret)
+	payload, _ := common.RecoveryPayload(f.owner.addr, f.newKey.addr, f.next, f.secret)
+	h := common.GetHeight() + 1 - common.RecoveryBindDelayBlocks
+	// The front-runner copied identity and tag from the owner's bind and got
+	// into the earlier block.
+	if err := ProcessTransaction(bindTx(t, payer, f.owner.addr, tag, [32]byte{0xEE}, 1), h-1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProcessTransaction(bindTx(t, payer, f.owner.addr, tag, payload, 2), h, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !verifyNow(f.reveal(t, f.secret, f.newKey, f.newKey)) {
+		t.Fatal("a front-run bind with the same tag blocked the owner's reveal")
+	}
+}
+
+// P-04: a commitment change waiting out an escrow delay or multisig approvals
+// is pending exactly like one maturing in the account, and may have been
+// signed with the scheme a break has just exposed. The break voids it too -
+// it used to settle afterwards and mature a week later.
+func TestBreakVoidsCommitmentHeldInEscrow(t *testing.T) {
+	owner := registeredStageBKey(t)
+	fund(owner.addr)
+	freshPolicyPools(t)
+	withAccountPolicy(t, owner.addr, 10)
+	c, _ := common.RecoveryCommitment(recoverySecret(5))
+	reg := commitmentRegistration(t, owner, c, nil, 21)
+	if err := ProcessTransaction(reg, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	pausePrimaryAt(t, 101)
+	if transactionsPool.PoolTxEscrow.HasTransaction(reg.Hash.GetBytes()) {
+		t.Fatal("a commitment change held in escrow outlived the scheme break")
+	}
+	_ = ProcessTransactionsEscrow(110, nil)
+	if p := spareCommitAt(owner.addr, 1<<40); p != ([common.AddressLength]byte{}) {
+		t.Fatal("a commitment change held in escrow settled after the scheme break")
+	}
+}
+
+// Rewinding the break puts the held change back: the pools are consensus
+// state and return to the rewind target with everything else (F3-07).
+func TestRewindRestoresCommitmentVoidedInEscrow(t *testing.T) {
+	owner := registeredStageBKey(t)
+	fund(owner.addr)
+	freshPolicyPools(t)
+	withAccountPolicy(t, owner.addr, 10)
+	c, _ := common.RecoveryCommitment(recoverySecret(5))
+	reg := commitmentRegistration(t, owner, c, nil, 21)
+	if err := ProcessTransaction(reg, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	pausePrimaryAt(t, 101)
+	transactionsPool.UndoPendingPoolsAbove(100)
+	if !transactionsPool.PoolTxEscrow.HasTransaction(reg.Hash.GetBytes()) {
+		t.Fatal("rewinding the break did not return the held commitment change to escrow")
+	}
+}
+
+func TestBreakVoidsCommitmentAwaitingApprovals(t *testing.T) {
+	owner := registeredStageBKey(t)
+	signer := testAddress(0x61)
+	fund(owner.addr, signer)
+	freshPolicyPools(t)
+	withAccountPolicy(t, owner.addr, 0, signer)
+	c, _ := common.RecoveryCommitment(recoverySecret(7))
+	reg := commitmentRegistration(t, owner, c, nil, 23)
+	if err := ProcessTransaction(reg, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	pausePrimaryAt(t, 101)
+	if transactionsPool.PoolTxMultiSign.HasTransaction(reg.Hash.GetBytes()) {
+		t.Fatal("a commitment change awaiting approvals outlived the scheme break")
+	}
+}
+
+// Held transfers are not commitments: the break leaves them alone.
+func TestBreakKeepsHeldTransfers(t *testing.T) {
+	owner := registeredStageBKey(t)
+	fund(owner.addr)
+	freshPolicyPools(t)
+	withAccountPolicy(t, owner.addr, 10)
+	transfer := signedTx(t, owner, testAddress(0x55), 1, common.GetHeight(), 3)
+	if err := ProcessTransaction(transfer, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !transactionsPool.PoolTxEscrow.HasTransaction(transfer.Hash.GetBytes()) {
+		t.Fatal("setup: the transfer is not held in escrow")
+	}
+	pausePrimaryAt(t, 101)
+	if !transactionsPool.PoolTxEscrow.HasTransaction(transfer.Hash.GetBytes()) {
+		t.Fatal("the scheme break removed a held transfer")
+	}
+}
+
+// P-06: every reveal of a block is verified against the parent state, where
+// two reveals of one identity both open its commitment. The second then
+// failed only when applied - after the block's keys had been written. The
+// check pass refuses such a block outright.
+func TestBlockWithTwoRevealsOfOneIdentityIsRefusedByTheCheck(t *testing.T) {
+	a, b := testAddress(0x42), testAddress(0x43)
+	reveal := func(id common.Address, opt []byte) transactionsDefinition.Transaction {
+		return transactionsDefinition.Transaction{
+			TxParam: transactionsDefinition.TxParam{Sender: id},
+			TxData:  transactionsDefinition.TxData{Recipient: common.RecoveryRevealAddress, OptData: opt},
+		}
+	}
+	commitment := make([]byte, common.RecoveryRevealOptDataLength)
+	opening := make([]byte, common.RecoveryRevealOptDataLength+10)
+	transfer := transactionsDefinition.Transaction{TxParam: transactionsDefinition.TxParam{Sender: a}}
+	if err := checkOneRevealPerIdentity([]transactionsDefinition.Transaction{reveal(a, commitment), transfer, reveal(b, commitment)}); err != nil {
+		t.Fatalf("reveals of different identities were refused: %v", err)
+	}
+	if checkOneRevealPerIdentity([]transactionsDefinition.Transaction{reveal(a, commitment), reveal(b, commitment), reveal(a, commitment)}) == nil {
+		t.Fatal("two reveals of one identity in a block passed the check")
+	}
+	if checkOneRevealPerIdentity([]transactionsDefinition.Transaction{reveal(a, opening), reveal(a, commitment)}) == nil {
+		t.Fatal("an address reveal and a commitment reveal of one identity passed the check")
+	}
+}
+
+// openingWithScheme is an address opening whose old key belongs to the named
+// liboqs scheme, correctly signed and bound.
+func openingWithScheme(t *testing.T, scheme string) transactionsDefinition.Transaction {
+	t.Helper()
+	o := newAddressOpening(t)
+	var old stageBKey
+	if err := old.s.Init(scheme, nil); err != nil {
+		t.Skipf("liboqs has no %s: %v", scheme, err)
+	}
+	var err error
+	if old.pub, err = old.s.GenerateKeyPair(); err != nil {
+		t.Fatal(err)
+	}
+	if old.addr, err = common.PubKeyToAddress(old.pub, true); err != nil {
+		t.Fatal(err)
+	}
+	o.old, o.id = old, old.addr
+	fund(o.id)
+	o.bind(t, old.pub, o.newKey.addr, common.RecoveryBindDelayBlocks)
+	tx := o.reveal(t, old, o.oldSignature(t, old), o.newKey)
+	r, err := transactionsDefinition.ParseAddressReveal(tx.TxData.OptData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OldScheme = scheme
+	tx.TxData.OptData = transactionsDefinition.BuildAddressRevealOptData(r)
+	signIn(t, &tx, o.newKey, false)
+	return tx
+}
+
+// P-08: an address is opened with the key it is the hash of, and that key's
+// scheme used to be whatever liboqs scheme the revealer named. Only schemes
+// this chain has used count: the two in force and the ones it retired.
+func TestAddressRevealOnlyWithASchemeTheChainUsed(t *testing.T) {
+	logger.InitLogger()
+	const foreign = "ML-DSA-44"
+	if verifyNow(openingWithScheme(t, foreign)) {
+		t.Fatal("an address was opened with a key of a scheme the chain never used")
+	}
+	// The chain retires the scheme: a block replaces it in the spare slot.
+	tx := openingWithScheme(t, foreign)
+	mlDSA44 := encCfg(t, foreign, 1312, 2560, 2420, true)
+	applyRecoveryMaintenance(blockWithEnc(50, falcon512(t, false), mayo5(t)), blockWithEnc(49, falcon512(t, false), mlDSA44))
+	if !verifyNow(tx) {
+		t.Fatal("an address of a retired scheme could not be opened")
+	}
+	// A rewind below that block takes the record back.
+	UnregisterPubKeysAboveHeight(49, 50)
+	if verifyNow(tx) {
+		t.Fatal("after the rewind the scheme still counts as retired")
 	}
 }

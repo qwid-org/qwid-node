@@ -26,6 +26,9 @@ const (
 var (
 	RecoveryBindAddress   = recoveryAddress('B')
 	RecoveryRevealAddress = recoveryAddress('R')
+	// RecoveryCommitAddress marks a commitment registration (P-05): the spare
+	// key's address and the recovery commitment travel in OptData.
+	RecoveryCommitAddress = recoveryAddress('C')
 )
 
 func recoveryAddress(kind byte) Address {
@@ -41,7 +44,8 @@ func recoveryAddress(kind byte) Address {
 
 func IsRecoveryAddress(a Address) bool {
 	return bytes.Equal(a.GetBytes(), RecoveryBindAddress.GetBytes()) ||
-		bytes.Equal(a.GetBytes(), RecoveryRevealAddress.GetBytes())
+		bytes.Equal(a.GetBytes(), RecoveryRevealAddress.GetBytes()) ||
+		bytes.Equal(a.GetBytes(), RecoveryCommitAddress.GetBytes())
 }
 
 func recoveryHash(size int, domain string, parts ...[]byte) ([]byte, error) {
@@ -77,8 +81,9 @@ func RecoveryCommitment(secret []byte) (Address, error) {
 	return a, nil
 }
 
-// RecoveryTag identifies S in a bind without revealing it. Nobody can make a
-// bind with the right tag before S is public, so the first bind per tag wins.
+// RecoveryTag identifies S in a bind without revealing it. The tag itself is
+// public as soon as a bind carrying it is in the mempool, so it proves nothing
+// about who made a bind: what ties a bind to S is its payload.
 func RecoveryTag(secret []byte) ([32]byte, error) {
 	var t [32]byte
 	b, err := recoveryHash(32, "qwid-recovery-tag", secret)
@@ -101,10 +106,17 @@ func RecoveryPayload(identity, newKey, next Address, secret []byte) ([32]byte, e
 	return p, nil
 }
 
-// RecoveryBindKey is the bind store's key for (identity, tag).
-func RecoveryBindKey(identity Address, tag [32]byte) [32]byte {
+// RecoveryBindKey is the bind store's key for (identity, tag, payload). The
+// payload is part of it so that a bind copied from the mempool - same identity
+// and tag, another payload, landed first - sits beside the owner's instead of
+// taking its place (P-03): a reveal looks up the bind with exactly its own
+// payload, and a payload made without S matches no reveal. Someone who learns
+// S from a reveal in the mempool can bind a payload of its own, but that bind
+// is RecoveryBindDelayBlocks away from being usable, and the owner's reveal,
+// already matured, consumes the commitment long before.
+func RecoveryBindKey(identity Address, tag, payload [32]byte) [32]byte {
 	var k [32]byte
-	b, _ := recoveryHash(32, "qwid-recovery-bind-key", identity.GetBytes(), tag[:])
+	b, _ := recoveryHash(32, "qwid-recovery-bind-key", identity.GetBytes(), tag[:], payload[:])
 	copy(k[:], b)
 	return k
 }

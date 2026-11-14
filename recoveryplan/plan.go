@@ -94,7 +94,7 @@ func Make(w *wallet.Wallet, keys wallet.RegisteredKeys, primaryPaused bool, defa
 		return r, err
 	}
 	r.BindData = transactionsDefinition.BuildRecoveryBindOptData(w.MainAddress, tag, payload)
-	r.BindKey = common.RecoveryBindKey(w.MainAddress, tag)
+	r.BindKey = common.RecoveryBindKey(w.MainAddress, tag, payload)
 	return r, nil
 }
 
@@ -133,7 +133,7 @@ func planAddressOpening(w *wallet.Wallet, primaryPaused bool, defaultSchemes []s
 		return r, err
 	}
 	r.BindData = transactionsDefinition.BuildRecoveryBindOptData(w.MainAddress, tag, payload)
-	r.BindKey = common.RecoveryBindKey(w.MainAddress, tag)
+	r.BindKey = common.RecoveryBindKey(w.MainAddress, tag, payload)
 	return r, nil
 }
 

@@ -251,7 +251,7 @@ func ShowSendPage() *widgets.QTabWidget {
 			if am == 0 && len(scData) == 0 && lam == 0 && !signingPaused &&
 				bytes.Equal(ar.GetBytes(), MainWallet.MainAddress.GetBytes()) {
 				if spare, rec, ok := openingCommitmentsGUI(registerPrimary); ok {
-					ar, scData = spare, rec
+					ar, scData = transactionsDefinition.CommitmentRegistration(spare, rec)
 				}
 			}
 		} else {
@@ -302,6 +302,13 @@ func ShowSendPage() *widgets.QTabWidget {
 		}
 		tx.GasUsage = tx.GasUsageEstimate()
 		tx.Height = st.Height
+		// An escrow or multisig sender pays for the pool slot (F-POOL-01).
+		clientrpc.InRPC <- SignMessage(append([]byte("ACCT"), tx.TxParam.Sender.GetBytes()...))
+		if err := transactionsDefinition.ApplyHoldFeeFromAccount(&tx, <-clientrpc.OutRPC); err != nil {
+			v = fmt.Sprint(err)
+			info = &v
+			return
+		}
 		err = tx.CalcHashAndSet()
 		if err != nil {
 			v = fmt.Sprint("can not generate hash transaction: ", err)

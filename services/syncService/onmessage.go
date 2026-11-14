@@ -36,6 +36,20 @@ func clampHeaderSpan(bHeight, eHeight int64) (int64, int64) {
 	return bHeight, eHeight
 }
 
+// batchIndicesConsecutive reports whether the heights of a header batch form
+// one ascending run without gaps or repeats, as an honest peer sends them.
+func batchIndicesConsecutive(indices []int64) bool {
+	if len(indices) == 0 {
+		return false
+	}
+	for i := 1; i < len(indices); i++ {
+		if indices[i] != indices[i-1]+1 {
+			return false
+		}
+	}
+	return true
+}
+
 var (
 	connectingPeers      = make(map[[6]byte]bool)
 	connectingPeersMutex sync.Mutex
@@ -726,10 +740,25 @@ func OnMessage(addr [4]byte, m []byte) {
 			}
 			return
 		}
+		// F-SYNC-01: a batch is one run of consecutive heights. The passes
+		// below decide by height what was verified, so a repeated or
+		// unordered index let a block that failed verification be applied.
+		if len(indices) > 0 && len(indices) == len(blcks) && !batchIndicesConsecutive(indices) {
+			logger.GetLogger().Printf("sh from %s lists heights out of order - dropping the batch", tcpip.PeerLabel(addr))
+			tcpip.ReduceAndCheckIfBanIP(addr)
+			return
+		}
 		// The answer to a fork-resolution request lies below our tip by design:
 		// it is how the fork point is located (audit F3-03). Such a request is
 		// sent only after this peer served blocks above our height, so letting
 		// it through does not trade our chain for a shorter one.
+		// Equal height: the better of two competing tips wins (F-CONS-01).
+		if indices[len(indices)-1] == h && !forkAnswer && betterTipAtOurHeight(blcks[len(blcks)-1], h) {
+			logger.GetLogger().Printf("block %d from %s wins over ours at equal height - rewinding one block to take it",
+				h, tcpip.PeerLabel(addr))
+			services.ResetAccountsAndBlocksSync(h - 1)
+			return
+		}
 		if indices[len(indices)-1] <= h && !forkAnswer {
 			logger.GetLogger().Println("shorter other chain")
 			// Peer claimed higher but sent lower blocks - suspicious

@@ -42,7 +42,7 @@ func registerTestKey(t *testing.T, identityByte, keyByte byte, height int64) (co
 	if err := StorePubKeyInPatriciaTrie(pk); err != nil {
 		t.Fatalf("StorePubKeyInPatriciaTrie: %v", err)
 	}
-	journalPubKeyRegistration(height, derived, identity)
+	journalPubKeyRegistration(height, derived, identity, nil)
 	return identity, derived
 }
 

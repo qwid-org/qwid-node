@@ -176,37 +176,54 @@ func sigNamesAtProofHeight(height int64, newBlock, lastBlock Block) (string, str
 	return lastBlock.GetSigNames()
 }
 
-// historicalProofPauseFlags returns the pause flags used when re-verifying an
-// oracle proof that is ALREADY embedded in a block: none, for either scheme.
+// proofPauseFlags are the pause flags an embedded oracle proof is verified
+// under: the PRIMARY slot is paused when the containing block's parent pauses
+// it, and the secondary slot never is.
 //
-// Pausing is a forward-looking policy — it governs what may enter the system
-// from now on, not a claim that signatures already committed to the chain have
-// become forgeries. Applying it here re-judges history by today's rules: when
-// the spare scheme became paused by default, every proof signed under it (about
-// half of them, because the signer was chosen at random while both schemes were
-// live) stopped verifying, and the chain stopped at the first block carrying
-// one.
+// A primary pause is the chain's verdict that the scheme may be broken
+// (schemeBroken). Verifying proofs with no pause gate at all let whoever can
+// forge that scheme - and may produce a block - fabricate the nonces of the
+// other validators after the pause: two thirds of the stake "voting" for any
+// scheme change, un-pausing the broken scheme included, or any price (audit
+// 2026-11-12 F-CONS-06). The parent's own header is read, so the verdict is
+// the same on every node and in every mode, and a block that pauses the
+// primary still counts the proofs signed before it.
 //
-// The scheme NAMES still come from the configuration in force at the proof's
-// own height, so a proof must still verify under a scheme the chain actually
-// had. What is dropped is only the liveness gate.
-//
-// The trade-off is deliberate and worth stating: if a scheme was paused because
-// it is broken, an attacker who can forge its signatures can forge a proof at a
-// historical height. Guarding against that requires rejecting the history
-// itself, which no running chain can do.
-func historicalProofPauseFlags() (bool, bool) {
-	return false, false
+// The secondary is not gated: its liveness is derived from the primary's
+// (GetSigNames), and headers from the era when both schemes were live would
+// read as a paused spare, re-judging the proofs of that era by today's rule -
+// the chain once stopped exactly so.
+func proofPauseFlags(lastBlock Block) (bool, bool) {
+	enc1, err := FromBytesToEncryptionConfig(lastBlock.GetHeader().Encryption1, true)
+	if err != nil {
+		return false, false
+	}
+	return enc1.IsPaused, false
 }
 
-// AuthenticateOracleProofs verifies that the oracle values embedded in a block
-// are each backed by a signature-verified, fresh oracle nonce transaction.
-//
-// Each proof is verified with the signature-scheme configuration in force at
-// the proof's own signing height (taken from block headers), not the node's
-// current global config: around a scheme change a block legitimately embeds
-// proofs signed under the previous scheme, and a node that has already adopted
-// the new scheme would otherwise be permanently unable to verify that block.
+// proofCounts reports whether a decoded proof survives the pause gate of a
+// block built on lastBlock.
+func proofCounts(tx *transactionsDefinition.Transaction, lastBlock Block) bool {
+	primaryPaused, _ := proofPauseFlags(lastBlock)
+	sig := tx.GetSignature().GetBytes()
+	return !(primaryPaused && len(sig) > 0 && sig[0] == 0)
+}
+
+// filterPausedProofs drops the proofs a block built on lastBlock must not
+// carry under proofPauseFlags, so a producer never builds a block validators
+// reject.
+func filterPausedProofs(proofs [][]byte, lastBlock Block) [][]byte {
+	out := make([][]byte, 0, len(proofs))
+	for _, pb := range proofs {
+		tx, err := decodeProof(pb)
+		if err != nil || !proofCounts(tx, lastBlock) {
+			continue
+		}
+		out = append(out, pb)
+	}
+	return out
+}
+
 func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 	blockHeight := newBlock.GetHeader().Height
 	// Resolving a config re-validates the scheme against liboqs (a keypair
@@ -232,7 +249,7 @@ func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 			names = sigNames{sigName, sigName2, isPaused, isPaused2}
 			cache[decoded.Height] = names
 		}
-		isPaused, isPaused2 := historicalProofPauseFlags()
+		isPaused, isPaused2 := proofPauseFlags(lastBlock)
 		if !decoded.VerifyNonce(names.sigName, names.sigName2, isPaused, isPaused2) {
 			return nil, fmt.Errorf("oracle proof signature verification failed")
 		}
@@ -286,8 +303,8 @@ func AuthorizeOracleProofSigners(proofs [][]byte) error {
 // meanwhile, the block carrying it is rejected. Every candidate then carries
 // the same stale proof, no block is accepted, the height never moves on, and
 // the proof never ages out - the chain halts for good.
-func AuthorizedOracleProofs(proofs [][]byte) [][]byte {
-	return filterAuthorizedOracleProofs(proofs, decodeProof, account.IsTop128StakingNode)
+func AuthorizedOracleProofs(proofs [][]byte, lastBlock Block) [][]byte {
+	return filterAuthorizedOracleProofs(filterPausedProofs(proofs, lastBlock), decodeProof, account.IsTop128StakingNode)
 }
 
 func filterAuthorizedOracleProofs(proofs [][]byte, decode verifiedDecoder, authorize oracleProofAuthorizer) [][]byte {

@@ -2,9 +2,9 @@
 
 ![CI](https://github.com/qwid-org/qwid-node/actions/workflows/ci.yml/badge.svg)
 
-Works for Ubuntu 24.04 and Go 1.25.13. The build toolchain is pinned in `go.mod`
-(`toolchain go1.25.13`; the language floor stays at 1.23.6), so with the default
-`GOTOOLCHAIN=auto` any installed Go ≥ 1.23.6 fetches 1.25.13 automatically when
+Works for Ubuntu 24.04 and Go 1.26.11. The build toolchain is pinned in `go.mod`
+(`toolchain go1.26.11`; the language floor stays at 1.23.6), so with the default
+`GOTOOLCHAIN=auto` any installed Go ≥ 1.23.6 fetches 1.26.11 automatically when
 building.
 
 Only one network interface should be with external public IP
@@ -45,10 +45,10 @@ Compile OQS with `-DBUILD_SHARED_LIBS=ON` and install
     sudo ninja install
     cd ~/
 
-Install Go 1.25.13 if not installed (matches the toolchain pinned in `go.mod`):
+Install Go 1.26.11 if not installed (matches the toolchain pinned in `go.mod`):
 
-    wget https://go.dev/dl/go1.25.13.linux-amd64.tar.gz
-    sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.13.linux-amd64.tar.gz
+    wget https://go.dev/dl/go1.26.11.linux-amd64.tar.gz
+    sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.26.11.linux-amd64.tar.gz
 
 Add on the end of ~/.bashrc
 

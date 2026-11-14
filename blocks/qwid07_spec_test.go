@@ -6,6 +6,7 @@ package blocks
 // transaction processing, EVM execution, or persistent public-key writes.
 
 import (
+	"github.com/qwid-org/qwid-node/pubkeys"
 	"strings"
 	"testing"
 
@@ -18,9 +19,12 @@ func TestQWID07_HeaderVerifiedBeforeExpensiveWork(t *testing.T) {
 	withBalanceTestDB(t)
 	initTestAccounts()
 	initTestStaking()
+	saved := pubkeys.GlobalMerkleTree
+	pubkeys.InitPermanentTrie()
+	t.Cleanup(func() { pubkeys.GlobalMerkleTree = saved })
 
-	// buildMinimalBlock carries a garbage header signature (SignatureMessage
-	// does not match the header bytes), so verifyBlockHeaderSignature fails.
+	// buildMinimalBlock carries a garbage header signature from an operator
+	// with no registered key, so verifyBlockHeaderSignature fails.
 	newBlock := buildMinimalBlock()
 	newBlock.BaseBlock.BaseHeader.Height = 42
 	lastBlock := buildMinimalBlock()
