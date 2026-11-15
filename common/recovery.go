@@ -13,12 +13,19 @@ import (
 // protocol rests on Blake2b alone - no signature scheme, which is the point:
 // it must still work when every signature scheme an identity holds is broken.
 const (
-	RecoveryCommitMaturityBlocks int64 = 60480  // ~1 week: a new commitment is effective after this
-	RecoveryBindDelayBlocks      int64 = 360    // ~1 h: minimum age of a bind before its reveal
-	RecoveryBindExpiryBlocks     int64 = 120960 // ~2 weeks: binds older than this are pruned
-	RecoverySecretLength               = 32
-	RecoveryBindOptDataLength          = AddressLength + 32 + 32
-	RecoveryRevealOptDataLength        = RecoverySecretLength + AddressLength
+	RecoveryCommitMaturityBlocks int64 = 60480 // ~1 week: a new commitment is effective after this
+	// SecondFactorKeyAgeBlocks: a spare key registered on another key's word
+	// (voidable) serves as a validator's second signature only this long after
+	// its registration (audit 2026-11-14). An attacker who broke the primary
+	// can attach its own spare to a validator; it must keep the break hidden
+	// this long before that spare counts, and a pause within the maturity
+	// period voids it anyway.
+	SecondFactorKeyAgeBlocks    int64 = 60480
+	RecoveryBindDelayBlocks     int64 = 360    // ~1 h: minimum age of a bind before its reveal
+	RecoveryBindExpiryBlocks    int64 = 120960 // ~2 weeks: binds older than this are pruned
+	RecoverySecretLength              = 32
+	RecoveryBindOptDataLength         = AddressLength + 32 + 32
+	RecoveryRevealOptDataLength       = RecoverySecretLength + AddressLength
 )
 
 // Reserved recipients. Not delegated-format (byte 2.. is non-zero), so they

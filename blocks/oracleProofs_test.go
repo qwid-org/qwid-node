@@ -122,7 +122,7 @@ func TestAuthenticateOracleProofsAcceptsFreshSignedProofs(t *testing.T) {
 	proofs := [][]byte{{1}, {2}}
 	priceData := append(oracleTriple(2, 10, 100), oracleTriple(5, 10, 200)...)
 
-	err := authenticateOracleProofs(12, proofs, priceData, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(12, proofs, priceData, decoderFor(txs, 0xff), nil)
 	assert.NoError(t, err)
 }
 
@@ -136,7 +136,7 @@ func TestAuthenticateOracleProofsRejectsStaleProof(t *testing.T) {
 	proofs := [][]byte{{1}}
 	priceData := oracleTriple(2, 1, 100)
 
-	err := authenticateOracleProofs(1+common.OraclesHeightDistance+5, proofs, priceData, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(1+common.OraclesHeightDistance+5, proofs, priceData, decoderFor(txs, 0xff), nil)
 	assert.Error(t, err)
 }
 
@@ -151,7 +151,7 @@ func TestAuthenticateOracleProofsRejectsDuplicateID(t *testing.T) {
 	proofs := [][]byte{{1}, {2}}
 	priceData := oracleTriple(2, 10, 100)
 
-	err := authenticateOracleProofs(12, proofs, priceData, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(12, proofs, priceData, decoderFor(txs, 0xff), nil)
 	assert.Error(t, err)
 }
 
@@ -161,7 +161,7 @@ func TestAuthenticateOracleProofsPropagatesDecodeError(t *testing.T) {
 
 	txs := map[byte]*transactionsDefinition.Transaction{}
 	proofs := [][]byte{{0xff}} // decoder fails on 0xff
-	err := authenticateOracleProofs(12, proofs, nil, decoderFor(txs, 0xff))
+	err := authenticateOracleProofs(12, proofs, nil, decoderFor(txs, 0xff), nil)
 	assert.Error(t, err)
 }
 

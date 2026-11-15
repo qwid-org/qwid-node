@@ -968,8 +968,15 @@ func nonceShapeError(tx Transaction) error {
 	if _, rest, err = common.BytesWithLenToBytes(rest); err != nil {
 		return fmt.Errorf("nonce vote 2: %w", err)
 	}
+	if len(rest) == 0 {
+		return nil
+	}
+	// The optional second signature (audit 2026-11-14).
+	if _, rest, err = common.BytesWithLenToBytes(rest); err != nil {
+		return fmt.Errorf("nonce second signature: %w", err)
+	}
 	if len(rest) != 0 {
-		return fmt.Errorf("%d bytes after the nonce's votes", len(rest))
+		return fmt.Errorf("%d bytes after the nonce's second signature", len(rest))
 	}
 	return nil
 }

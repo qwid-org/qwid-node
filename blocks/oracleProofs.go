@@ -7,9 +7,12 @@ import (
 
 	"github.com/qwid-org/qwid-node/account"
 	"github.com/qwid-org/qwid-node/common"
+	"github.com/qwid-org/qwid-node/crypto/oqs"
 	"github.com/qwid-org/qwid-node/logger"
 	"github.com/qwid-org/qwid-node/oracles"
+	"github.com/qwid-org/qwid-node/pubkeys"
 	"github.com/qwid-org/qwid-node/transactionsDefinition"
+	"github.com/qwid-org/qwid-node/wallet"
 )
 
 // oracleSubmission is the authenticated content of one validator's oracle nonce
@@ -55,8 +58,11 @@ func extractOracleSubmission(tx *transactionsDefinition.Transaction) (uint8, ora
 // signatures) is injected. It builds the set of authenticated submissions from
 // the proofs and then confirms every embedded price triple is backed by one of
 // them.
-func authenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData []byte, decode verifiedDecoder) error {
+// counts says whether a proof's price counts (proofCounts); one that does not
+// stays embedded but is left out of the price data. nil counts every proof.
+func authenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData []byte, decode verifiedDecoder, counts func(*transactionsDefinition.Transaction) bool) error {
 	subs := make(map[uint8]oracleSubmission)
+	seen := make(map[uint8]bool)
 	for _, pb := range proofs {
 		tx, err := decode(pb)
 		if err != nil {
@@ -71,8 +77,12 @@ func authenticateOracleProofs(blockHeight int64, proofs [][]byte, priceData []by
 		if err != nil {
 			return err
 		}
-		if _, dup := subs[id]; dup {
+		if seen[id] {
 			return fmt.Errorf("duplicate oracle proof for delegated id %d", id)
+		}
+		seen[id] = true
+		if counts != nil && !counts(tx) {
+			continue // embedded, but its price does not count (second signature)
 		}
 		subs[id] = sub
 	}
@@ -201,12 +211,55 @@ func proofPauseFlags(lastBlock Block) (bool, bool) {
 	return enc1.IsPaused, false
 }
 
-// proofCounts reports whether a decoded proof survives the pause gate of a
+// proofCounts reports whether a decoded proof's vote and price count in a
 // block built on lastBlock.
+//
+//   - Pause gate (F-CONS-06): with the primary paused, a primary-signed proof
+//     does not count.
+//   - Second signature (audit 2026-11-14): with the primary live, a validator
+//     holding an eligible spare key (pubkeys.SecondFactorKeysAsOf) counts only
+//     when its nonce is signed with the primary AND carries a second
+//     signature by one of those spare keys. A validator without one counts
+//     with its single signature - after a replacement of the spare scheme
+//     nobody holds an eligible key for a while, and the chain must keep its
+//     price and its votes.
+//
+// A proof that does not count leaves its block valid; it is left out of the
+// price and the vote tally.
 func proofCounts(tx *transactionsDefinition.Transaction, lastBlock Block) bool {
 	primaryPaused, _ := proofPauseFlags(lastBlock)
 	sig := tx.GetSignature().GetBytes()
-	return !(primaryPaused && len(sig) > 0 && sig[0] == 0)
+	if len(sig) == 0 {
+		return false
+	}
+	if primaryPaused {
+		return sig[0] != 0
+	}
+	sigName, sigName2, _, _, err := lastBlock.GetSigNames()
+	if err != nil {
+		return false
+	}
+	len2, err := oqs.PubKeyLength(sigName2)
+	if err != nil {
+		return true // no known spare scheme: no second factor to require
+	}
+	eligible := pubkeys.SecondFactorKeysAsOf(tx.GetSenderAddress(), false, len2, lastBlock.GetHeader().Height)
+	if len(eligible) == 0 {
+		return true
+	}
+	if sig[0] != 0 {
+		return false
+	}
+	sig2, msg, ok := transactionsDefinition.NonceSecondSignature(*tx)
+	if !ok || len(sig2) < 2 || sig2[0] != 1 {
+		return false
+	}
+	for _, pk := range eligible {
+		if wallet.Verify(msg, sig2, pk.GetBytes(), sigName, sigName2, false, false) {
+			return true
+		}
+	}
+	return false
 }
 
 // filterPausedProofs drops the proofs a block built on lastBlock must not
@@ -225,6 +278,9 @@ func filterPausedProofs(proofs [][]byte, lastBlock Block) [][]byte {
 }
 
 func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
+	if err := oracleProofBudgetError(newBlock.BaseBlock.OracleProofs); err != nil {
+		return err
+	}
 	blockHeight := newBlock.GetHeader().Height
 	// Resolving a config re-validates the scheme against liboqs (a keypair
 	// generation), so cache it per height for the duration of this block check —
@@ -234,6 +290,7 @@ func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 		isPaused, isPaused2 bool
 	}
 	cache := map[int64]sigNames{}
+	counts := func(tx *transactionsDefinition.Transaction) bool { return proofCounts(tx, lastBlock) }
 	return authenticateOracleProofs(blockHeight, newBlock.BaseBlock.OracleProofs, newBlock.BaseBlock.PriceOracleData, func(pb []byte) (*transactionsDefinition.Transaction, error) {
 		var tx transactionsDefinition.Transaction
 		decoded, _, err := tx.GetFromBytes(pb)
@@ -254,7 +311,7 @@ func AuthenticateOracleProofs(newBlock, lastBlock Block) error {
 			return nil, fmt.Errorf("oracle proof signature verification failed")
 		}
 		return &decoded, nil
-	})
+	}, counts)
 }
 
 // authorizeOracleProofSigners binds every delegated id named by a proof to the
@@ -304,7 +361,42 @@ func AuthorizeOracleProofSigners(proofs [][]byte) error {
 // the same stale proof, no block is accepted, the height never moves on, and
 // the proof never ages out - the chain halts for good.
 func AuthorizedOracleProofs(proofs [][]byte, lastBlock Block) [][]byte {
-	return filterAuthorizedOracleProofs(filterPausedProofs(proofs, lastBlock), decodeProof, account.IsTop128StakingNode)
+	return FitOracleProofs(filterAuthorizedOracleProofs(filterPausedProofs(proofs, lastBlock), decodeProof, account.IsTop128StakingNode))
+}
+
+// FitOracleProofs keeps proofs, in order, while their encoding fits
+// common.MaxOracleProofBudgetBytes, so the block carrying them fits the nonce
+// topic it is broadcast on (common.MaxMsgSizeNonce). Leaving a proof out is
+// always allowed: the price data lists exactly the embedded proofs.
+func FitOracleProofs(proofs [][]byte) [][]byte {
+	used := int64(4) // the count prefix
+	out := make([][]byte, 0, len(proofs))
+	for _, pb := range proofs {
+		need := int64(len(pb)) + 4
+		if used+need > int64(common.MaxOracleProofBudgetBytes) {
+			logger.GetLogger().Println("leaving out an oracle proof: the block's proof budget is full")
+			continue
+		}
+		used += need
+		out = append(out, pb)
+	}
+	return out
+}
+
+// oracleProofBudgetError is the consensus rule behind FitOracleProofs (audit
+// 2026-11-15): a block's encoded oracle proofs - count prefix and each
+// length-prefixed proof - must fit common.MaxOracleProofBudgetBytes, so every
+// valid block fits the nonce topic it is broadcast on. Checked before any
+// proof is decoded or verified.
+func oracleProofBudgetError(proofs [][]byte) error {
+	used := int64(4)
+	for _, pb := range proofs {
+		used += int64(len(pb)) + 4
+	}
+	if used > int64(common.MaxOracleProofBudgetBytes) {
+		return fmt.Errorf("oracle proofs take %d bytes, over the block's budget of %d", used, common.MaxOracleProofBudgetBytes)
+	}
+	return nil
 }
 
 func filterAuthorizedOracleProofs(proofs [][]byte, decode verifiedDecoder, authorize oracleProofAuthorizer) [][]byte {

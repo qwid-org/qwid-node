@@ -46,3 +46,36 @@ func TestNonceShape(t *testing.T) {
 		}
 	}
 }
+
+// The nonce's second signature (audit 2026-11-14) rides in a third
+// length-prefixed field; it signs the nonce with that field empty, under its
+// own domain, so it is no signature of any transaction.
+func TestNonceSecondSignatureField(t *testing.T) {
+	tx := canonicalNonce()
+	tx.TxData.OptData = append(tx.TxData.OptData, common.BytesToLenAndBytes(nil)...)
+	if err := nonceShapeError(tx); err != nil {
+		t.Fatalf("a nonce with an empty second-signature field is refused: %v", err)
+	}
+	msg, err := NonceSecondSignatureMessage(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetNonceSecondSignature(&tx, []byte{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := nonceShapeError(tx); err != nil {
+		t.Fatalf("a nonce carrying a second signature is refused: %v", err)
+	}
+	sig, msg2, ok := NonceSecondSignature(tx)
+	if !ok || string(sig) != string([]byte{1, 2, 3}) || string(msg2) != string(msg) {
+		t.Fatal("the second signature or the message it signs did not round-trip")
+	}
+	_ = tx.CalcHashAndSet()
+	if string(msg) == string(tx.Hash.GetBytes()) {
+		t.Fatal("the second signature signs the transaction hash itself")
+	}
+	tx.TxData.OptData = append(tx.TxData.OptData, common.BytesToLenAndBytes(nil)...)
+	if nonceShapeError(tx) == nil {
+		t.Fatal("a fourth field is accepted")
+	}
+}

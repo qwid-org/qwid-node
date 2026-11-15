@@ -49,14 +49,14 @@ func TestEncryptionVoteTallyCountsOnlyMatchingVotes(t *testing.T) {
 	}
 	stake := map[int]int64{1: 10, 2: 20, 3: 40, 4: 80}
 	got, err := tallyEncryptionVotes([][]byte{{1}, {2}, {3}, {4}}, true, x, decoderFor(txs, 0),
-		func(id int) int64 { return stake[id] })
+		func(id int) int64 { return stake[id] }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != 30 {
 		t.Fatalf("tally = %d, want 30", got)
 	}
-	if _, err := tallyEncryptionVotes([][]byte{{9}}, true, x, decoderFor(txs, 9), nil); err == nil {
+	if _, err := tallyEncryptionVotes([][]byte{{9}}, true, x, decoderFor(txs, 9), nil, nil); err == nil {
 		t.Fatal("an undecodable proof must fail the tally")
 	}
 }
@@ -132,10 +132,10 @@ func TestEncryptionChangeAuthorisedOnlyByBlockProofs(t *testing.T) {
 		2: nonceTxWithVotes(2, 100, nil, nil),
 	}
 	stake := func(id int) int64 { return map[int]int64{1: 40, 2: 60}[id] }
-	if err := encryptionChangeAuthorised([][]byte{{1}, {2}}, parent, pause, true, 100, 100, decoderFor(txs, 0), stake); err != nil {
+	if err := encryptionChangeAuthorised([][]byte{{1}, {2}}, parent, pause, true, 100, 100, decoderFor(txs, 0), stake, nil); err != nil {
 		t.Fatalf("40%% of stake may pause: %v", err)
 	}
-	if err := encryptionChangeAuthorised([][]byte{{2}}, parent, pause, true, 100, 100, decoderFor(txs, 0), stake); err == nil {
+	if err := encryptionChangeAuthorised([][]byte{{2}}, parent, pause, true, 100, 100, decoderFor(txs, 0), stake, nil); err == nil {
 		t.Fatal("a change without votes in the block must be rejected")
 	}
 }
