@@ -44,7 +44,9 @@ func proofVotes(tx *transactionsDefinition.Transaction) (vote1, vote2 []byte, er
 
 // tallyEncryptionVotes sums the stake of the proofs voting for exactly want
 // in the given slot. A proof without readable vote data simply does not vote.
-func tallyEncryptionVotes(proofs [][]byte, primary bool, want []byte, decode verifiedDecoder, stakeOf func(id int) int64) (int64, error) {
+// counts says whether a proof's vote counts (proofCounts: pause gate, second
+// signature); nil counts every proof.
+func tallyEncryptionVotes(proofs [][]byte, primary bool, want []byte, decode verifiedDecoder, stakeOf func(id int) int64, counts func(*transactionsDefinition.Transaction) bool) (int64, error) {
 	staked := int64(0)
 	seen := map[uint8]bool{}
 	for _, pb := range proofs {
@@ -60,6 +62,9 @@ func tallyEncryptionVotes(proofs [][]byte, primary bool, want []byte, decode ver
 			continue
 		}
 		seen[id] = true
+		if counts != nil && !counts(tx) {
+			continue
+		}
 		v1, v2, err := proofVotes(tx)
 		if err != nil {
 			continue
@@ -146,7 +151,7 @@ func checkEncryptionChangeShape(newBytes []byte, parent Block, primary bool) (bo
 	return true, nil
 }
 
-func encryptionChangeAuthorised(proofs [][]byte, parent Block, want []byte, primary bool, height int64, total int64, decode verifiedDecoder, stakeOf func(id int) int64) error {
+func encryptionChangeAuthorised(proofs [][]byte, parent Block, want []byte, primary bool, height int64, total int64, decode verifiedDecoder, stakeOf func(id int) int64, counts func(*transactionsDefinition.Transaction) bool) error {
 	next, err := oqs.FromBytesToEncryptionConfig(want)
 	if err != nil {
 		return err
@@ -155,7 +160,7 @@ func encryptionChangeAuthorised(proofs [][]byte, parent Block, want []byte, prim
 	if err != nil {
 		return err
 	}
-	staked, err := tallyEncryptionVotes(proofs, primary, want, decode, stakeOf)
+	staked, err := tallyEncryptionVotes(proofs, primary, want, decode, stakeOf, counts)
 	if err != nil {
 		return err
 	}
@@ -266,7 +271,8 @@ func VerifyEncryptionVotes(newBlock, lastBlock Block) error {
 			continue
 		}
 		if err := encryptionChangeAuthorised(newBlock.BaseBlock.OracleProofs, lastBlock, want, primary,
-			newBlock.GetHeader().Height, account.GetStakedInEligibleDelegatedAccounts(), decodeProof, stakeOfDelegated); err != nil {
+			newBlock.GetHeader().Height, account.GetStakedInEligibleDelegatedAccounts(), decodeProof, stakeOfDelegated,
+			func(tx *transactionsDefinition.Transaction) bool { return proofCounts(tx, lastBlock) }); err != nil {
 			return err
 		}
 		if err := checkUnpauseKeyQuorum(want, lastBlock, primary, account.GetStakedInEligibleDelegatedAccounts(),
@@ -304,7 +310,8 @@ func EncryptionChangeRefusal(proofs [][]byte, lastBlock Block, want []byte, prim
 	}
 	total := account.GetStakedInEligibleDelegatedAccounts()
 	if err := encryptionChangeAuthorised(proofs, lastBlock, want, primary, height,
-		total, decodeProof, stakeOfDelegated); err != nil {
+		total, decodeProof, stakeOfDelegated,
+		func(tx *transactionsDefinition.Transaction) bool { return proofCounts(tx, lastBlock) }); err != nil {
 		return err
 	}
 	return checkUnpauseKeyQuorum(want, lastBlock, primary, total,

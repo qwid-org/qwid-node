@@ -140,7 +140,17 @@ var (
 	// broadcast was rejected by every peer as over-long and the chain stopped
 	// advancing. Derived from the block limits rather than hardcoded so that
 	// raising MaxTransactionsPerBlock cannot silently reintroduce the stall.
-	MaxMsgSizeNonce int32 = int32(MaxTransactionsPerBlock)*int32(HashLength) + MaxMsgSizeSmall
+	//
+	// The same held for the embedded oracle proofs (audit 2026-11-15): up to
+	// one validator nonce per delegated account, ~2 KB each with the second
+	// signature, so a full block ran to ~0.9 MB against a 225 KB cap. The
+	// proofs now have their own budget, MaxOracleProofBudgetBytes, which
+	// producers keep to (blocks.FitOracleProofs).
+	MaxMsgSizeNonce int32 = int32(MaxTransactionsPerBlock)*int32(HashLength) + MaxOracleProofBudgetBytes + MaxMsgSizeSmall
+	// MaxOracleProofBudgetBytes: the encoded oracle proofs one block may
+	// broadcast - 16 KB on average for each of 255 delegated accounts, room
+	// for signature schemes far larger than Falcon and MAYO.
+	MaxOracleProofBudgetBytes int32 = 4 << 20
 	MaxMsgSizeSync  int32 = 16777216 // 16MB  — Sync (block-header batches, ~3.2MB real max)
 	// MaxTxMessageBytes is the byte budget of one transaction-topic message
 	// (tx gossip, st and bx answers): senders split longer batches. One

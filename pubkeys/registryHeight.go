@@ -370,3 +370,29 @@ func HasOperatorKeysAsOf(mainAddress common.Address, asOf int64) bool {
 	}
 	return hasPrimary && hasSecondary
 }
+
+// SecondFactorKeysAsOf returns the keys of mainAddress that may make its
+// second signature as of asOf (audit 2026-11-14): in the given slot and of the
+// given length, in force, and either not voidable - the key deriving the
+// identity, a committed spare, a recovered key - or registered at least
+// common.SecondFactorKeyAgeBlocks before asOf.
+func SecondFactorKeysAsOf(mainAddress common.Address, primary bool, length int, asOf int64) []common.PubKey {
+	addrs, err := LoadAddressesAsOf(mainAddress, asOf)
+	if err != nil {
+		return nil
+	}
+	var out []common.PubKey
+	for _, a := range addrs {
+		if a.Primary != primary {
+			continue
+		}
+		h, voidable := registration(a.GetBytes())
+		if voidable && h > asOf-common.SecondFactorKeyAgeBlocks {
+			continue
+		}
+		if pk, err := LoadPubKey(a.GetBytes()); err == nil && len(pk.GetBytes()) == length {
+			out = append(out, pk)
+		}
+	}
+	return out
+}

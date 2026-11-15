@@ -222,7 +222,11 @@ func parentWithPrimaryPaused(t *testing.T, height int64, paused bool) Block {
 func TestPrimarySignedProofDoesNotCountAfterAPause(t *testing.T) {
 	k := registeredStageBKey(t)
 	fund(k.addr)
-	proof := signedNonce(t, k, 100)
+	// Dual-signed (audit 2026-11-14): k holds an eligible spare, so with the
+	// primary live a nonce signed with the primary alone would not count anyway.
+	tx := pricedNonce(t, k, 100, 0)
+	signSecond(t, k, *k.spare, &tx)
+	proof := tx.GetBytes()
 	for _, tc := range []struct {
 		paused bool
 		ok     bool

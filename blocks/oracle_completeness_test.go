@@ -20,10 +20,10 @@ func TestOracleDataMustCoverEveryEmbeddedProof(t *testing.T) {
 	proofs := [][]byte{{1}, {2}}
 	full := append(oracleTriple(2, 10, 100), oracleTriple(5, 10, 200)...)
 
-	if err := authenticateOracleProofs(12, proofs, oracleTriple(2, 10, 100), decoderFor(txs, 0xff)); err == nil {
+	if err := authenticateOracleProofs(12, proofs, oracleTriple(2, 10, 100), decoderFor(txs, 0xff), nil); err == nil {
 		t.Fatal("a price left out for an embedded proof must be rejected")
 	}
-	if err := authenticateOracleProofs(12, proofs, full, decoderFor(txs, 0xff)); err != nil {
+	if err := authenticateOracleProofs(12, proofs, full, decoderFor(txs, 0xff), nil); err != nil {
 		t.Fatalf("complete data: %v", err)
 	}
 }

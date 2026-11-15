@@ -138,6 +138,8 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 	encryptionMutex.Lock()
 	optData = append(optData, EncryptionOptData...)
 	encryptionMutex.Unlock()
+	// Room for the second signature (audit 2026-11-14), filled below.
+	optData = append(optData, common.BytesToLenAndBytes(nil)...)
 
 	// Nonce transactions never carry a pubkey. Key registration happens through
 	// exactly one channel: a transaction the operator sends MANUALLY with the
@@ -172,6 +174,17 @@ func generateNonceMsg(topic [2]byte) (message.TransactionsMessage, error) {
 		Height:    h + 1,
 		GasPrice:  0,
 		GasUsage:  0,
+	}
+
+	// With the primary live, the spare signs the nonce too: a validator holding
+	// an eligible spare key counts (vote and price) only with both signatures,
+	// so breaking one scheme no longer forges its vote (blocks.proofCounts).
+	if primary && !common.IsPaused() && ownKeyRegistered(sender, false, w.Account2.PublicKey.GetBytes()) {
+		if msg, merr := transactionsDefinition.NonceSecondSignatureMessage(nonceTransaction); merr == nil {
+			if sig2, serr := w.Sign(msg, false); serr == nil {
+				_ = transactionsDefinition.SetNonceSecondSignature(&nonceTransaction, sig2.GetBytes())
+			}
+		}
 	}
 
 	err = (&nonceTransaction).CalcHashAndSet()
@@ -434,4 +447,25 @@ func StartSubscribingNonceMsgSelf() {
 			time.Sleep(time.Millisecond)
 		}
 	}
+}
+
+// ownKeyRegistered reports whether own - this node's key of the given slot -
+// is registered to addr and in force.
+func ownKeyRegistered(addr common.Address, primary bool, own []byte) bool {
+	if len(own) == 0 {
+		return false
+	}
+	addrs, err := pubkeys.LoadAddressesAsOf(addr, pubkeys.NoHeightLimit)
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if a.Primary != primary {
+			continue
+		}
+		if pk, err := pubkeys.LoadPubKey(a.GetBytes()); err == nil && bytes.Equal(pk.GetBytes(), own) {
+			return true
+		}
+	}
+	return false
 }
